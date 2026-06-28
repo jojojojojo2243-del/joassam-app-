@@ -5834,8 +5834,14 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
           )}
           <input placeholder="배송메시지 (선택)" value={form.deliveryMessage} onChange={(e) => setForm({ ...form, deliveryMessage: e.target.value })} style={{ ...inputStyle(), marginBottom: 8 }} />
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
-            <input type="date" placeholder="예약발송일" value={form.reserveDate} onChange={(e) => setForm({ ...form, reserveDate: e.target.value })} style={inputStyle()} />
-            <input placeholder="박스부피" value={form.boxVolume} onChange={(e) => setForm({ ...form, boxVolume: e.target.value })} style={inputStyle()} />
+            <div>
+              <label style={{ fontSize: 11, color: "#5F5E5A", fontWeight: 500, display: "block", marginBottom: 4 }}>예약발송일 (선택)</label>
+              <input type="date" value={form.reserveDate} onChange={(e) => setForm({ ...form, reserveDate: e.target.value })} style={{ ...inputStyle(), color: "#1B2430" }} />
+            </div>
+            <div>
+              <label style={{ fontSize: 11, color: "#5F5E5A", fontWeight: 500, display: "block", marginBottom: 4 }}>박스부피 (선택)</label>
+              <input placeholder="예: 5" value={form.boxVolume} onChange={(e) => setForm({ ...form, boxVolume: e.target.value })} style={inputStyle()} />
+            </div>
           </div>
           <input placeholder="메모" value={form.memo} onChange={(e) => setForm({ ...form, memo: e.target.value })} style={{ ...inputStyle(), marginBottom: 14 }} />
 
@@ -6241,8 +6247,14 @@ function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, ch
       <input placeholder="문 앞에 놓아주세요 등" value={draft.deliveryMessage} onChange={(e) => setDraft({ ...draft, deliveryMessage: e.target.value })} style={{ ...inputStyle(), marginTop: 6, marginBottom: 12 }} />
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 16 }}>
-        <input type="date" placeholder="예약발송일" value={draft.reserveDate} onChange={(e) => setDraft({ ...draft, reserveDate: e.target.value })} style={inputStyle()} />
-        <input placeholder="박스부피" value={draft.boxVolume} onChange={(e) => setDraft({ ...draft, boxVolume: e.target.value })} style={inputStyle()} />
+        <div>
+          <label style={{ fontSize: 11, color: "#5F5E5A", fontWeight: 500, display: "block", marginBottom: 4 }}>예약발송일 (선택)</label>
+          <input type="date" value={draft.reserveDate} onChange={(e) => setDraft({ ...draft, reserveDate: e.target.value })} style={{ ...inputStyle(), color: "#1B2430" }} />
+        </div>
+        <div>
+          <label style={{ fontSize: 11, color: "#5F5E5A", fontWeight: 500, display: "block", marginBottom: 4 }}>박스부피 (선택)</label>
+          <input placeholder="예: 5" value={draft.boxVolume} onChange={(e) => setDraft({ ...draft, boxVolume: e.target.value })} style={inputStyle()} />
+        </div>
       </div>
 
       <label style={{ fontSize: 12, color: "#5F5E5A", fontWeight: 700 }}>입금 금액</label>
