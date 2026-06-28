@@ -32,6 +32,12 @@
 <script type="text/babel" data-presets="react">
 const { useState, useMemo, useRef, useEffect } = React;
 
+// 테스트 앱 여부: 주소(URL)에 'test'가 들어있으면 테스트 모드
+// 테스트 모드면 데이터를 'test_main'에 따로 저장 → 실제 데이터와 분리
+const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.hostname + window.location.pathname);
+const DATA_DOC = IS_TEST ? "test_main" : "main";
+const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
+
 const STATUS = {
   pending: { label: "결제완료", color: "#854F0B", bg: "#FAEEDA" },
   ready: { label: "발송준비", color: "#185FA5", bg: "#E6F1FB" },
@@ -761,7 +767,7 @@ function App() {
   // Firebase 연동 시: PC/폰/모든 직원이 실시간으로 같은 데이터를 보게 됩니다.
   useEffect(() => {
     if (!firebaseReady) return;
-    const docRef = fbDb.collection("stores").doc("main");
+    const docRef = fbDb.collection("stores").doc(DATA_DOC);
     const unsubData = docRef.onSnapshot(
       (snap) => {
         if (snap.exists) {
@@ -798,7 +804,7 @@ function App() {
       }
     );
 
-    const memRef = fbDb.collection("stores").doc("members");
+    const memRef = fbDb.collection("stores").doc(MEMBERS_DOC);
     const unsubMembers = memRef.onSnapshot((snap) => {
       if (snap.exists) setMembers(snap.data().list || []);
     });
@@ -840,13 +846,13 @@ function App() {
         // 직전엔 데이터가 있었는데 갑자기 전부 비었음 → 사고일 가능성. 저장하지 않음.
         return;
       }
-      fbDb.collection("stores").doc("main").set(data, { merge: true })
+      fbDb.collection("stores").doc(DATA_DOC).set(data, { merge: true })
         .then(() => {
           lastGoodDataRef.current = data;
           // 하루 단위 백업: 날짜 키로 백업 문서에 저장(있으면 갱신)
           try {
             const today = todayStr();
-            fbDb.collection("stores").doc("backup_" + today).set({ ...data, backedUpAt: nowStamp() }, { merge: true }).catch(() => {});
+            fbDb.collection("stores").doc((IS_TEST ? "test_backup_" : "backup_") + today).set({ ...data, backedUpAt: nowStamp() }, { merge: true }).catch(() => {});
           } catch (e) {}
         })
         .catch(() => {});
@@ -918,7 +924,7 @@ function App() {
     setMembers((prev) => {
       if (prev.includes(name)) return prev;
       const next = [...prev, name];
-      if (firebaseReady) fbDb.collection("stores").doc("members").set({ list: next }, { merge: true }).catch(() => {});
+      if (firebaseReady) fbDb.collection("stores").doc(MEMBERS_DOC).set({ list: next }, { merge: true }).catch(() => {});
       else if (hasSharedStorage) sharedSet("store-members", next);
       return next;
     });
@@ -6058,12 +6064,65 @@ function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, ch
   })();
   const isBiz = !!matchedVendor;
 
+  // 업체 검색·선택용
+  const [vendorQuery, setVendorQuery] = useState("");
+  const vendorResults = vendorQuery.trim()
+    ? vendors.filter((v) => {
+        const q = vendorQuery.trim().toLowerCase();
+        return (v.name || "").toLowerCase().includes(q)
+          || (v.phone || "").replace(/-/g, "").includes(q.replace(/-/g, ""))
+          || (v.bizNo || "").replace(/-/g, "").includes(q.replace(/-/g, ""));
+      }).slice(0, 8)
+    : [];
+
+  function pickVendor(v) {
+    // 업체를 고르면 받는분(첫 배송지)·보내는분에 업체 정보 자동 채움
+    setDraft((prev) => {
+      const deliveries = prev.deliveries.length ? [...prev.deliveries] : [{ id: uid("d"), name: "", phone: "", address: "", cart: {} }];
+      deliveries[0] = { ...deliveries[0], name: v.name || "", phone: v.phone || "", address: v.address || "" };
+      return {
+        ...prev,
+        sender: { name: v.name || "", phone: v.phone || "" },
+        deliveries,
+      };
+    });
+    setVendorQuery("");
+  }
+
   return (
     <div>
       <button onClick={onBack} style={{ background: "none", border: "none", color: "#5F5E5A", fontSize: 13, cursor: "pointer", padding: 0, marginBottom: 14 }}>
         ← 주문 목록으로
       </button>
       <h1 style={{ fontSize: 19, fontWeight: 700, margin: "2px 0 12px", letterSpacing: "-0.02em" }}>주문 입력</h1>
+
+      <div style={{ background: "#fff", border: "1px solid #E2E4DD", borderRadius: 10, padding: 12, marginBottom: 14 }}>
+        <label style={{ fontSize: 12, fontWeight: 700, color: "#27500A", display: "block", marginBottom: 6 }}>🏢 등록된 업체에서 불러오기 (선택)</label>
+        <input
+          placeholder="업체명·전화·사업자번호로 검색"
+          value={vendorQuery}
+          onChange={(e) => setVendorQuery(e.target.value)}
+          style={{ ...inputStyle() }}
+        />
+        {vendorQuery.trim() && (
+          <div style={{ marginTop: 6, border: "1px solid #E2E4DD", borderRadius: 8, overflow: "hidden" }}>
+            {vendorResults.length === 0 ? (
+              <div style={{ padding: "10px 12px", fontSize: 12, color: "#888780" }}>일치하는 업체가 없습니다</div>
+            ) : (
+              vendorResults.map((v) => (
+                <div
+                  key={v.id}
+                  onClick={() => pickVendor(v)}
+                  style={{ padding: "10px 12px", fontSize: 12.5, cursor: "pointer", borderTop: "1px solid #F0F1EC", background: "#fff" }}
+                >
+                  <div style={{ fontWeight: 700, color: "#1B2430" }}>{v.name}</div>
+                  <div style={{ fontSize: 11, color: "#5F5E5A" }}>{v.phone || ""}{v.address ? ` · ${v.address}` : ""}</div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
 
       {isBiz && (
         <div style={{ background: "#FAEEDA", border: "1px solid #EAD8B0", borderRadius: 10, padding: "10px 12px", marginBottom: 14, fontSize: 12, color: "#854F0B", fontWeight: 700 }}>
@@ -6750,11 +6809,50 @@ const removeBtnStyle = {
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App />);
 
+// 테스트 환경이면 화면 맨 위에 눈에 띄는 빨간 띠 표시 (실제 앱과 헷갈리지 않도록)
+if (IS_TEST) {
+  const bar = document.createElement("div");
+  bar.textContent = "⚠ 테스트 환경입니다 (실제 데이터와 분리됨)";
+  bar.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:99999;background:#D14343;color:#fff;font-size:12px;font-weight:700;text-align:center;padding:5px 8px;font-family:" + "'Apple SD Gothic Neo','Malgun Gothic',system-ui,sans-serif";
+  document.body.appendChild(bar);
+  document.title = "[테스트] " + document.title;
+}
+
 </script>
 <script>
+  // 앱 자동 업데이트: 새 버전이 올라오면 자동으로 감지해서 최신으로 새로고침
   if ("serviceWorker" in navigator) {
-    navigator.serviceWorker.register("service-worker.js").catch(() => {});
+    navigator.serviceWorker.register("service-worker.js").then((reg) => {
+      // 새 서비스워커가 발견되면 즉시 적용
+      reg.addEventListener("updatefound", () => {
+        const newWorker = reg.installing;
+        if (!newWorker) return;
+        newWorker.addEventListener("statechange", () => {
+          // 새 버전이 설치 완료되었고, 기존 버전이 돌고 있던 상태면 → 새 버전으로 교체
+          if (newWorker.state === "installed" && navigator.serviceWorker.controller) {
+            newWorker.postMessage({ type: "SKIP_WAITING" });
+          }
+        });
+      });
+      // 주기적으로 업데이트 확인 (앱이 켜져 있는 동안 1시간마다)
+      setInterval(() => { reg.update().catch(() => {}); }, 60 * 60 * 1000);
+    }).catch(() => {});
+
+    // 새 서비스워커가 제어권을 가져오면 페이지를 한 번 자동 새로고침 (최신 화면 적용)
+    let refreshing = false;
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (refreshing) return;
+      refreshing = true;
+      window.location.reload();
+    });
   }
+
+  // 앱이 다시 화면에 보일 때(다른 앱 갔다 돌아올 때) 업데이트 확인
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && navigator.serviceWorker && navigator.serviceWorker.getRegistration) {
+      navigator.serviceWorker.getRegistration().then((reg) => { if (reg) reg.update().catch(() => {}); }).catch(() => {});
+    }
+  });
 </script>
 </body>
 </html>
