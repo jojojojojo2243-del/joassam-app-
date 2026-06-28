@@ -616,6 +616,36 @@ function App() {
   const [dataLoaded, setDataLoaded] = useState(false);
   const fbFirstLoadRef = useRef(false); // Firebase에서 첫 데이터를 받았는지 (받기 전엔 저장 금지)
   const lastGoodDataRef = useRef(null); // 마지막으로 정상 저장/로드된 데이터 (복구·방어 기준)
+  const prevOrderCountRef = useRef(null); // 직전 주문 수 (새 주문 감지용)
+  const justSubmittedRef = useRef(false); // 내가 방금 주문을 등록했는지 (내 등록은 알림 제외)
+  const [newOrderAlert, setNewOrderAlert] = useState(0); // 새로 도착한 주문 수 (화면 알림용)
+
+  // 알림 소리 재생 (브라우저 기본 비프음)
+  function playAlertSound() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.type = "sine"; osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.001, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.3, ctx.currentTime + 0.05);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+      osc.start(); osc.stop(ctx.currentTime + 0.5);
+      // 두 번 울리기
+      setTimeout(() => {
+        try {
+          const o2 = ctx.createOscillator(); const g2 = ctx.createGain();
+          o2.connect(g2); g2.connect(ctx.destination);
+          o2.type = "sine"; o2.frequency.value = 1046;
+          g2.gain.setValueAtTime(0.001, ctx.currentTime);
+          g2.gain.exponentialRampToValueAtTime(0.3, ctx.currentTime + 0.05);
+          g2.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+          o2.start(); o2.stop(ctx.currentTime + 0.5);
+        } catch (e) {}
+      }, 550);
+    } catch (e) {}
+  }
   const [appName, setAppName] = useState("조아저씨쌈 주문관리");
   const [appLogo, setAppLogo] = useState(""); // 회사 로고/사진 (base64 data URL)
   const [nickname, setNickname] = useState(() => {
@@ -778,7 +808,19 @@ function App() {
           if (data.vendors) setVendors(data.vendors);
           if (data.invoices) setInvoices(data.invoices);
           if (data.supplier) setSupplier(data.supplier);
-          if (data.orders) setOrders(data.orders);
+          if (data.orders) {
+            // 새 주문 감지: 직전보다 주문이 늘었고, 내가 방금 등록한 게 아니면 알림
+            const newCount = data.orders.length;
+            const prevCount = prevOrderCountRef.current;
+            if (prevCount !== null && newCount > prevCount && !justSubmittedRef.current) {
+              const added = newCount - prevCount;
+              setNewOrderAlert((n) => n + added);
+              playAlertSound();
+            }
+            prevOrderCountRef.current = newCount;
+            justSubmittedRef.current = false;
+            setOrders(data.orders);
+          }
           if (data.subscriptions) setSubscriptions(data.subscriptions);
           if (data.integrations) setIntegrations(data.integrations);
           if (data.customMarketplaces) setCustomMarketplaces(data.customMarketplaces);
@@ -1819,6 +1861,7 @@ function App() {
   function submitOrder(manualBoxesByIdx) {
     const activeDeliveries = draft.deliveries.filter((d) => Object.keys(d.cart).length > 0);
     if (activeDeliveries.length === 0) return;
+    justSubmittedRef.current = true; // 내가 등록하는 주문은 알림에서 제외
     const c = draft.customerId ? customerMap[draft.customerId] : null;
 
     // 받는분 이름/연락처가 등록된 업체와 일치하는지 판별하는 함수
@@ -2569,6 +2612,19 @@ function App() {
 
   return (
     <div style={{ minHeight: "100vh", background: isDesktop ? "#E2E4DD" : "#EDEEE8", display: "flex", justifyContent: "center", alignItems: isDesktop ? "flex-start" : "stretch", padding: isDesktop ? "32px 0" : "24px 0", boxSizing: "border-box", fontFamily: FONT }}>
+      {newOrderAlert > 0 && (
+        <div
+          onClick={() => { setNewOrderAlert(0); setTab("orders"); setSelectedOrderId(null); }}
+          style={{
+            position: "fixed", top: 0, left: 0, right: 0, zIndex: 99998,
+            background: "#D14343", color: "#fff", padding: "12px 16px", cursor: "pointer",
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+            fontSize: 14, fontWeight: 700, boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
+          }}
+        >
+          🔔 새 주문 {newOrderAlert}건이 도착했습니다! 눌러서 확인하세요
+        </div>
+      )}
       <div
         style={{
           width: 390,
