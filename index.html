@@ -605,8 +605,35 @@ function readWorkbookFile(file, onRows) {
   reader.onload = (e) => {
     const data = new Uint8Array(e.target.result);
     const wb = XLSX.read(data, { type: "array" });
-    const sheet = wb.Sheets[wb.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+    // 네이버는 시트명이 '발송처리'인 경우가 있어 우선 사용, 없으면 첫 시트
+    const sheetName = wb.SheetNames.find((n) => /발송처리|주문|order/i.test(n)) || wb.SheetNames[0];
+    const sheet = wb.Sheets[sheetName];
+    // 먼저 행렬로 읽어서 진짜 제목 줄(헤더)이 몇 번째인지 찾는다
+    const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+    // 제목으로 인정할 키워드들 (쇼핑몰 공통)
+    const headerKeywords = ["상품주문번호", "수취인명", "받는분", "주문번호", "상품명", "수취인연락처1", "통합배송지", "구매자명"];
+    let headerIdx = 0;
+    for (let i = 0; i < Math.min(matrix.length, 10); i++) {
+      const rowCells = (matrix[i] || []).map((c) => String(c).trim());
+      // 셀 전체가 제목 키워드와 정확히 일치하는 경우만 카운트 (설명문 줄 오인 방지)
+      const hits = headerKeywords.filter((k) => rowCells.some((c) => c === k)).length;
+      if (hits >= 2) { headerIdx = i; break; }
+    }
+    // 찾은 제목 줄을 기준으로 객체 배열 생성
+    const header = (matrix[headerIdx] || []).map((c) => String(c).trim());
+    const rows = [];
+    for (let i = headerIdx + 1; i < matrix.length; i++) {
+      const cells = matrix[i] || [];
+      const obj = {};
+      let hasData = false;
+      header.forEach((h, ci) => {
+        if (!h) return;
+        const val = cells[ci] !== undefined ? cells[ci] : "";
+        obj[h] = val;
+        if (String(val).trim()) hasData = true;
+      });
+      if (hasData) rows.push(obj);
+    }
     onRows(rows);
   };
   reader.readAsArrayBuffer(file);
@@ -1934,6 +1961,63 @@ function App() {
     });
 
     setOrders((prev) => [...newOrders, ...prev]);
+
+    // 고객 자동 등록: 주문에 들어간 받는분·주문자를 고객 리스트에 추가 (새 사람만, 중복 방지)
+    setCustomers((prevCustomers) => {
+      const normPhone = (p) => (p || "").replace(/[^0-9]/g, "");
+      const existing = [...prevCustomers];
+      // 이미 있는 사람인지 확인 (전화번호 우선, 없으면 이름)
+      const findExisting = (name, phone) => {
+        const ph = normPhone(phone);
+        const nm = (name || "").trim();
+        return existing.find((cu) =>
+          (ph && normPhone(cu.phone) === ph) ||
+          (!ph && nm && cu.name === nm)
+        );
+      };
+      const toAdd = [];
+      newOrders.forEach((o) => {
+        if (o.isBusiness) return; // 업체 주문은 고객 자동등록 제외(업체는 별도 관리)
+        const recip = o.recipient || {};
+        const snd = o.sender || {};
+        // 1) 받는분 등록 (보내는분과 다르면 메모에 보내는분 정보 남김)
+        const recipName = (recip.name || "").trim();
+        const recipPhone = (recip.phone || "").trim();
+        if (recipName || recipPhone) {
+          if (!findExisting(recipName, recipPhone) && !toAdd.find((t) => normPhone(t.phone) === normPhone(recipPhone) && recipPhone)) {
+            // 받는분이 주문자와 다른 경우(선물) → 메모에 보내는분 남기기
+            const isGift = (snd.name && snd.name.trim() !== recipName) || (normPhone(snd.phone) && normPhone(snd.phone) !== normPhone(recipPhone));
+            const giftMemo = isGift && (snd.name || snd.phone) ? `보내는분: ${snd.name || ""}님 ${snd.phone || ""}`.trim() : "";
+            toAdd.push({
+              id: uid("c"),
+              name: recipName || "이름없음",
+              phone: recipPhone,
+              address: recip.address || "",
+              postalCode: recip.postalCode || estimatePostalCode(recip.address || ""),
+              memo: giftMemo,
+            });
+          }
+        }
+        // 2) 주문자(보내는분) 등록 — 받는분과 다른 사람이면 따로 등록
+        const sndName = (snd.name || "").trim();
+        const sndPhone = (snd.phone || "").trim();
+        const sndDiffers = sndName !== recipName || normPhone(sndPhone) !== normPhone(recipPhone);
+        if ((sndName || sndPhone) && sndDiffers) {
+          if (!findExisting(sndName, sndPhone) && !toAdd.find((t) => normPhone(t.phone) === normPhone(sndPhone) && sndPhone)) {
+            toAdd.push({
+              id: uid("c"),
+              name: sndName || "이름없음",
+              phone: sndPhone,
+              address: "",
+              postalCode: "",
+              memo: "",
+            });
+          }
+        }
+      });
+      return toAdd.length > 0 ? [...existing, ...toAdd] : existing;
+    });
+
     setDraft(blankDraft);
     const boxCount = newOrders.length;
     const bizOrders = newOrders.filter((o) => o.isBusiness);
@@ -2024,20 +2108,24 @@ function App() {
 
   // 엑셀 한 행을 주문 미리보기 항목으로 변환 (주문목록 다운로드 서식 기준)
   function rowToBulkOrder(r, idx) {
-    const senderName = String(r["보내는분 (주문자)"] || r["보내는분"] || r["주문자"] || "").trim();
-    const senderPhone = String(r["주문자 연락처"] || r["보내는분 연락처"] || "").trim();
-    const recipName = String(r["받는분"] || senderName).trim();
-    const recipPhone = String(r["받는분 연락처"] || senderPhone).trim();
-    const address = String(r["받는분 주소(전체)"] || r["주소"] || "").trim();
+    // 네이버 스마트스토어, 쿠팡 등 쇼핑몰 엑셀의 다양한 칸 이름을 모두 인식
+    const senderName = String(r["보내는분 (주문자)"] || r["보내는분"] || r["주문자"] || r["구매자명"] || "").trim();
+    const senderPhone = String(r["주문자 연락처"] || r["보내는분 연락처"] || r["구매자연락처"] || "").trim();
+    const recipName = String(r["받는분"] || r["수취인명"] || r["수령인"] || r["수취인"] || senderName).trim();
+    const recipPhone = String(r["받는분 연락처"] || r["수취인연락처1"] || r["수취인연락처"] || r["수령인연락처"] || senderPhone).trim();
+    const address = String(r["받는분 주소(전체)"] || r["통합배송지"] || r["배송지"] || r["수취인주소"] || r["주소"] || "").trim();
     const postalCode = String(r["우편번호"] || "").trim() || estimatePostalCode(address);
-    const deliveryMessage = String(r["배송메시지"] || "").trim();
+    const deliveryMessage = String(r["배송메시지"] || r["배송메세지"] || r["배송요청사항"] || "").trim();
     const reserveDate = String(r["예약주문일"] || r["예약발송일"] || "").trim();
     const boxVolume = String(r["박스부피"] || "").trim();
     const memo = String(r["메모"] || "").trim();
     const courier = String(r["택배사"] || "").trim();
     const invoiceNo = String(r["송장번호"] || r["운송장번호"] || "").trim();
-    const payRaw = String(r["입금금액"] || "").replace(/[^0-9.]/g, "");
-    const productText = String(r["상품명"] || "").trim();
+    const payRaw = String(r["입금금액"] || r["결제금액"] || r["상품별 총 주문금액"] || "").replace(/[^0-9.]/g, "");
+    // 상품명: 네이버는 '상품명' + '옵션정보'(예: "상품선택: 모듬쌈 1Kg")가 따로. 옵션이 있으면 옵션 우선
+    const optionText = String(r["옵션정보"] || r["옵션"] || "").replace(/^상품선택\s*:\s*/, "").trim();
+    const baseProductName = String(r["상품명"] || "").trim();
+    const productText = (optionText || baseProductName).trim();
     const qtyRaw = String(r["수량"] || "").trim();
     const priceRaw = String(r["가격"] || r["단가"] || "").replace(/[^0-9.]/g, "");
     const rowPrice = priceRaw ? Number(priceRaw) : 0;
