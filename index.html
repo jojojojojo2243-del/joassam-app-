@@ -145,6 +145,61 @@ function resolveOrderField(label, o) {
   return map[label] !== undefined ? map[label] : "";
 }
 
+// 주문 목록을 훑어서, 아직 고객 목록에 없는 사람(받는분·주문자)을 찾아 새 고객 후보로 반환
+// 새 주문 화면 저장, 엑셀 대량 업로드, "과거 주문에서 고객 채우기" 기능에서 공통으로 사용
+function findMissingCustomersFromOrders(ordersToScan, existingCustomers) {
+  const normPhone = (p) => (p || "").replace(/[^0-9]/g, "");
+  const existing = existingCustomers;
+  // 이미 있는 사람인지 확인 (전화번호 우선, 없으면 이름)
+  const findExisting = (name, phone, extraList) => {
+    const ph = normPhone(phone);
+    const nm = (name || "").trim();
+    return existing.find((cu) => (ph && normPhone(cu.phone) === ph) || (!ph && nm && cu.name === nm))
+      || extraList.find((cu) => (ph && normPhone(cu.phone) === ph) || (!ph && nm && cu.name === nm));
+  };
+  const toAdd = [];
+  ordersToScan.forEach((o) => {
+    if (o.isBusiness) return; // 업체 주문은 고객 자동등록 제외(업체는 별도 관리)
+    const recip = o.recipient || {};
+    const snd = o.sender || {};
+    // 1) 받는분 등록 (보내는분과 다르면 메모에 보내는분 정보 남김)
+    const recipName = (recip.name || "").trim();
+    const recipPhone = (recip.phone || "").trim();
+    if (recipName || recipPhone) {
+      if (!findExisting(recipName, recipPhone, toAdd)) {
+        // 받는분이 주문자와 다른 경우(선물) → 메모에 보내는분 남기기
+        const isGift = (snd.name && snd.name.trim() !== recipName) || (normPhone(snd.phone) && normPhone(snd.phone) !== normPhone(recipPhone));
+        const giftMemo = isGift && (snd.name || snd.phone) ? `보내는분: ${snd.name || ""}님 ${snd.phone || ""}`.trim() : "";
+        toAdd.push({
+          id: uid("c"),
+          name: recipName || "이름없음",
+          phone: recipPhone,
+          address: recip.address || "",
+          postalCode: recip.postalCode || estimatePostalCode(recip.address || ""),
+          memo: giftMemo,
+        });
+      }
+    }
+    // 2) 주문자(보내는분) 등록 — 받는분과 다른 사람이면 따로 등록
+    const sndName = (snd.name || "").trim();
+    const sndPhone = (snd.phone || "").trim();
+    const sndDiffers = sndName !== recipName || normPhone(sndPhone) !== normPhone(recipPhone);
+    if ((sndName || sndPhone) && sndDiffers) {
+      if (!findExisting(sndName, sndPhone, toAdd)) {
+        toAdd.push({
+          id: uid("c"),
+          name: sndName || "이름없음",
+          phone: sndPhone,
+          address: "",
+          postalCode: "",
+          memo: "",
+        });
+      }
+    }
+  });
+  return toAdd;
+}
+
 function resolveCustomerField(label, c) {
   const map = { "이름": c.name, "전화번호": c.phone, "우편번호": c.postalCode, "주소": c.address, "메모": c.memo };
   return map[label] !== undefined ? map[label] : "";
@@ -1934,6 +1989,26 @@ function App() {
     }
   }
 
+  // 고객 자동 등록: 주문 목록에 들어간 받는분·주문자를 고객 리스트에 추가 (새 사람만, 중복 방지)
+  // 새 주문 화면 저장과 엑셀 대량 업로드 등록, 양쪽에서 공통으로 사용
+  function registerNewCustomersFromOrders(ordersToScan) {
+    setCustomers((prevCustomers) => {
+      const toAdd = findMissingCustomersFromOrders(ordersToScan, prevCustomers);
+      return toAdd.length > 0 ? [...prevCustomers, ...toAdd] : prevCustomers;
+    });
+  }
+
+  // 과거에 등록된 주문 전체를 훑어서, 고객 목록에 빠진 사람을 찾아 한 번에 채워넣기
+  function backfillMissingCustomers() {
+    const toAdd = findMissingCustomersFromOrders(orders, customers);
+    if (toAdd.length === 0) {
+      fireToast("빠진 고객이 없어요, 이미 다 등록되어 있어요");
+      return;
+    }
+    setCustomers((prev) => [...prev, ...toAdd]);
+    fireToast(`과거 주문에서 고객 ${toAdd.length}명을 새로 찾아서 등록했어요`);
+  }
+
   function submitOrder(manualBoxesByIdx) {
     const activeDeliveries = draft.deliveries.filter((d) => Object.keys(d.cart).length > 0);
     if (activeDeliveries.length === 0) return;
@@ -2012,60 +2087,7 @@ function App() {
     setOrders((prev) => [...newOrders, ...prev]);
 
     // 고객 자동 등록: 주문에 들어간 받는분·주문자를 고객 리스트에 추가 (새 사람만, 중복 방지)
-    setCustomers((prevCustomers) => {
-      const normPhone = (p) => (p || "").replace(/[^0-9]/g, "");
-      const existing = [...prevCustomers];
-      // 이미 있는 사람인지 확인 (전화번호 우선, 없으면 이름)
-      const findExisting = (name, phone) => {
-        const ph = normPhone(phone);
-        const nm = (name || "").trim();
-        return existing.find((cu) =>
-          (ph && normPhone(cu.phone) === ph) ||
-          (!ph && nm && cu.name === nm)
-        );
-      };
-      const toAdd = [];
-      newOrders.forEach((o) => {
-        if (o.isBusiness) return; // 업체 주문은 고객 자동등록 제외(업체는 별도 관리)
-        const recip = o.recipient || {};
-        const snd = o.sender || {};
-        // 1) 받는분 등록 (보내는분과 다르면 메모에 보내는분 정보 남김)
-        const recipName = (recip.name || "").trim();
-        const recipPhone = (recip.phone || "").trim();
-        if (recipName || recipPhone) {
-          if (!findExisting(recipName, recipPhone) && !toAdd.find((t) => normPhone(t.phone) === normPhone(recipPhone) && recipPhone)) {
-            // 받는분이 주문자와 다른 경우(선물) → 메모에 보내는분 남기기
-            const isGift = (snd.name && snd.name.trim() !== recipName) || (normPhone(snd.phone) && normPhone(snd.phone) !== normPhone(recipPhone));
-            const giftMemo = isGift && (snd.name || snd.phone) ? `보내는분: ${snd.name || ""}님 ${snd.phone || ""}`.trim() : "";
-            toAdd.push({
-              id: uid("c"),
-              name: recipName || "이름없음",
-              phone: recipPhone,
-              address: recip.address || "",
-              postalCode: recip.postalCode || estimatePostalCode(recip.address || ""),
-              memo: giftMemo,
-            });
-          }
-        }
-        // 2) 주문자(보내는분) 등록 — 받는분과 다른 사람이면 따로 등록
-        const sndName = (snd.name || "").trim();
-        const sndPhone = (snd.phone || "").trim();
-        const sndDiffers = sndName !== recipName || normPhone(sndPhone) !== normPhone(recipPhone);
-        if ((sndName || sndPhone) && sndDiffers) {
-          if (!findExisting(sndName, sndPhone) && !toAdd.find((t) => normPhone(t.phone) === normPhone(sndPhone) && sndPhone)) {
-            toAdd.push({
-              id: uid("c"),
-              name: sndName || "이름없음",
-              phone: sndPhone,
-              address: "",
-              postalCode: "",
-              memo: "",
-            });
-          }
-        }
-      });
-      return toAdd.length > 0 ? [...existing, ...toAdd] : existing;
-    });
+    registerNewCustomersFromOrders(newOrders);
 
     setDraft(blankDraft);
     const boxCount = newOrders.length;
@@ -2346,6 +2368,7 @@ function App() {
       };
     });
     setOrders((prev) => [...newOrders, ...prev]);
+    registerNewCustomersFromOrders(newOrders);
     fireToast(`엑셀에서 주문 ${newOrders.length}건을 등록했습니다`);
     setBulkOrderModal(null);
     setTab("orders");
@@ -2965,6 +2988,7 @@ function App() {
               customerInputRef={customerInputRef}
               handleCustomerUpload={handleCustomerUpload}
               askConfirm={askConfirm}
+              backfillMissingCustomers={backfillMissingCustomers}
             />
           )}
 
@@ -7025,7 +7049,7 @@ function CustomerAvatar({ name }) {
   );
 }
 
-function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, removeCustomer, removeCustomersMulti, updateCustomer, orders, subscriptions, exportCustomersExcel, customerInputRef, handleCustomerUpload, askConfirm }) {
+function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, removeCustomer, removeCustomersMulti, updateCustomer, orders, subscriptions, exportCustomersExcel, customerInputRef, handleCustomerUpload, askConfirm, backfillMissingCustomers }) {
   const [searchQuery, setSearchQuery] = useState("");
   const [checkedIds, setCheckedIds] = useState(new Set());
 
@@ -7061,11 +7085,14 @@ function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, rem
     <div>
       <h1 style={{ fontSize: 19, fontWeight: 700, margin: "2px 0 14px", letterSpacing: "-0.02em" }}>고객</h1>
 
-      <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
         <button onClick={exportCustomersExcel} style={toolBtnStyle("#2F6F4E")}>전체 다운로드</button>
         <button onClick={() => customerInputRef.current?.click()} style={toolBtnStyle("#185FA5")}>업로드</button>
         <input ref={customerInputRef} type="file" accept=".xlsx,.xls,.csv" multiple onChange={handleCustomerUpload} style={{ display: "none" }} />
       </div>
+      <button onClick={backfillMissingCustomers} style={{ width: "100%", padding: "10px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12.5, cursor: "pointer", marginBottom: 16 }}>
+        과거 주문에서 빠진 고객 채우기
+      </button>
       <p style={{ fontSize: 11, color: "#888780", margin: "0 0 14px" }}>
         엑셀에는 이름/전화번호/우편번호/주소/메모와 함께 정기배송 여부·진행회차·남은회수가 포함돼요.
       </p>
