@@ -107,7 +107,7 @@ const NUM_WORDS = { 한: 1, 두: 2, 세: 3, 네: 4, 다섯: 5, 여섯: 6, 일곱
 const ORDER_COLUMNS = [
   "주문번호", "주문일", "예약주문일", "보내는분 (주문자)", "주문자 연락처",
   "받는분", "받는분 연락처", "우편번호", "받는분 주소(전체)",
-  "상품명", "수량", "박스부피", "배송메시지", "메모", "입금금액", "상태", "송장번호", "택배사",
+  "상품명", "수량", "박스부피", "배송메시지", "메모", "송장번호", "택배사", "구분 (일반 /업체)",
 ];
 
 const DEFAULT_CUSTOMER_TEMPLATE = ["이름", "전화번호", "우편번호", "주소", "메모"];
@@ -140,6 +140,7 @@ function resolveOrderField(label, o) {
     "운송장번호": o.invoiceNo || "",
     "택배사": o.courier || "",
     "입금금액": o.paymentAmount ?? "",
+    "구분 (일반 /업체)": o.isBusiness ? "업체" : "일반",
   };
   return map[label] !== undefined ? map[label] : "";
 }
@@ -562,23 +563,27 @@ function parseOrderMessage(text, products) {
   return result;
 }
 
-function downloadWorkbook(rows, sheetName, filename, columnOrder) {
+function downloadWorkbook(rows, sheetName, filename, columnOrder, rowFillFn) {
   const sheet = XLSX.utils.json_to_sheet(rows, columnOrder ? { header: columnOrder } : undefined);
-  // 테두리 + 헤더 음영 스타일 적용
+  // 테두리 + 헤더 음영 + (있으면) 행별 구분 색상 적용
   const range = XLSX.utils.decode_range(sheet["!ref"] || "A1");
-  const border = { style: "thick", color: { rgb: "000000" } };
-  const allBorder = { top: border, bottom: border, left: border, right: border };
+  const headerBorder = { style: "medium", color: { rgb: "000000" } };
+  const dataBorder = { style: "thin", color: { rgb: "000000" } };
   for (let R = range.s.r; R <= range.e.r; R++) {
+    const isHeader = R === range.s.r;
+    const b = isHeader ? headerBorder : dataBorder;
+    const rowFill = !isHeader && rowFillFn ? rowFillFn(rows[R - range.s.r - 1], R - range.s.r - 1) : null;
     for (let C = range.s.c; C <= range.e.c; C++) {
       const addr = XLSX.utils.encode_cell({ r: R, c: C });
       const cell = sheet[addr];
       if (!cell) continue;
-      const isHeader = R === range.s.r;
       cell.s = {
-        border: allBorder,
+        border: { top: b, bottom: b, left: b, right: b },
         alignment: { vertical: "center", horizontal: isHeader ? "center" : "left", wrapText: false },
         font: { name: "맑은 고딕", sz: isHeader ? 11 : 10, bold: isHeader },
-        fill: isHeader ? { patternType: "solid", fgColor: { rgb: "E6F1E9" } } : undefined,
+        fill: isHeader
+          ? { patternType: "solid", fgColor: { rgb: "E6F1E9" } }
+          : (rowFill ? { patternType: "solid", fgColor: { rgb: rowFill } } : undefined),
       };
     }
   }
@@ -2356,7 +2361,7 @@ function App() {
     // 각 주문을 박스 규칙으로 펼쳐 박스마다 한 행(송장 한 개)으로 만든다
     const expanded = targets.flatMap((o) => expandOrderToBoxes(o));
     const rows = expanded.map(orderToRow);
-    downloadWorkbook(rows, "Orders", nextFilename("주문목록"), orderTemplate);
+    downloadWorkbook(rows, "Orders", nextFilename("주문목록"), orderTemplate, (row, i) => (expanded[i]?.isBusiness ? "FAEEDA" : null));
 
     const boxCount = expanded.length;
     const idsToAdvance = targets.filter((o) => o.status === "pending").map((o) => o.id);
@@ -2377,7 +2382,7 @@ function App() {
     }
     const expanded = list.flatMap((o) => expandOrderToBoxes(o));
     const rows = expanded.map(orderToRow);
-    downloadWorkbook(rows, "Orders", nextFilename("주문목록"), orderTemplate);
+    downloadWorkbook(rows, "Orders", nextFilename("주문목록"), orderTemplate, (row, i) => (expanded[i]?.isBusiness ? "FAEEDA" : null));
     const boxCount = expanded.length;
     // 결제완료(pending) 상태만 발송준비로 전진, 발송완료 등 나머지는 그대로 둠(재발송 가능)
     const idsToAdvance = list.filter((o) => o.status === "pending").map((o) => o.id);
@@ -2400,7 +2405,7 @@ function App() {
     const expanded = targets.flatMap((o) => expandOrderToBoxes(o));
     const rows = expanded.map((o) => Object.fromEntries(template.map((label) => [label, resolveOrderField(label, o)])));
     const title = courierName ? `택배접수양식(${courierName})` : "택배접수양식";
-    downloadWorkbook(rows, "CourierPickup", nextFilename(title), template);
+    downloadWorkbook(rows, "CourierPickup", nextFilename(title), template, (row, i) => (expanded[i]?.isBusiness ? "FAEEDA" : null));
     fireToast(`발송준비 ${targets.length}건을 박스 ${expanded.length}개(송장 ${expanded.length}개)로 다운로드했습니다`);
   }
 
