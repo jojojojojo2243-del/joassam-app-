@@ -920,7 +920,15 @@ function App() {
           if (data.courierTemplates) setCourierTemplates(data.courierTemplates);
           // 실제 저장된 문서가 있을 때만 첫 로드 완료로 표시 → 이후 저장 허용
           fbFirstLoadRef.current = true;
-          lastGoodDataRef.current = data; // 복구·방어 기준 데이터 기록
+          // 복구·방어 기준 데이터 기록: 이번에 안 온 필드는 직전 기록값을 그대로 유지
+          // (일부 필드가 통신 중 누락돼도 "직전 데이터"가 같이 오염되지 않도록)
+          const prevGood = lastGoodDataRef.current || {};
+          lastGoodDataRef.current = {
+            customers: data.customers || prevGood.customers,
+            orders: data.orders || prevGood.orders,
+            products: data.products || prevGood.products,
+            vendors: data.vendors || prevGood.vendors,
+          };
         } else {
           // 문서가 아직 없음(최초 사용). 빈 상태를 기준으로 첫 로드 완료 처리.
           // 시드 데이터는 쓰지 않으므로, 사용자가 직접 등록한 것만 저장됨.
@@ -968,12 +976,21 @@ function App() {
     if (firebaseReady) {
       // Firebase에서 첫 데이터를 받기 전에는 저장하지 않음 (시드/빈값이 실데이터를 덮어쓰는 사고 방지)
       if (!fbFirstLoadRef.current) return;
-      // 비정상 전체 삭제 방어: 직전에 데이터가 있었는데 지금 핵심 데이터가 모두 비면 저장 보류
+      // 비정상 삭제 방어: 직전에 있던 항목(고객/주문/상품/업체) 중 "하나라도" 갑자기 통째로 비면 저장 보류
+      // (예전엔 넷이 "동시에" 다 비어야만 막았는데, 그 사이의 구멍으로 실제 사고가 발생해 더 엄격하게 고침)
       const prev = lastGoodDataRef.current;
-      const nowEmpty = (orders.length === 0 && customers.length === 0 && products.length === 0 && vendors.length === 0);
-      const prevHadData = prev && ((prev.orders && prev.orders.length) || (prev.customers && prev.customers.length) || (prev.products && prev.products.length) || (prev.vendors && prev.vendors.length));
-      if (nowEmpty && prevHadData) {
-        // 직전엔 데이터가 있었는데 갑자기 전부 비었음 → 사고일 가능성. 저장하지 않음.
+      const droppedToEmpty = (key, current) => {
+        const prevArr = prev && prev[key];
+        return prevArr && prevArr.length > 0 && (!current || current.length === 0);
+      };
+      const suspicious = prev && (
+        droppedToEmpty("customers", customers) ||
+        droppedToEmpty("orders", orders) ||
+        droppedToEmpty("products", products) ||
+        droppedToEmpty("vendors", vendors)
+      );
+      if (suspicious) {
+        // 직전엔 데이터가 있었는데 특정 항목이 갑자기 비었음 → 사고일 가능성. 저장하지 않음.
         return;
       }
       fbDb.collection("stores").doc(DATA_DOC).set(data, { merge: true })
@@ -2730,6 +2747,36 @@ function App() {
     e.target.value = "";
   }
 
+  // 클라우드에 매일 자동 저장되는 백업(backup_YYYY-MM-DD)에서 통째로 복원
+  async function restoreFromCloudBackup(dateStr) {
+    if (!firebaseReady) { fireToast("Firebase 연결 상태에서만 사용할 수 있어요"); return; }
+    try {
+      const docId = (IS_TEST ? "test_backup_" : "backup_") + dateStr;
+      const snap = await fbDb.collection("stores").doc(docId).get();
+      if (!snap.exists) { fireToast(`${dateStr} 백업을 찾을 수 없어요. 날짜를 다시 확인해주세요`); return; }
+      const data = snap.data();
+      if (data.customers) setCustomers(data.customers);
+      if (data.products) setProducts(data.products);
+      if (data.vendors) setVendors(data.vendors);
+      if (data.orders) setOrders(data.orders);
+      if (data.invoices) setInvoices(data.invoices);
+      if (data.supplier) setSupplier(data.supplier);
+      if (data.subscriptions) setSubscriptions(data.subscriptions);
+      if (data.integrations) setIntegrations(data.integrations);
+      if (data.customMarketplaces) setCustomMarketplaces(data.customMarketplaces);
+      if (data.couriers) setCouriers(data.couriers);
+      if (data.smsTemplate) setSmsTemplate(data.smsTemplate);
+      if (data.orderTemplate) setOrderTemplate(data.orderTemplate);
+      if (data.customerTemplate) setCustomerTemplate(data.customerTemplate);
+      if (data.productTemplate) setProductTemplate(data.productTemplate);
+      if (data.courierTemplates) setCourierTemplates(data.courierTemplates);
+      lastGoodDataRef.current = { customers: data.customers, orders: data.orders, products: data.products, vendors: data.vendors };
+      fireToast(`${dateStr} 백업으로 복원했어요. 잠시 후 목록을 확인해주세요`);
+    } catch (e) {
+      fireToast("복원 중 오류가 발생했어요. 잠시 후 다시 시도해주세요");
+    }
+  }
+
   function exportBackup() {
     const data = {
       appName, appLogo, customers, products, orders, vendors, supplier, invoices,
@@ -3161,6 +3208,7 @@ function App() {
             exportBackup={exportBackup}
             backupInputRef={backupInputRef}
             importBackup={importBackup}
+            restoreFromCloudBackup={restoreFromCloudBackup}
             onClose={() => setSideMenuOpen(false)}
             onNavigate={(t) => { setTab(t); setSideMenuOpen(false); setSelectedOrderId(null); }}
             askConfirm={askConfirm}
@@ -5690,9 +5738,10 @@ function sheetBtnStyle(bg, color) {
   };
 }
 
-function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, onClose, onNavigate, askConfirm, handleLogout, fireToast }) {
+function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onClose, onNavigate, askConfirm, handleLogout, fireToast }) {
   const [editingName, setEditingName] = useState(false);
   const [draftName, setDraftName] = useState(appName);
+  const [restoreDate, setRestoreDate] = useState(todayStr());
 
   function saveName() {
     const trimmed = draftName.trim();
@@ -5752,6 +5801,31 @@ function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, 
           <button onClick={exportBackup} style={sideMenuRowStyle}>주문백업 다운로드</button>
           <button onClick={() => backupInputRef.current?.click()} style={sideMenuRowStyle}>주문백업 복구 (불러오기)</button>
           <input ref={backupInputRef} type="file" accept=".json" onChange={importBackup} style={{ display: "none" }} />
+        </div>
+
+        <div style={{ padding: "12px 20px", borderBottom: "1px solid #F1F2EC" }}>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>날짜별 자동 백업에서 복원</div>
+          <div style={{ fontSize: 11, color: "#888780", marginBottom: 8 }}>
+            매일 자동으로 저장되는 백업이에요. 데이터에 문제가 생겼을 때, 정상이었던 날짜로 되돌릴 수 있어요.
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <input
+              type="date"
+              value={restoreDate}
+              onChange={(e) => setRestoreDate(e.target.value)}
+              style={{ flex: 1, border: "1px solid #D3D1C7", borderRadius: 8, padding: "8px 10px", fontSize: 13 }}
+            />
+            <button
+              onClick={() => askConfirm(
+                `${restoreDate} 백업으로 되돌릴까요?\n지금 화면에 보이는 데이터는 이 백업 내용으로 바뀌어요.`,
+                () => { restoreFromCloudBackup(restoreDate); onClose(); },
+                "복원"
+              )}
+              style={{ border: "none", background: "#185FA5", color: "#fff", borderRadius: 8, padding: "0 14px", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}
+            >
+              복원
+            </button>
+          </div>
         </div>
 
         <div style={{ padding: "8px 0", borderBottom: "1px solid #F1F2EC" }}>
