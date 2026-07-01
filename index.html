@@ -39,6 +39,7 @@ const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
 const STATUS = {
+  waiting: { label: "입금대기", color: "#993C1D", bg: "#FAECE7" },
   pending: { label: "결제완료", color: "#854F0B", bg: "#FAEEDA" },
   ready: { label: "발송준비", color: "#185FA5", bg: "#E6F1FB" },
   shipped: { label: "발송완료", color: "#27500A", bg: "#EAF3DE" },
@@ -1038,7 +1039,7 @@ function App() {
     sender: { name: "", phone: "" },
     deliveries: [{ id: uid("d"), name: "", phone: "", address: "", cart: {} }],
     reserveDate: "", boxVolume: "", deliveryMessage: "", memo: "",
-    paymentAmount: "",
+    paymentAmount: "", paymentMethod: "card",
   };
   const [draft, setDraft] = useState(blankDraft);
   const [toast, setToast] = useState("");
@@ -1116,6 +1117,7 @@ function App() {
     const reg = orders.filter((o) => !o.isBusiness);
     return {
       all: reg.length,
+      waiting: reg.filter((o) => o.status === "waiting").length,
       pending: reg.filter((o) => o.status === "pending").length,
       ready: reg.filter((o) => o.status === "ready").length,
       shipped: reg.filter((o) => o.status === "shipped").length,
@@ -1188,15 +1190,45 @@ function App() {
       return;
     }
     const n = checkedIds.size;
+
+    // 업체 전환 시: 받는분 정보로 기존 업체 매칭 시도, 없으면 새 업체로 등록할 목록을 미리 준비
+    const vendorIdByOrderId = {};
+    const newVendors = [];
+    if (toBusiness) {
+      const normPhone = (p) => (p || "").replace(/[^0-9]/g, "");
+      orders.forEach((o) => {
+        if (!checkedIds.has(o.id)) return;
+        const ph = normPhone(o.recipient?.phone);
+        const nm = (o.recipient?.name || "").trim();
+        const existing = vendors.find((x) => (ph && normPhone(x.phone) === ph) || (nm && x.name === nm));
+        if (existing) {
+          vendorIdByOrderId[o.id] = existing.id;
+          return;
+        }
+        // 이미 이번에 새로 만들기로 한 업체와 같은 사람이면 그걸 재사용 (중복 방지)
+        const dup = newVendors.find((v) => (ph && normPhone(v.phone) === ph) || (nm && v.name === nm));
+        if (dup) {
+          vendorIdByOrderId[o.id] = dup.id;
+          return;
+        }
+        if (!nm && !ph) return; // 이름·연락처가 둘 다 없으면 업체로 등록 불가
+        const created = {
+          id: uid("v"), name: nm || "이름없음", bizNo: "", ceo: "", phone: o.recipient?.phone || "",
+          email: "", address: o.recipient?.address || "", memo: "주문에서 자동 등록됨", bizLicense: "",
+        };
+        newVendors.push(created);
+        vendorIdByOrderId[o.id] = created.id;
+      });
+      if (newVendors.length > 0) {
+        setVendors((prev) => [...prev, ...newVendors]);
+      }
+    }
+
     const convertedToBiz = [];
     setOrders((prev) => prev.map((o) => {
       if (!checkedIds.has(o.id)) return o;
       if (toBusiness) {
-        // 업체로 전환: 받는분/연락처로 업체 매칭 시도
-        const ph = (o.recipient?.phone || "").replace(/-/g, "");
-        const nm = (o.recipient?.name || "").trim();
-        const v = vendors.find((x) => (ph && (x.phone || "").replace(/-/g, "") === ph) || (nm && x.name === nm));
-        const updated = { ...o, isBusiness: true, vendorId: v ? v.id : (o.vendorId || "") };
+        const updated = { ...o, isBusiness: true, vendorId: vendorIdByOrderId[o.id] || o.vendorId || "" };
         convertedToBiz.push(updated);
         return updated;
       } else {
@@ -1213,7 +1245,8 @@ function App() {
     }
     setCheckedIds(new Set());
     if (toBusiness) {
-      fireToast(`주문 ${n}건을 업체 주문으로 이동하고 거래명세서를 만들었습니다. 업체 탭에서 확인하세요`);
+      const newCount = newVendors.length;
+      fireToast(`주문 ${n}건을 업체 주문으로 이동했습니다${newCount ? ` (신규 업체 ${newCount}곳 자동 등록)` : ""}. 업체 탭에서 확인하세요`);
     } else {
       fireToast(`주문 ${n}건을 일반 주문으로 이동했습니다`);
     }
@@ -1362,6 +1395,12 @@ function App() {
     setCustomers((prev) => prev.filter((c) => c.id !== id));
   }
 
+  function removeCustomersMulti(ids) {
+    const idSet = new Set(ids);
+    setCustomers((prev) => prev.filter((c) => !idSet.has(c.id)));
+    fireToast(`고객 ${ids.length}명을 삭제했습니다`);
+  }
+
   function updateCustomer(id, updates) {
     setCustomers((prev) =>
       prev.map((c) =>
@@ -1434,6 +1473,11 @@ function App() {
   function removeVendor(id) {
     setVendors((prev) => prev.filter((v) => v.id !== id));
     fireToast("업체를 삭제했습니다");
+  }
+  function removeVendorsMulti(ids) {
+    const idSet = new Set(ids);
+    setVendors((prev) => prev.filter((v) => !idSet.has(v.id)));
+    fireToast(`업체 ${ids.length}곳을 삭제했습니다`);
   }
   function exportVendorsExcel() {
     if (vendors.length === 0) { fireToast("다운로드할 업체가 없습니다"); return; }
@@ -1772,7 +1816,7 @@ function App() {
       deliveries: prev.deliveries.map((d) => {
         if (d.id !== deliveryId) return d;
         const cart = { ...d.cart };
-        const next = (cart[productId] || 0) + delta;
+        const next = Math.round(((cart[productId] || 0) + delta) * 10) / 10;
         if (next <= 0) delete cart[productId];
         else cart[productId] = next;
         return { ...d, cart };
@@ -1944,7 +1988,7 @@ function App() {
           sender: sender.name || sender.phone ? sender : recipient,
           recipient,
           items,
-          status: "pending",
+          status: draft.paymentMethod === "transfer" ? "waiting" : "pending",
           invoiceNo: "",
           courier: "",
           createdAt: nowStamp(),
@@ -2136,58 +2180,68 @@ function App() {
     const squish = (s) => s.replace(/\s+/g, "").toLowerCase();
     // 단위/숫자/괄호를 제거한 핵심 토큰 (예: "모듬쌈 1kg" → "모듬쌈")
     const core = (s) => squish(s).replace(/\d+(\.\d+)?(kg|g|개|박스|봉|팩|병|호|입|매|ml|l)?/g, "").replace(/[()[\]{}]/g, "");
-    const findProd = (nm) => {
+    const matchProduct = (nm) => {
       const q = squish(nm), qc = core(nm);
-      if (!q) return null;
+      if (!q) return { product: null, confidence: "none", candidates: [] };
       // 입력에 포함된 단위 토큰 추출 (예: "모듬쌈 800g" → "800g")
       const unitTok = (squish(nm).match(/\d+(\.\d+)?(kg|g|개|박스|봉|팩|병|호|입|매|ml|l)/g) || []);
-      // 1) 정확/공백무시 일치
-      let hit = products.find((p) => squish(p.name) === q);
-      if (hit) return hit;
-      // 2) 핵심 토큰 일치 + 단위까지 같은 것 우선
-      if (qc) {
-        const coreMatches = products.filter((p) => core(p.name) === qc);
-        if (coreMatches.length === 1) return coreMatches[0];
-        if (coreMatches.length > 1 && unitTok.length) {
-          const withUnit = coreMatches.find((p) => unitTok.every((u) => squish(p.name).includes(u)));
-          if (withUnit) return withUnit;
-        }
-        if (coreMatches.length >= 1 && !unitTok.length) return coreMatches[0];
+      // 1) 정확/공백무시 일치 → 확신 높음, 그대로 사용
+      const exact = products.find((p) => squish(p.name) === q);
+      if (exact) return { product: exact, confidence: "exact", candidates: [] };
+      // 2) 핵심 토큰(단위/숫자 제거) 일치
+      let coreMatches = qc ? products.filter((p) => core(p.name) === qc) : [];
+      if (coreMatches.length === 1) return { product: coreMatches[0], confidence: "exact", candidates: [] };
+      if (coreMatches.length > 1 && unitTok.length) {
+        const withUnit = coreMatches.filter((p) => unitTok.every((u) => squish(p.name).includes(u)));
+        if (withUnit.length === 1) return { product: withUnit[0], confidence: "exact", candidates: [] };
+        if (withUnit.length > 1) coreMatches = withUnit; // 단위까지 같은데 여러개면 후보로 넘김(아래에서 확인요청)
       }
-      // 3) 부분 포함 (단위 일치 우선, 그다음 가장 긴 이름)
+      if (coreMatches.length >= 1) {
+        // 이름은 같은데(예: "모듬쌈") 용량이 여러 개(500g/800g/1kg 등)라 헷갈릴 수 있음 → 추천목록으로
+        return { product: coreMatches[0], confidence: "low", candidates: coreMatches.slice(0, 4) };
+      }
+      // 3) 부분 포함 (한쪽이 다른쪽 이름을 포함)
       let contains = products.filter((p) => { const ps = squish(p.name); return ps && (ps.includes(q) || q.includes(ps)); });
       if (contains.length > 1 && unitTok.length) {
         const u = contains.filter((p) => unitTok.every((t) => squish(p.name).includes(t)));
         if (u.length) contains = u;
       }
       contains.sort((a, b) => squish(b.name).length - squish(a.name).length);
-      if (contains[0]) return contains[0];
-      // 4) 핵심 토큰 부분 포함
+      if (contains.length) return { product: contains[0], confidence: "low", candidates: contains.slice(0, 4) };
+      // 4) 핵심 토큰 부분 포함 (제일 느슨한 매칭 → 확신 낮음)
       if (qc) {
         const c2 = products.filter((p) => { const pc = core(p.name); return pc && (pc.includes(qc) || qc.includes(pc)); }).sort((a, b) => core(b.name).length - core(a.name).length);
-        if (c2[0]) return c2[0];
+        if (c2.length) return { product: c2[0], confidence: "low", candidates: c2.slice(0, 4) };
       }
-      return null;
+      return { product: null, confidence: "none", candidates: [] };
     };
 
     if (productText) {
       const parts = productText.split(/[,/]|·/).map((s) => s.trim()).filter(Boolean);
       const multi = parts.length > 1 || /[x×*]\s*\d/.test(productText);
+      const pushItem = (nm, q) => {
+        const { product: prod, confidence, candidates } = matchProduct(nm);
+        if (prod && confidence === "exact") {
+          items.push({ productId: prod.id, name: prod.name, qty: q, confidence });
+        } else if (prod) {
+          // 확신이 낮은 매칭: 일단 가장 비슷한 상품을 기본값으로 넣어두되, 사장님이 직접 다시 고를 수 있게 후보 목록을 함께 담아둠
+          items.push({ productId: prod.id, name: prod.name, qty: q, confidence, candidates, originalText: nm });
+          unmatched.push(nm);
+        } else {
+          items.push({ productId: null, name: nm, qty: q, price: rowPrice, confidence: "none", candidates, originalText: nm });
+          unmatched.push(nm);
+        }
+      };
       if (multi) {
         parts.forEach((part) => {
           const m = part.match(/(.+?)\s*[x×*]\s*(\d+)/);
           const nm = (m ? m[1] : part).trim();
           const q = m ? parseInt(m[2], 10) : 1;
-          const prod = findProd(nm);
-          // 매칭되면 등록 상품명으로 변경, 아니면 원본 유지
-          if (prod) items.push({ productId: prod.id, name: prod.name, qty: q });
-          else { items.push({ productId: null, name: nm, qty: q, price: rowPrice }); unmatched.push(nm); }
+          pushItem(nm, q);
         });
       } else {
-        const prod = findProd(productText);
         const q = parseInt(qtyRaw, 10) || 1;
-        if (prod) items.push({ productId: prod.id, name: prod.name, qty: q });
-        else { items.push({ productId: null, name: productText, qty: q, price: rowPrice }); unmatched.push(productText); }
+        pushItem(productText, q);
       }
     }
 
@@ -2235,6 +2289,28 @@ function App() {
     }));
   }
 
+  // 엑셀 일괄등록 미리보기에서, 확신이 낮게 매칭된 상품을 사장님이 직접 다시 고를 때 사용
+  function pickBulkItemProduct(tempId, itemIdx, productId) {
+    setBulkOrderModal((prev) => ({
+      ...prev,
+      rows: prev.rows.map((r) => {
+        if (r.tempId !== tempId) return r;
+        return {
+          ...r,
+          items: r.items.map((it, i) => {
+            if (i !== itemIdx) return it;
+            if (!productId) {
+              // "원본 이름 그대로 사용" 선택 시
+              return { ...it, productId: null, name: it.originalText || it.name, confidence: "manual-none" };
+            }
+            const p = products.find((pp) => pp.id === productId);
+            return { ...it, productId, name: p ? p.name : it.name, confidence: "manual" };
+          }),
+        };
+      }),
+    }));
+  }
+
   function applyBulkOrders() {
     const toAdd = bulkOrderModal.rows.filter((r) => r.checked && r.items.length > 0);
     if (toAdd.length === 0) {
@@ -2250,7 +2326,7 @@ function App() {
         customerId: matched ? matched.id : null,
         sender: { name: r.senderName || r.recipName, phone: r.senderPhone || r.recipPhone },
         recipient: { name: r.recipName, phone: r.recipPhone, address: r.address, postalCode: r.postalCode },
-        items: r.items,
+        items: r.items.map((it) => ({ productId: it.productId, name: it.name, qty: it.qty, price: it.price })),
         status: r.invoiceNo ? "shipped" : "pending",
         invoiceNo: r.invoiceNo || "",
         courier: r.courier || "",
@@ -2876,6 +2952,7 @@ function App() {
               setNewCustomer={setNewCustomer}
               addCustomer={addCustomer}
               removeCustomer={removeCustomer}
+              removeCustomersMulti={removeCustomersMulti}
               updateCustomer={updateCustomer}
               orders={orders}
               subscriptions={subscriptions}
@@ -2965,6 +3042,7 @@ function App() {
               addVendorsMulti={addVendorsMulti}
               updateVendor={updateVendor}
               removeVendor={removeVendor}
+              removeVendorsMulti={removeVendorsMulti}
               exportVendorsExcel={exportVendorsExcel}
               vendorInputRef={vendorInputRef}
               handleVendorUpload={handleVendorUpload}
@@ -3036,8 +3114,10 @@ function App() {
           <BulkOrderModal
             modal={bulkOrderModal}
             productMap={productMap}
+            products={products}
             onPickMode={pickBulkMode}
             toggleRow={toggleBulkRow}
+            onPickItemProduct={pickBulkItemProduct}
             onApply={applyBulkOrders}
             onClose={() => setBulkOrderModal(null)}
           />
@@ -3395,6 +3475,7 @@ function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal,
 
       <div style={{ fontSize: 13, fontWeight: 700, color: "#1B2430", marginBottom: 8 }}>오늘 주문 현황</div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 18 }}>
+        <HomeStatTile label="입금대기" value={counts.waiting} color="#993C1D" bg="#FAECE7" onClick={() => setTab("orders")} />
         <HomeStatTile label="결제완료" value={counts.pending} color="#854F0B" bg="#FAEEDA" onClick={() => setTab("orders")} />
         <HomeStatTile label="발송준비" value={counts.ready} color="#185FA5" bg="#E6F1FB" onClick={() => setTab("orders")} />
         <HomeStatTile label="발송완료" value={counts.shipped} color="#27500A" bg="#EAF3DE" onClick={() => setTab("orders")} />
@@ -4565,11 +4646,29 @@ function InvoiceEditor({ mode, initial, vendors, products, onCancel, onSave }) {
   );
 }
 
-function VendorsTab({ vendors, orders, addVendor, addVendorsMulti, updateVendor, removeVendor, exportVendorsExcel, vendorInputRef, handleVendorUpload, askConfirm, onBack }) {
+function VendorsTab({ vendors, orders, addVendor, addVendorsMulti, updateVendor, removeVendor, removeVendorsMulti, exportVendorsExcel, vendorInputRef, handleVendorUpload, askConfirm, onBack }) {
   const [form, setForm] = useState({ name: "", bizNo: "", ceo: "", phone: "", email: "", address: "", memo: "", bizLicense: "" });
   const [q, setQ] = useState("");
   const [licenseOcrLoading, setLicenseOcrLoading] = useState(false);
   const [foundSites, setFoundSites] = useState(null); // 종된사업장 명세에서 읽은 지점 목록
+  const [checkedIds, setCheckedIds] = useState(new Set());
+
+  function toggleChecked(id) {
+    setCheckedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  function handleDeleteChecked() {
+    const ids = [...checkedIds];
+    if (ids.length === 0) return;
+    askConfirm(`선택한 업체 ${ids.length}곳을 삭제할까요?`, () => {
+      removeVendorsMulti(ids);
+      setCheckedIds(new Set());
+    });
+  }
 
   // 한 줄(지점 행)에서 상호/대표자/주소 분리
   function parseSiteRow(rest) {
@@ -4748,9 +4847,33 @@ function VendorsTab({ vendors, orders, addVendor, addVendorsMulti, updateVendor,
 
       <input placeholder="업체 검색" value={q} onChange={(e) => setQ(e.target.value)} style={{ ...inputStyle(), marginBottom: 10 }} />
 
+      {list.length > 0 && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#5F5E5A", cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={list.length > 0 && list.every((v) => checkedIds.has(v.id))}
+              onChange={(e) => {
+                setCheckedIds((prev) => {
+                  const next = new Set(prev);
+                  list.forEach((v) => (e.target.checked ? next.add(v.id) : next.delete(v.id)));
+                  return next;
+                });
+              }}
+            />
+            전체선택
+          </label>
+          {checkedIds.size > 0 && (
+            <button onClick={handleDeleteChecked} style={{ border: "none", background: "#E24B4A", color: "#fff", fontWeight: 700, fontSize: 12, padding: "6px 12px", borderRadius: 8, cursor: "pointer" }}>
+              선택 삭제 ({checkedIds.size})
+            </button>
+          )}
+        </div>
+      )}
+
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {list.map((v) => (
-          <VendorRow key={v.id} vendor={v} orders={orders} updateVendor={updateVendor} removeVendor={removeVendor} askConfirm={askConfirm} />
+          <VendorRow key={v.id} vendor={v} orders={orders} updateVendor={updateVendor} removeVendor={removeVendor} askConfirm={askConfirm} checked={checkedIds.has(v.id)} onToggleChecked={() => toggleChecked(v.id)} />
         ))}
         {list.length === 0 && <div style={{ padding: "30px 0", textAlign: "center", color: "#888780", fontSize: 13 }}>등록된 업체가 없습니다.</div>}
       </div>
@@ -4758,7 +4881,7 @@ function VendorsTab({ vendors, orders, addVendor, addVendorsMulti, updateVendor,
   );
 }
 
-function VendorRow({ vendor, orders, updateVendor, removeVendor, askConfirm }) {
+function VendorRow({ vendor, orders, updateVendor, removeVendor, askConfirm, checked, onToggleChecked }) {
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState(vendor);
   const orderCount = orders.filter((o) => o.vendorId === vendor.id).length;
@@ -4783,7 +4906,9 @@ function VendorRow({ vendor, orders, updateVendor, removeVendor, askConfirm }) {
   }
   return (
     <div style={{ background: "#fff", border: "1px solid #E2E4DD", borderRadius: 10, padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-      <div>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 10, minWidth: 0 }}>
+        <input type="checkbox" checked={!!checked} onChange={onToggleChecked} style={{ marginTop: 3, flexShrink: 0 }} />
+        <div>
         <div style={{ fontWeight: 700, fontSize: 13 }}>{vendor.name} <span style={{ fontWeight: 400, color: "#888780", fontSize: 11 }}>· 주문 {orderCount}건</span></div>
         <div style={{ fontSize: 12, color: "#5F5E5A" }}>{vendor.phone}{vendor.address ? ` · ${vendor.address}` : ""}</div>
         {vendor.bizNo && <div style={{ fontSize: 11, color: "#888780" }}>사업자 {vendor.bizNo}{vendor.ceo ? ` · ${vendor.ceo}` : ""}</div>}
@@ -4794,6 +4919,7 @@ function VendorRow({ vendor, orders, updateVendor, removeVendor, askConfirm }) {
             사업자등록증 보기
           </a>
         )}
+        </div>
       </div>
       <div style={{ display: "flex", gap: 10 }}>
         <button onClick={() => { setForm(vendor); setEditing(true); }} style={{ border: "none", background: "none", color: "#185FA5", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>수정</button>
@@ -5018,6 +5144,7 @@ function OrdersTab({
       </button>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, marginBottom: 12 }}>
+        <StatTile label="입금대기" value={counts.waiting} color="#993C1D" bg="#FAECE7" active={statusFilter === "waiting"} onClick={() => setStatusFilter(statusFilter === "waiting" ? "all" : "waiting")} />
         <StatTile label="결제완료" value={counts.pending} color="#854F0B" bg="#FAEEDA" active={statusFilter === "pending"} onClick={() => setStatusFilter(statusFilter === "pending" ? "all" : "pending")} />
         <StatTile label="발송준비" value={counts.ready} color="#185FA5" bg="#E6F1FB" active={statusFilter === "ready"} onClick={() => setStatusFilter(statusFilter === "ready" ? "all" : "ready")} />
         <StatTile label="발송완료" value={counts.shipped} color="#27500A" bg="#EAF3DE" active={statusFilter === "shipped"} onClick={() => setStatusFilter(statusFilter === "shipped" ? "all" : "shipped")} />
@@ -5074,6 +5201,7 @@ function OrdersTab({
         </select>
         <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} style={selectStyle}>
           <option value="all">주문상태 (전체)</option>
+          <option value="waiting">입금대기 {counts.waiting}</option>
           <option value="pending">결제완료 {counts.pending}</option>
           <option value="ready">발송준비 {counts.ready}</option>
           <option value="shipped">발송완료 {counts.shipped}</option>
@@ -5694,7 +5822,7 @@ function SmsBatchModal({ batch, isDesktop, toggleRow, onToggleAll, onOpenSms, on
   );
 }
 
-function BulkOrderModal({ modal, productMap, onPickMode, toggleRow, onApply, onClose }) {
+function BulkOrderModal({ modal, productMap, products, onPickMode, toggleRow, onPickItemProduct, onApply, onClose }) {
   if (modal.step === "choose") {
     return (
       <div style={overlayStyle} onClick={onClose}>
@@ -5751,25 +5879,68 @@ function BulkOrderModal({ modal, productMap, onPickMode, toggleRow, onApply, onC
         <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
           {rows.map((r) => {
             const hasItems = r.items.length > 0;
-            const itemText = r.items.map((it) => {
-              const known = productMap[it.productId];
-              return `${known?.name || it.name || "상품"}${!known ? "(미등록)" : ""} ×${it.qty}`;
-            }).join(", ");
+            const needsReview = r.items.some((it) => it.confidence === "low" || it.confidence === "none");
             return (
-              <label key={r.tempId} style={{ display: "flex", alignItems: "flex-start", gap: 10, background: hasItems ? "#F7F8F4" : "#FCF3F3", border: hasItems ? "1px solid #E2E4DD" : "1px solid #F0CFCF", borderRadius: 10, padding: "10px 12px", cursor: hasItems ? "pointer" : "not-allowed", opacity: hasItems ? 1 : 0.75 }}>
-                <input type="checkbox" checked={r.checked && hasItems} disabled={!hasItems} onChange={() => toggleRow(r.tempId)} style={{ marginTop: 2 }} />
-                <div style={{ flex: 1 }}>
+              <div key={r.tempId} style={{ display: "flex", alignItems: "flex-start", gap: 10, background: hasItems ? "#F7F8F4" : "#FCF3F3", border: hasItems ? "1px solid #E2E4DD" : "1px solid #F0CFCF", borderRadius: 10, padding: "10px 12px", opacity: hasItems ? 1 : 0.75 }}>
+                <input type="checkbox" checked={r.checked && hasItems} disabled={!hasItems} onChange={() => toggleRow(r.tempId)} style={{ marginTop: 2, cursor: hasItems ? "pointer" : "not-allowed" }} />
+                <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 700 }}>
                     {r.recipName || "이름없음"}
                     {r.recipPhone && <span style={{ fontWeight: 400, color: "#888780", fontSize: 11 }}> · {r.recipPhone}</span>}
+                    {needsReview && (
+                      <span style={{ marginLeft: 6, fontSize: 9.5, fontWeight: 700, color: "#993C1D", background: "#FAECE7", padding: "1px 6px", borderRadius: 10 }}>확인 필요</span>
+                    )}
                   </div>
                   {r.address && <div style={{ fontSize: 11, color: "#888780", marginTop: 1 }}>[{r.postalCode}] {r.address}</div>}
-                  <div style={{ fontSize: 12, color: hasItems ? "#27500A" : "#A32D2D", marginTop: 3 }}>
-                    {hasItems ? itemText : "상품명 없음"}
-                  </div>
+
+                  {hasItems ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+                      {r.items.map((it, itemIdx) => {
+                        const isConfident = it.confidence === "exact" || it.confidence === "manual";
+                        if (isConfident) {
+                          return (
+                            <div key={itemIdx} style={{ fontSize: 12, color: "#27500A" }}>
+                              {it.name} ×{it.qty}
+                            </div>
+                          );
+                        }
+                        // 확신이 낮거나 아예 매칭이 안 된 상품: 원본 표기 + 사장님이 직접 고를 수 있는 드롭다운
+                        return (
+                          <div key={itemIdx} style={{ fontSize: 12 }}>
+                            <div style={{ color: "#A32D2D", marginBottom: 2 }}>
+                              원본 표기: "{it.originalText || it.name}" ×{it.qty}
+                            </div>
+                            <select
+                              value={it.productId || ""}
+                              onChange={(e) => onPickItemProduct(r.tempId, itemIdx, e.target.value || null)}
+                              style={{ width: "100%", padding: "6px 8px", borderRadius: 6, border: "1px solid #E2E4DD", fontSize: 12, background: "#fff" }}
+                            >
+                              <option value="">— 상품 미지정 (원본 이름 그대로 등록) —</option>
+                              {it.candidates && it.candidates.length > 0 && (
+                                <optgroup label="추천 상품">
+                                  {it.candidates.map((c) => (
+                                    <option key={c.id} value={c.id}>{c.name}</option>
+                                  ))}
+                                </optgroup>
+                              )}
+                              <optgroup label="전체 상품에서 선택">
+                                {products
+                                  .filter((p) => !(it.candidates || []).some((c) => c.id === p.id))
+                                  .map((p) => (
+                                    <option key={p.id} value={p.id}>{p.name}</option>
+                                  ))}
+                              </optgroup>
+                            </select>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 12, color: "#A32D2D", marginTop: 3 }}>상품명 없음</div>
+                  )}
                   {r.invoiceNo && <div style={{ fontSize: 10.5, color: "#185FA5", marginTop: 2 }}>송장 {r.invoiceNo}{r.courier ? ` · ${r.courier}` : ""}</div>}
                 </div>
-              </label>
+              </div>
             );
           })}
         </div>
@@ -6455,9 +6626,9 @@ function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, ch
                         <div style={{ fontSize: 11, color: isBizProduct ? "#854F0B" : "#5F5E5A" }}>{won(showPrice)}{isBizProduct && p.wholesalePrice ? " (업체가)" : ""}{p.unit ? ` / ${p.unit}` : ""}</div>
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <button onClick={() => changeCartQty(d.id, p.id, -1)} style={qtyBtnStyle}>−</button>
-                        <span style={{ fontSize: 12.5, fontWeight: 700, minWidth: 14, textAlign: "center" }}>{qty}</span>
-                        <button onClick={() => changeCartQty(d.id, p.id, 1)} style={qtyBtnStyle}>+</button>
+                        <button onClick={() => changeCartQty(d.id, p.id, isBizProduct ? -0.1 : -1)} style={qtyBtnStyle}>−</button>
+                        <span style={{ fontSize: 12.5, fontWeight: 700, minWidth: 24, textAlign: "center" }}>{isBizProduct ? qty.toFixed(1) : qty}</span>
+                        <button onClick={() => changeCartQty(d.id, p.id, isBizProduct ? 0.1 : 1)} style={qtyBtnStyle}>+</button>
                       </div>
                     </div>
                   );
@@ -6486,6 +6657,36 @@ function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, ch
           <label style={{ fontSize: 11, color: "#5F5E5A", fontWeight: 500, display: "block", marginBottom: 4 }}>박스부피 (선택)</label>
           <input placeholder="예: 5" value={draft.boxVolume} onChange={(e) => setDraft({ ...draft, boxVolume: e.target.value })} style={inputStyle()} />
         </div>
+      </div>
+
+      <label style={{ fontSize: 12, color: "#5F5E5A", fontWeight: 700 }}>결제수단</label>
+      <div style={{ display: "flex", gap: 8, marginTop: 6, marginBottom: 16 }}>
+        <button
+          type="button"
+          onClick={() => setDraft({ ...draft, paymentMethod: "transfer" })}
+          style={{
+            flex: 1, padding: "10px 0", borderRadius: 8,
+            border: draft.paymentMethod === "transfer" ? "1px solid #993C1D" : "1px solid #E2E4DD",
+            background: draft.paymentMethod === "transfer" ? "#FAECE7" : "#fff",
+            color: draft.paymentMethod === "transfer" ? "#993C1D" : "#5F5E5A",
+            fontWeight: 700, fontSize: 13, cursor: "pointer",
+          }}
+        >
+          계좌이체 (입금대기로 시작)
+        </button>
+        <button
+          type="button"
+          onClick={() => setDraft({ ...draft, paymentMethod: "card" })}
+          style={{
+            flex: 1, padding: "10px 0", borderRadius: 8,
+            border: draft.paymentMethod !== "transfer" ? "1px solid #854F0B" : "1px solid #E2E4DD",
+            background: draft.paymentMethod !== "transfer" ? "#FAEEDA" : "#fff",
+            color: draft.paymentMethod !== "transfer" ? "#854F0B" : "#5F5E5A",
+            fontWeight: 700, fontSize: 13, cursor: "pointer",
+          }}
+        >
+          이미결제 (결제완료로 시작)
+        </button>
       </div>
 
       <label style={{ fontSize: 12, color: "#5F5E5A", fontWeight: 700 }}>입금 금액</label>
@@ -6819,8 +7020,26 @@ function CustomerAvatar({ name }) {
   );
 }
 
-function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, removeCustomer, updateCustomer, orders, subscriptions, exportCustomersExcel, customerInputRef, handleCustomerUpload, askConfirm }) {
+function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, removeCustomer, removeCustomersMulti, updateCustomer, orders, subscriptions, exportCustomersExcel, customerInputRef, handleCustomerUpload, askConfirm }) {
   const [searchQuery, setSearchQuery] = useState("");
+  const [checkedIds, setCheckedIds] = useState(new Set());
+
+  function toggleChecked(id) {
+    setCheckedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  function handleDeleteChecked() {
+    const ids = [...checkedIds];
+    if (ids.length === 0) return;
+    askConfirm(`선택한 고객 ${ids.length}명을 삭제할까요?`, () => {
+      removeCustomersMulti(ids);
+      setCheckedIds(new Set());
+    });
+  }
 
   const filteredCustomers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -6876,6 +7095,30 @@ function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, rem
         </div>
       )}
 
+      {filteredCustomers.length > 0 && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#5F5E5A", cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={filteredCustomers.length > 0 && filteredCustomers.every((c) => checkedIds.has(c.id))}
+              onChange={(e) => {
+                setCheckedIds((prev) => {
+                  const next = new Set(prev);
+                  filteredCustomers.forEach((c) => (e.target.checked ? next.add(c.id) : next.delete(c.id)));
+                  return next;
+                });
+              }}
+            />
+            전체선택
+          </label>
+          {checkedIds.size > 0 && (
+            <button onClick={handleDeleteChecked} style={{ border: "none", background: "#E24B4A", color: "#fff", fontWeight: 700, fontSize: 12, padding: "6px 12px", borderRadius: 8, cursor: "pointer" }}>
+              선택 삭제 ({checkedIds.size})
+            </button>
+          )}
+        </div>
+      )}
+
       {filteredCustomers.length === 0 ? (
         <div style={{ padding: "40px 0", textAlign: "center", color: "#888780", fontSize: 13 }}>
           {searchQuery ? "검색 결과가 없어요." : "아직 등록된 고객이 없어요."}
@@ -6886,7 +7129,7 @@ function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, rem
             const orderCount = orders.filter((o) => o.customerId === c.id).length;
             const sub = subscriptions.find((s) => s.customerId === c.id && s.active);
             return (
-              <CustomerRow key={c.id} customer={c} orderCount={orderCount} subscription={sub} updateCustomer={updateCustomer} removeCustomer={removeCustomer} askConfirm={askConfirm} />
+              <CustomerRow key={c.id} customer={c} orderCount={orderCount} subscription={sub} updateCustomer={updateCustomer} removeCustomer={removeCustomer} askConfirm={askConfirm} checked={checkedIds.has(c.id)} onToggleChecked={() => toggleChecked(c.id)} />
             );
           })}
         </div>
@@ -6895,7 +7138,7 @@ function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, rem
   );
 }
 
-function CustomerRow({ customer, orderCount, subscription, updateCustomer, removeCustomer, askConfirm }) {
+function CustomerRow({ customer, orderCount, subscription, updateCustomer, removeCustomer, askConfirm, checked, onToggleChecked }) {
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ name: customer.name, phone: customer.phone, address: customer.address, memo: customer.memo });
 
@@ -6919,6 +7162,7 @@ function CustomerRow({ customer, orderCount, subscription, updateCustomer, remov
   if (!editing) {
     return (
       <div style={{ background: "#fff", border: "1px solid #E2E4DD", borderRadius: 10, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10 }}>
+        <input type="checkbox" checked={!!checked} onChange={onToggleChecked} style={{ flexShrink: 0 }} />
         <CustomerAvatar name={customer.name} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontWeight: 700, fontSize: 13, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
