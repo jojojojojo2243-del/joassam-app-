@@ -826,7 +826,7 @@ function App() {
   const [customers, setCustomers] = useState(firebaseReady ? [] : seedCustomers);
   const [products, setProducts] = useState(firebaseReady ? [] : seedProducts);
   const [orders, setOrders] = useState(firebaseReady ? [] : seedOrders);
-  const [vendors, setVendors] = useState(seedVendors);
+  const [vendors, setVendors] = useState(firebaseReady ? [] : seedVendors);
   const [supplier, setSupplier] = useState(DEFAULT_SUPPLIER);
   const [invoices, setInvoices] = useState([]); // 거래명세서 독립 저장
   const [subscriptions, setSubscriptions] = useState([]);
