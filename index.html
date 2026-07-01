@@ -1183,8 +1183,8 @@ function App() {
       if (!searchQuery.trim()) return true;
       const q = searchQuery.trim().toLowerCase();
       const c = customerMap[o.customerId];
-      const name = (c ? c.name : o.recipient?.name) || "";
-      const phone = (c ? c.phone : o.recipient?.phone) || "";
+      const name = o.recipient?.name || (c ? c.name : "") || "";
+      const phone = o.recipient?.phone || (c ? c.phone : "") || "";
       const productNames = orderItemsText(o);
       return [name, phone, productNames].some((v) => v.toLowerCase().includes(q));
     })
@@ -2051,11 +2051,20 @@ function App() {
       const biz = !!vendor;
 
       const recipient = vendor
-        ? { name: vendor.name, phone: vendor.phone, address: vendor.address || d.address, postalCode: estimatePostalCode(vendor.address || d.address || "") }
+        ? {
+            // 받는분 이름을 직접 입력하셨으면 그 이름을 그대로 쓰고(전화번호 우연 일치로 엉뚱한
+            // 업체명으로 바뀌는 사고 방지), 비어있을 때만 등록된 업체명으로 채움
+            name: recipName || vendor.name,
+            phone: recipPhone || vendor.phone,
+            address: d.address || vendor.address,
+            postalCode: estimatePostalCode(d.address || vendor.address || ""),
+          }
         : (c && draft.deliveries.length === 1
           ? { name: c.name, phone: c.phone || draft.sender.phone || "", address: c.address, postalCode: c.postalCode }
           : { name: recipName, phone: recipPhone, address: d.address, postalCode: estimatePostalCode(d.address) });
-      const sender = vendor ? { name: vendor.name, phone: vendor.phone } : (c ? { name: c.name, phone: c.phone } : draft.sender);
+      const sender = vendor
+        ? { name: draft.sender.name || vendor.name, phone: draft.sender.phone || vendor.phone }
+        : (c ? { name: c.name, phone: c.phone } : draft.sender);
 
       // 장바구니를 items로 변환(가격 포함)
       const allItems = Object.entries(d.cart).map(([productId, qty]) => {
@@ -2465,8 +2474,8 @@ function App() {
           orderId,
           invoiceNo,
           checked: true,
-          name: c ? c.name : order.recipient?.name || "고객",
-          phone: c ? c.phone : order.recipient?.phone || "",
+          name: order.recipient?.name || (c ? c.name : "") || "고객",
+          phone: order.recipient?.phone || (c ? c.phone : "") || "",
         });
       });
       if (matches.length === 0) {
@@ -3572,7 +3581,7 @@ function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal,
           {recentOrders.map((o) => {
             const c = customerMap[o.customerId];
             const st = STATUS[o.status];
-            const displayName = c ? c.name : o.recipient?.name || "현장 주문";
+            const displayName = o.recipient?.name || (c ? c.name : "") || "현장 주문";
             return (
               <button
                 key={o.id}
@@ -5352,66 +5361,120 @@ function OrdersTab({
       )}
 
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        {orders.map((o) => {
-          const c = customerMap[o.customerId];
-          const st = STATUS[o.status];
-          const displayName = c ? c.name : o.recipient?.name || "현장 주문";
-          return (
-            <div key={o.id} style={{ marginBottom: 8 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 2px 4px" }}>
-                <span style={{ fontSize: 11, fontWeight: 700, color: "#888780" }}>{orderGroupLabel(o)}</span>
-              </div>
-              <div style={{ background: "#fff", border: "1px solid #E2E4DD", borderLeft: `4px solid ${st.color}`, borderRadius: 10, padding: "10px 12px" }}>
-                <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-                  <input
-                    type="checkbox"
-                    checked={checkedIds.has(o.id)}
-                    onChange={() => toggleCheck(o.id)}
-                    style={{ marginTop: 2 }}
-                  />
-                  <div style={{ flex: 1, cursor: "pointer", minWidth: 0 }} onClick={() => onSelect(o.id)}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 2, gap: 6 }}>
-                      <span style={{ fontWeight: 700, fontSize: 13, whiteSpace: "nowrap" }}>{o.isBusiness ? <span style={{ fontSize: 9.5, fontWeight: 700, color: "#854F0B", background: "#FAEEDA", padding: "1px 5px", borderRadius: 6, marginRight: 5 }}>🏢업체</span> : <span style={{ fontSize: 9.5, fontWeight: 700, color: "#27500A", background: "#EAF3DE", padding: "1px 5px", borderRadius: 6, marginRight: 5 }}>일반</span>}{displayName}</span>
-                      {o.subscriptionId && (
-                        <span style={{ fontSize: 9.5, fontWeight: 700, color: "#185FA5", background: "#E6F1FB", padding: "1px 6px", borderRadius: 10, whiteSpace: "nowrap" }}>
-                          정기구독 {o.subscriptionOccurrence}회차
-                        </span>
-                      )}
-                      <span style={{ fontWeight: 400, color: "#888780", fontSize: 10.5, whiteSpace: "nowrap" }}>{o.recipient?.phone || ""}</span>
-                      <span style={{ flex: 1, textAlign: "right", fontSize: 12, fontWeight: 700, color: "#1B2430" }}>{won(orderTotal(o))}</span>
-                    </div>
-                    <div style={{ fontSize: 12, color: "#5F5E5A", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                      {o.boxInfo && <span style={{ fontSize: 9.5, fontWeight: 700, color: "#185FA5", background: "#E6F1FB", padding: "1px 6px", borderRadius: 8, marginRight: 5 }}>📦 {o.boxInfo}</span>}
-                      {orderItemsText(o) || "상품 없음"}
-                      {o.boxVolume && <span style={{ color: "#888780", fontSize: 10.5 }}> · 부피 {o.boxVolume}</span>}
-                    </div>
-                    {o.recipient?.address && (
-                      <div style={{ fontSize: 10.5, color: "#888780", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        [{o.recipient.postalCode || estimatePostalCode(o.recipient.address)}] {o.recipient.address}
-                      </div>
-                    )}
-                  </div>
-                  <button onClick={(e) => { e.stopPropagation(); onOpenActions(o.id); }} style={{ background: "none", border: "none", color: "#888780", fontSize: 16, cursor: "pointer", padding: 0, flexShrink: 0 }}>⋯</button>
-                </div>
+        {(() => {
+          // 같은 사람(전화번호 기준) + 같은 날짜(orderGroupLabel)를 한 그룹으로 묶음
+          // → 박스로 나뉜 주문들이 카드 하나 안에 고객정보 한 번 + 박스별 줄로 나열됨
+          const groups = [];
+          const groupIndex = {};
+          orders.forEach((o) => {
+            const key = `${o.recipient?.phone || o.recipient?.name || o.id}|${orderGroupLabel(o)}`;
+            if (groupIndex[key] === undefined) {
+              groupIndex[key] = groups.length;
+              groups.push({ key, list: [] });
+            }
+            groups[groupIndex[key]].list.push(o);
+          });
 
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 6 }}>
-                  <button
-                    onClick={() => onOpenInvoice(o.id)}
-                    style={{
-                      fontSize: 10.5, padding: "2px 7px", borderRadius: 6, border: "1px dashed #B9BBB2",
-                      background: "#F5F6F2", color: o.invoiceNo ? "#1B2430" : "#888780", cursor: "pointer",
-                    }}
-                  >
-                    {o.invoiceNo ? `${o.courier || "택배"} ${o.invoiceNo}` : "송장번호 입력"}
-                  </button>
-                  <span style={{ fontSize: 10.5, fontWeight: 700, color: st.color, background: st.bg, padding: "2px 8px", borderRadius: 20 }}>
-                    {st.label}
-                  </span>
+          function toggleGroup(list) {
+            const desired = !list.every((o) => checkedIds.has(o.id));
+            list.forEach((o) => {
+              if (checkedIds.has(o.id) !== desired) toggleCheck(o.id);
+            });
+          }
+
+          return groups.map((g) => {
+            const list = g.list;
+            const first = list[0];
+            const c = customerMap[first.customerId];
+            const displayName = first.recipient?.name || (c ? c.name : "") || "현장 주문";
+            const groupTotal = list.reduce((s, o) => s + orderTotal(o), 0);
+            const multi = list.length > 1;
+            return (
+              <div key={g.key} style={{ marginBottom: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 2px 4px" }}>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: "#888780" }}>{orderGroupLabel(first)}</span>
+                </div>
+                <div style={{ background: "#fff", border: "1px solid #E2E4DD", borderLeft: `4px solid ${STATUS[first.status].color}`, borderRadius: 10, padding: "10px 12px" }}>
+                  {/* 고객(받는분) 정보 - 그룹당 한 번만 표시 */}
+                  <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                    <input
+                      type="checkbox"
+                      checked={list.every((o) => checkedIds.has(o.id))}
+                      onChange={() => toggleGroup(list)}
+                      style={{ marginTop: 2 }}
+                    />
+                    <div style={{ flex: 1, cursor: "pointer", minWidth: 0 }} onClick={() => onSelect(first.id)}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 2, gap: 6 }}>
+                        <span style={{ fontWeight: 700, fontSize: 13, whiteSpace: "nowrap" }}>
+                          {first.isBusiness ? <span style={{ fontSize: 9.5, fontWeight: 700, color: "#854F0B", background: "#FAEEDA", padding: "1px 5px", borderRadius: 6, marginRight: 5 }}>🏢업체</span> : <span style={{ fontSize: 9.5, fontWeight: 700, color: "#27500A", background: "#EAF3DE", padding: "1px 5px", borderRadius: 6, marginRight: 5 }}>일반</span>}
+                          {displayName}
+                        </span>
+                        {first.subscriptionId && (
+                          <span style={{ fontSize: 9.5, fontWeight: 700, color: "#185FA5", background: "#E6F1FB", padding: "1px 6px", borderRadius: 10, whiteSpace: "nowrap" }}>
+                            정기구독 {first.subscriptionOccurrence}회차
+                          </span>
+                        )}
+                        <span style={{ fontWeight: 400, color: "#888780", fontSize: 10.5, whiteSpace: "nowrap" }}>{first.recipient?.phone || ""}</span>
+                        <span style={{ flex: 1, textAlign: "right", fontSize: 12, fontWeight: 700, color: "#1B2430" }}>{won(groupTotal)}</span>
+                      </div>
+                      {first.recipient?.address && (
+                        <div style={{ fontSize: 10.5, color: "#888780", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          [{first.recipient.postalCode || estimatePostalCode(first.recipient.address)}] {first.recipient.address}
+                        </div>
+                      )}
+                    </div>
+                    <button onClick={(e) => { e.stopPropagation(); onOpenActions(first.id); }} style={{ background: "none", border: "none", color: "#888780", fontSize: 16, cursor: "pointer", padding: 0, flexShrink: 0 }}>⋯</button>
+                  </div>
+
+                  {/* 박스(상품)별 줄 - 각자 수량/가격/송장/상태를 따로 가짐 */}
+                  <div style={{ display: "flex", flexDirection: "column", marginTop: 8 }}>
+                    {list.map((o, i) => {
+                      const st = STATUS[o.status];
+                      return (
+                        <div key={o.id} style={{ borderTop: "1px solid #F1F2EC", paddingTop: 7, marginTop: i === 0 ? 0 : 7 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                            {multi && (
+                              <input type="checkbox" checked={checkedIds.has(o.id)} onChange={() => toggleCheck(o.id)} style={{ flexShrink: 0 }} />
+                            )}
+                            <div style={{ flex: 1, cursor: "pointer", minWidth: 0 }} onClick={() => onSelect(o.id)}>
+                              <div style={{ fontSize: 12, color: "#5F5E5A", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                {o.boxInfo && <span style={{ fontSize: 9.5, fontWeight: 700, color: "#185FA5", background: "#E6F1FB", padding: "1px 6px", borderRadius: 8, marginRight: 5 }}>📦 {o.boxInfo}</span>}
+                                {orderItemsText(o) || "상품 없음"}
+                                {o.boxVolume && <span style={{ color: "#888780", fontSize: 10.5 }}> · 부피 {o.boxVolume}</span>}
+                              </div>
+                            </div>
+                            <span style={{ fontSize: 11.5, fontWeight: 700, color: "#1B2430", whiteSpace: "nowrap" }}>{won(orderTotal(o))}</span>
+                          </div>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 5, paddingLeft: multi ? 22 : 0 }}>
+                            <button
+                              onClick={() => onOpenInvoice(o.id)}
+                              style={{
+                                fontSize: 10.5, padding: "2px 7px", borderRadius: 6, border: "1px dashed #B9BBB2",
+                                background: "#F5F6F2", color: o.invoiceNo ? "#1B2430" : "#888780", cursor: "pointer",
+                              }}
+                            >
+                              {o.invoiceNo ? `${o.courier || "택배"} ${o.invoiceNo}` : "송장번호 입력"}
+                            </button>
+                            <span style={{ fontSize: 10.5, fontWeight: 700, color: st.color, background: st.bg, padding: "2px 8px", borderRadius: 20 }}>
+                              {st.label}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {multi && (
+                    <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8, paddingTop: 7, borderTop: "1px solid #E2E4DD" }}>
+                      <span style={{ fontSize: 11.5, color: "#5F5E5A" }}>총 주문금액&nbsp;</span>
+                      <span style={{ fontSize: 12.5, fontWeight: 700, color: "#1B2430" }}>{won(groupTotal)}</span>
+                    </div>
+                  )}
                 </div>
               </div>
-            </div>
-          );
-        })}
+            );
+          });
+        })()}
       </div>
     </div>
   );
@@ -6096,7 +6159,8 @@ function InvoicePreview({ preview, toggleRow, onApply, onCancel }) {
 
 function OrderDetail({ order, customer, productMap, products, total, onBack, setOrderStatus, updateOrder, deleteOrder, askConfirm, couriers }) {
   const st = STATUS[order.status];
-  const recipient = customer ? { name: customer.name, phone: customer.phone, address: customer.address, postalCode: customer.postalCode } : order.recipient;
+  // 주문 당시 저장된 받는분 정보를 항상 우선. 아주 오래된 주문 등 저장된 정보가 없을 때만 연결된 고객 정보로 보완.
+  const recipient = order.recipient || (customer ? { name: customer.name, phone: customer.phone, address: customer.address, postalCode: customer.postalCode } : {});
 
   const [editing, setEditing] = useState(false);
   const [editProdTab, setEditProdTab] = useState("all"); // 전체/공용/일반용/업체용
