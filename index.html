@@ -1256,6 +1256,54 @@ function App() {
     [products]
   );
 
+  // 발송은 됐지만(송장번호 있음) 아직 "도착 확인"을 안 눌렀고, 정상 도착 기준일이 지난 주문들
+  // (금/토 발송은 월요일까지는 정상범위로 봐줌 — expectedArrivalDeadline 참고)
+  const overdueDeliveries = useMemo(() => {
+    const now = new Date();
+    return orders.filter((o) => {
+      if (o.status !== "shipped" || !o.invoiceNo || o.deliveryConfirmed) return false;
+      const dl = expectedArrivalDeadline(o.shippedAt || o.orderDate);
+      return dl && now > dl;
+    });
+  }, [orders]);
+
+  // 확인이 필요한 배송이 있으면, 앱을 열었을 때 딱 한 번 큰 팝업 + 알림음으로 강하게 알려줌
+  const [showOverdueAlert, setShowOverdueAlert] = useState(false);
+  const overdueAlertShownRef = useRef(false);
+  function playAlertSound() {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      const beep = (startTime, freq) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type = "sine";
+        osc.frequency.value = freq;
+        gain.gain.setValueAtTime(0.001, startTime);
+        gain.gain.exponentialRampToValueAtTime(0.25, startTime + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.35);
+        osc.start(startTime);
+        osc.stop(startTime + 0.36);
+      };
+      const now = ctx.currentTime;
+      beep(now, 880);
+      beep(now + 0.4, 880);
+      beep(now + 0.8, 1046);
+    } catch { /* 소리 재생 실패해도 팝업은 그대로 보여주면 되니 무시 */ }
+  }
+  useEffect(() => {
+    if (!dataLoaded) return;
+    if (overdueAlertShownRef.current) return; // 이번에 앱 켜있는 동안엔 한 번만
+    if (overdueDeliveries.length > 0) {
+      overdueAlertShownRef.current = true;
+      setShowOverdueAlert(true);
+      playAlertSound();
+    }
+  }, [dataLoaded, overdueDeliveries.length]);
+
   function orderTotal(order) {
     return (order.items || []).reduce((sum, it) => {
       const p = productMap[it.productId];
@@ -1335,8 +1383,65 @@ function App() {
     setOrders((prev) => prev.map((o) => (o.id === orderId ? { ...o, status } : o)));
   }
 
+  // 금요일에 발송되는 주문은, 토요일 배송이 안 되면 월요일에야 도착하는데 신선식품 특성상
+  // 상하거나 폐기해야 할 수 있어서, 택배사에 미리 요청하는 문구를 메모에 자동으로 남겨둠.
+  // → 송장번호를 입력하는 시점이 아니라, "발송 예정일(예약일이 있으면 그 날짜, 없으면 주문 등록일)"이
+  //   금요일이면 주문을 등록/저장하는 바로 그 순간에 메모에 들어가야 함 (그래야 그 직후 주문서를
+  //   다운로드해서 송장 기표지를 뽑을 때 이미 문구가 포함되어 있음)
+  const FRIDAY_NOTE = "토요일에 꼭 도착 부탁드립니다";
+  function isDateFriday(dateStr) {
+    if (!dateStr) return false;
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return false;
+    return d.getDay() === 5; // 0=일 ... 5=금 6=토
+  }
+  function isFridayToday() {
+    return new Date().getDay() === 5;
+  }
+  function withFridayNote(memo) {
+    const cur = memo || "";
+    if (cur.includes(FRIDAY_NOTE)) return cur;
+    return cur ? `${cur}\n${FRIDAY_NOTE}` : FRIDAY_NOTE;
+  }
+  // 주문 객체(reserveDate/orderDate 보유)를 보고, 발송 예정일이 금요일이면 메모에 문구를 채워서 반환
+  function applyFridayNoteIfNeeded(order) {
+    const shipDate = order.reserveDate || order.orderDate || todayStr();
+    if (!isDateFriday(shipDate)) return order;
+    return { ...order, memo: withFridayNote(order.memo) };
+  }
+
+  // 발송일 기준으로 "이날짜까지는 도착해야 정상"인 기준일 계산
+  // 금요일 발송건은 토요일 배송이 원칙이라, 토요일까지 확인이 안 되면 바로 알려야 함
+  // (토요일에 못 받으면 일요일에 직접 갖다드려야 하고, 특히 주말에 영업하는 업체는 못 받으면
+  //  장사에 지장이 생기기 때문에 월요일까지 미루면 안 됨)
+  function expectedArrivalDeadline(shippedDateStr) {
+    if (!shippedDateStr) return null;
+    const d = new Date(shippedDateStr);
+    if (isNaN(d.getTime())) return null;
+    const wd = d.getDay(); // 0=일 ... 6=토
+    const addDays = wd === 5 ? 1 : wd === 6 ? 2 : wd === 0 ? 1 : 1; // 금→토(+1) / 토→월(+2) / 그 외→다음날
+    const dl = new Date(d);
+    dl.setDate(dl.getDate() + addDays);
+    dl.setHours(23, 59, 59, 999);
+    return dl;
+  }
+
   function updateOrder(orderId, updates) {
-    setOrders((prev) => prev.map((o) => (o.id === orderId ? { ...o, ...updates } : o)));
+    setOrders((prev) => prev.map((o) => {
+      if (o.id !== orderId) return o;
+      const next = { ...o, ...updates };
+      // 예약일을 새로 정하거나 바꿨을 때도, 그 날짜가 금요일이면 바로 메모에 반영
+      if (updates.reserveDate !== undefined && isDateFriday(next.reserveDate)) {
+        next.memo = withFridayNote(next.memo);
+      }
+      // 이번에 송장번호가 새로 들어오면서 발송완료로 바뀌는 경우만 해당 (이미 발송완료였던 걸 수정할 땐 중복 추가 안 함)
+      if (updates.invoiceNo && updates.invoiceNo.trim() && next.status === "shipped" && o.status !== "shipped") {
+        if (isFridayToday()) next.memo = withFridayNote(next.memo);
+        next.shippedAt = todayStr();
+        next.deliveryConfirmed = false;
+      }
+      return next;
+    }));
     fireToast("주문이 수정되었습니다");
   }
 
@@ -1493,7 +1598,7 @@ function App() {
 
     const newOrders = due.map((s) => {
       const occurrence = (s.occurrenceCount || 0) + 1;
-      return {
+      return applyFridayNoteIfNeeded({
         id: uid("o"),
         customerId: s.customerId,
         sender: { name: s.recipient.name, phone: s.recipient.phone },
@@ -1511,7 +1616,7 @@ function App() {
         message: "",
         subscriptionId: s.id,
         subscriptionOccurrence: occurrence,
-      };
+      });
     });
 
     setOrders((prev) => [...newOrders, ...prev]);
@@ -1764,6 +1869,49 @@ function App() {
     });
     return merged;
   }
+
+  // 업체 하나를 골라 기간(예: 6월 1일~6월 30일)을 정하면, 그 기간 동안의 거래명세서를
+  // 전부 모아 합친 "정산서"를 엑셀로 만들어줌. 정산할 때 한 장으로 몰아서 확인하기 위한 기능.
+  function generatePeriodInvoiceSheet(vendorId, startDate, endDate) {
+    if (!vendorId) { fireToast("업체를 선택해주세요"); return; }
+    if (!startDate || !endDate) { fireToast("기간(시작일·종료일)을 선택해주세요"); return; }
+    const vendor = vendors.find((v) => v.id === vendorId);
+    const vName = vendor ? vendor.name : "거래처";
+    const list = invoices
+      .filter((inv) => inv.vendorId === vendorId && inv.date && inv.date >= startDate && inv.date <= endDate)
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    if (list.length === 0) {
+      fireToast(`${startDate} ~ ${endDate} 기간에 ${vName}의 거래명세서가 없어요`);
+      return;
+    }
+    const rows = [];
+    let grandTotal = 0;
+    list.forEach((inv) => {
+      const invTotal = (inv.items || []).reduce((s, it) => s + (it.price || 0) * (it.qty || 0), 0);
+      grandTotal += invTotal;
+      (inv.items || []).forEach((it, idx) => {
+        const amount = (it.price || 0) * (it.qty || 0);
+        rows.push({
+          "거래일자": idx === 0 ? inv.date : "",
+          "상품명": it.name || "상품",
+          "규격": it.unit || "kg",
+          "수량": it.qty || 0,
+          "단가": it.price || 0,
+          "공급가액": amount,
+          "일자별 합계": idx === 0 ? invTotal : "",
+        });
+      });
+    });
+    rows.push({ "거래일자": "", "상품명": "", "규격": "", "수량": "", "단가": "총 합계", "공급가액": grandTotal, "일자별 합계": "" });
+    downloadWorkbook(
+      rows,
+      "정산서",
+      nextFilename(`${vName}_정산서(${startDate}~${endDate})`),
+      ["거래일자", "상품명", "규격", "수량", "단가", "공급가액", "일자별 합계"]
+    );
+    fireToast(`${vName} 정산서 (거래 ${list.length}건, 합계 ${grandTotal.toLocaleString()}원)를 다운로드했어요`);
+  }
+
 
   function addInvoice(inv) {
     setInvoices((prev) => [{ ...inv, id: uid("inv"), createdAt: nowStamp() }, ...prev]);
@@ -2165,6 +2313,9 @@ function App() {
     if (activeDeliveries.length === 0) return;
     justSubmittedRef.current = true; // 내가 등록하는 주문은 알림에서 제외
     const c = draft.customerId ? customerMap[draft.customerId] : null;
+    // 이번 한 번의 "등록" 작업에서 만들어지는 모든 박스가 공유하는 고유 번호
+    // (주문 목록 화면에서 "진짜로 같은 순간에 함께 등록된 박스"만 한 카드로 묶기 위한 기준)
+    const batchId = uid("batch");
 
     // 받는분 이름/연락처가 등록된 업체와 일치하는지 판별하는 함수
     const findVendorFor = (name, phone) => {
@@ -2220,8 +2371,9 @@ function App() {
           return { productId: it.productId, name: it.name || (p ? p.name : ""), qty: it.qty, price };
         });
         const total = items.reduce((s, it) => s + (it.price || 0) * it.qty, 0);
-        return {
+        return applyFridayNoteIfNeeded({
           id: uid("o"),
+          batchId,
           customerId: c && draft.deliveries.length === 1 ? draft.customerId : null,
           isBusiness: biz,
           vendorId: vendor ? vendor.id : "",
@@ -2240,7 +2392,7 @@ function App() {
           memo: draft.memo,
           message: (idx === 0 && bIdx === 0) ? draft.message : "",
           paymentAmount: draft.paymentAmount.trim() && totalBoxes === 1 ? Number(draft.paymentAmount) : total,
-        };
+        });
       });
     });
 
@@ -2515,6 +2667,7 @@ function App() {
         return;
       }
       const stamp = nowStamp();
+      const batchId = uid("batch");
 
       // "구분"이 업체로 표시된 행은, 기존 업체와 매칭하거나(전화번호/이름) 없으면 새 업체로 등록
       const normPhone = (p) => (p || "").replace(/[^0-9]/g, "");
@@ -2541,8 +2694,9 @@ function App() {
       const newOrders = toAdd.map((r) => {
         const matched = customers.find((c) => r.recipPhone && (c.phone || "").replace(/-/g, "") === r.recipPhone.replace(/-/g, ""));
         const total = r.items.reduce((s, it) => s + ((productMap[it.productId]?.price ?? it.price ?? 0) * (it.qty || 0)), 0);
-        return {
+        return applyFridayNoteIfNeeded({
           id: uid("o"),
+          batchId,
           customerId: matched ? matched.id : null,
           isBusiness: !!r.isBusiness,
           vendorId: r.isBusiness ? (vendorIdByRow[r.tempId] || "") : "",
@@ -2560,7 +2714,7 @@ function App() {
           memo: r.memo || "",
           message: "",
           paymentAmount: r.paymentAmount !== "" && r.paymentAmount !== undefined ? r.paymentAmount : total,
-        };
+        });
       });
       setOrders((prev) => [...newOrders, ...prev]);
       registerNewCustomersFromOrders(newOrders); // 업체 주문은 이 함수 내부에서 자동 제외됨
@@ -2696,7 +2850,15 @@ function App() {
             message: fillSmsTemplate(smsTemplate, { appName, name, courier, invoiceNo: match.invoiceNo }),
           });
         }
-        return { ...o, invoiceNo: match.invoiceNo, courier, status: "shipped" };
+        return {
+          ...o,
+          invoiceNo: match.invoiceNo,
+          courier,
+          status: "shipped",
+          memo: (o.status !== "shipped" && isFridayToday()) ? withFridayNote(o.memo) : o.memo,
+          shippedAt: o.status !== "shipped" ? todayStr() : o.shippedAt,
+          deliveryConfirmed: o.status !== "shipped" ? false : o.deliveryConfirmed,
+        };
       })
     );
     setInvoicePreview(null);
@@ -3106,7 +3268,7 @@ function App() {
 
         <div style={{ padding: "16px 16px 16px", maxWidth: "none", flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
           {tab === "home" && (
-            <HomeTab appName={appName} orders={orders} counts={counts} customerMap={customerMap} productMap={productMap} orderTotal={orderTotal} exportBackup={exportBackup} importBackup={importBackup} backupInputRef={backupInputRef} fireToast={fireToast} setTab={setTab} members={members} nickname={nickname} onSelectOrder={(id) => { setTab("orders"); setSelectedOrderId(id); }} couriers={couriers} customerCount={customers.length} vendorCount={vendors.length} />
+            <HomeTab appName={appName} orders={orders} counts={counts} customerMap={customerMap} productMap={productMap} orderTotal={orderTotal} exportBackup={exportBackup} importBackup={importBackup} backupInputRef={backupInputRef} fireToast={fireToast} setTab={setTab} members={members} nickname={nickname} onSelectOrder={(id) => { setTab("orders"); setSelectedOrderId(id); }} couriers={couriers} customerCount={customers.length} vendorCount={vendors.length} overdueCount={overdueDeliveries.length} />
           )}
 
           {tab === "orders" && !selectedOrder && !invoicePreview && (
@@ -3317,9 +3479,20 @@ function App() {
               onUpdateInvoice={updateInvoice}
               onRemoveInvoice={removeInvoice}
               onDownloadInvoice={downloadInvoice}
+              onGeneratePeriodSheet={generatePeriodInvoiceSheet}
               invoiceInputRef2={invoiceInputRef2}
               handleInvoiceFileUpload={handleInvoiceFileUpload}
               askConfirm={askConfirm}
+            />
+          )}
+
+          {tab === "deliverycheck" && (
+            <DeliveryCheckTab
+              orders={overdueDeliveries}
+              customerMap={customerMap}
+              onConfirm={(id) => updateOrder(id, { deliveryConfirmed: true })}
+              onSelectOrder={(id) => { setTab("orders"); setSelectedOrderId(id); }}
+              onBack={() => setTab("home")}
             />
           )}
 
@@ -3375,6 +3548,33 @@ function App() {
               });
             }}
           />
+        )}
+
+        {showOverdueAlert && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(27,36,48,0.65)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100000, padding: 24 }}>
+            <div style={{ background: "#fff", borderRadius: 16, padding: "28px 24px", display: "flex", flexDirection: "column", alignItems: "center", gap: 12, maxWidth: 340, width: "100%", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" }}>
+              <div style={{ fontSize: 48 }}>🚚⚠️</div>
+              <div style={{ fontSize: 17, fontWeight: 700, color: "#A32D2D", textAlign: "center" }}>
+                도착 확인이 필요한 배송이<br />{overdueDeliveries.length}건 있어요!
+              </div>
+              <div style={{ fontSize: 12.5, color: "#5F5E5A", textAlign: "center", lineHeight: 1.6, marginBottom: 8 }}>
+                정상 도착일이 지났는데 아직 확인되지 않았어요.
+                신선식품은 늦어지면 문제가 될 수 있으니 바로 확인해주세요.
+              </div>
+              <button
+                onClick={() => { setShowOverdueAlert(false); setTab("deliverycheck"); }}
+                style={{ width: "100%", padding: "13px 0", borderRadius: 10, border: "none", background: "#A32D2D", color: "#fff", fontWeight: 700, fontSize: 14, cursor: "pointer" }}
+              >
+                지금 확인하러 가기
+              </button>
+              <button
+                onClick={() => setShowOverdueAlert(false)}
+                style={{ width: "100%", padding: "11px 0", borderRadius: 10, border: "none", background: "none", color: "#888780", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}
+              >
+                나중에 확인할게요
+              </button>
+            </div>
+          </div>
         )}
 
         {busyMessage && (
@@ -3761,7 +3961,72 @@ function batchBtnStyle(bg, color) {
   return { flex: 1, padding: "8px 0", borderRadius: 7, border: "none", background: bg, color, fontWeight: 700, fontSize: 11.5, cursor: "pointer" };
 }
 
-function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal, exportBackup, importBackup, backupInputRef, fireToast, setTab, members, nickname, onSelectOrder, couriers, customerCount, vendorCount }) {
+function DeliveryCheckTab({ orders, customerMap, onConfirm, onSelectOrder, onBack }) {
+  const list = [...orders].sort((a, b) => (a.shippedAt || "") < (b.shippedAt || "") ? -1 : 1);
+
+  function trackingUrl(o) {
+    if (!o.invoiceNo) return null;
+    // 네이버에서 "택배사 + 운송장번호 배송조회"로 검색하면, 택배사를 자동으로 인식해서
+    // 검색결과 화면에 바로 배송 현황이 나와요. 우체국 사이트에 직접 들어가는 것보다 간편해요.
+    return `https://search.naver.com/search.naver?query=${encodeURIComponent((o.courier || "우체국택배") + " " + o.invoiceNo + " 배송조회")}`;
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+        <button onClick={onBack} style={{ border: "none", background: "none", fontSize: 18, cursor: "pointer", padding: 0 }}>‹</button>
+        <h1 style={{ fontSize: 19, fontWeight: 700, margin: 0, letterSpacing: "-0.02em" }}>배송 확인</h1>
+      </div>
+      <p style={{ fontSize: 11.5, color: "#888780", margin: "6px 0 16px", lineHeight: 1.6 }}>
+        발송(송장번호 입력) 후 정상적으로 도착했어야 할 날짜가 지났는데 아직 "확인함"을 누르지 않은 주문이에요.
+        금요일 발송 건은 토요일까지 확인이 안 되면 바로 나타나요. (토요일에 못 받으면 일요일에 직접 배송이 필요할 수 있어요)
+      </p>
+
+      {list.length === 0 && (
+        <div style={{ padding: "50px 0", textAlign: "center", color: "#888780", fontSize: 13 }}>
+          지금은 확인이 필요한 배송이 없어요 👍
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {list.map((o) => {
+          const c = customerMap[o.customerId];
+          const name = o.recipient?.name || (c ? c.name : "") || "고객";
+          const url = trackingUrl(o);
+          return (
+            <div key={o.id} style={{ background: "#fff", border: "1px solid #E9B9B9", borderLeft: "4px solid #A32D2D", borderRadius: 10, padding: "12px 14px" }}>
+              <div onClick={() => onSelectOrder(o.id)} style={{ cursor: "pointer", marginBottom: 8 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#1B2430" }}>
+                  {name} <span style={{ fontWeight: 400, color: "#888780", fontSize: 11 }}>{o.recipient?.phone || ""}</span>
+                </div>
+                {o.recipient?.address && (
+                  <div style={{ fontSize: 11, color: "#888780", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {o.recipient.address}
+                  </div>
+                )}
+                <div style={{ fontSize: 11, color: "#5F5E5A", marginTop: 4 }}>
+                  {o.courier || "택배"} · {o.invoiceNo} · 발송일 {o.shippedAt || o.orderDate}
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {url && (
+                  <a href={url} target="_blank" rel="noreferrer" style={{ flex: 1, textAlign: "center", padding: "9px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12, textDecoration: "none" }}>
+                    배송조회 열기
+                  </a>
+                )}
+                <button onClick={() => onConfirm(o.id)} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
+                  도착 확인함
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal, exportBackup, importBackup, backupInputRef, fireToast, setTab, members, nickname, onSelectOrder, couriers, customerCount, vendorCount, overdueCount }) {
   const recentOrders = [...orders]
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
     .slice(0, 5);
@@ -3772,6 +4037,28 @@ function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal,
         <div style={{ fontSize: 18, fontWeight: 700, color: "#1B2430" }}>{appName}</div>
         <div style={{ fontSize: 12, color: "#5F5E5A", marginTop: 2 }}>{nickname ? `${nickname}님 환영합니다` : "신선한 농산물을 믿고 주문해 주세요!"}</div>
       </div>
+
+      {overdueCount > 0 && (
+        <button
+          onClick={() => setTab("deliverycheck")}
+          style={{
+            width: "100%", display: "flex", alignItems: "center", gap: 10, textAlign: "left",
+            background: "#FCEEEE", border: "1px solid #E9B9B9", borderRadius: 10, padding: "12px 14px",
+            marginBottom: 16, cursor: "pointer",
+          }}
+        >
+          <span style={{ fontSize: 20 }}>🚚⚠️</span>
+          <span style={{ flex: 1 }}>
+            <span style={{ display: "block", fontSize: 13, fontWeight: 700, color: "#A32D2D" }}>
+              도착 확인이 필요한 배송이 {overdueCount}건 있어요
+            </span>
+            <span style={{ display: "block", fontSize: 11, color: "#888780", marginTop: 2 }}>
+              발송 후 정상 도착일이 지났는데 아직 확인 안 됐어요. 눌러서 확인하세요
+            </span>
+          </span>
+          <span style={{ color: "#A32D2D", fontSize: 16 }}>›</span>
+        </button>
+      )}
 
       <div style={{ fontSize: 13, fontWeight: 700, color: "#1B2430", marginBottom: 8 }}>오늘 주문 현황</div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 18 }}>
@@ -4695,10 +4982,22 @@ function IntegrationCard({ marketplace, value, updateIntegration, fireToast, onD
   );
 }
 
-function VendorHubTab({ vendors, invoices, products, onManageVendors, onEditSupplier, onAddInvoice, onUpdateInvoice, onRemoveInvoice, onDownloadInvoice, invoiceInputRef2, handleInvoiceFileUpload, askConfirm }) {
+function VendorHubTab({ vendors, invoices, products, onManageVendors, onEditSupplier, onAddInvoice, onUpdateInvoice, onRemoveInvoice, onDownloadInvoice, onGeneratePeriodSheet, invoiceInputRef2, handleInvoiceFileUpload, askConfirm }) {
   const [q, setQ] = useState("");
   const [dateQ, setDateQ] = useState("");
   const [editor, setEditor] = useState(null); // null | {mode:"new"|"edit", invoice}
+  const [periodVendorId, setPeriodVendorId] = useState("");
+  const [periodStart, setPeriodStart] = useState("");
+  const [periodEnd, setPeriodEnd] = useState("");
+
+  function applyPeriodPreset(months) {
+    const end = new Date();
+    const start = new Date();
+    start.setMonth(start.getMonth() - months);
+    const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    setPeriodStart(fmt(start));
+    setPeriodEnd(fmt(end));
+  }
 
   const invSorted = [...invoices].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
   const filtered = invSorted.filter((inv) => {
@@ -4733,6 +5032,45 @@ function VendorHubTab({ vendors, invoices, products, onManageVendors, onEditSupp
 
       <div style={{ fontSize: 10.5, color: "#888780", marginBottom: 14, lineHeight: 1.6, background: "#F7F8F4", borderRadius: 8, padding: "8px 10px" }}>
         업체 주문을 등록하면 거래명세서가 자동으로 여기 저장돼요. 직접 작성·수정·삭제도 가능하고, 업체명·날짜로 검색해 다운로드/업로드할 수 있어요. (주문서 작성은 하단 "+" 또는 주문 탭에서 통합으로 합니다.)
+      </div>
+
+      <div style={{ border: "1px solid #E2E4DD", borderRadius: 10, padding: "12px 14px", marginBottom: 16, background: "#FAFAF7" }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: "#1B2430", marginBottom: 4 }}>📅 업체별 기간 정산서 만들기</div>
+        <div style={{ fontSize: 10.5, color: "#888780", marginBottom: 10, lineHeight: 1.5 }}>
+          업체를 고르고 기간을 정하면, 그 기간 동안의 거래명세서를 전부 합쳐서 정산서 한 장으로 다운로드해요.
+        </div>
+
+        <label style={{ fontSize: 11.5, color: "#5F5E5A", fontWeight: 700 }}>업체 선택</label>
+        <select
+          value={periodVendorId}
+          onChange={(e) => setPeriodVendorId(e.target.value)}
+          style={{ width: "100%", padding: "9px 10px", borderRadius: 8, border: "1px solid #D3D1C7", fontSize: 13, margin: "4px 0 10px", background: "#fff" }}
+        >
+          <option value="">— 업체를 선택하세요 —</option>
+          {vendors.map((v) => (
+            <option key={v.id} value={v.id}>{v.name}</option>
+          ))}
+        </select>
+
+        <label style={{ fontSize: 11.5, color: "#5F5E5A", fontWeight: 700 }}>기간</label>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, margin: "4px 0 8px" }}>
+          <input type="date" value={periodStart} onChange={(e) => setPeriodStart(e.target.value)} style={{ flex: 1, padding: "8px 8px", borderRadius: 8, border: "1px solid #D3D1C7", fontSize: 12.5 }} />
+          <span style={{ color: "#888780", fontSize: 12 }}>~</span>
+          <input type="date" value={periodEnd} onChange={(e) => setPeriodEnd(e.target.value)} style={{ flex: 1, padding: "8px 8px", borderRadius: 8, border: "1px solid #D3D1C7", fontSize: 12.5 }} />
+        </div>
+
+        <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+          <button onClick={() => applyPeriodPreset(1)} style={quickPeriodBtnStyle}>최근 1개월</button>
+          <button onClick={() => applyPeriodPreset(6)} style={quickPeriodBtnStyle}>최근 6개월</button>
+          <button onClick={() => applyPeriodPreset(12)} style={quickPeriodBtnStyle}>최근 1년</button>
+        </div>
+
+        <button
+          onClick={() => onGeneratePeriodSheet(periodVendorId, periodStart, periodEnd)}
+          style={{ width: "100%", padding: "11px 0", borderRadius: 9, border: "none", background: "#185FA5", color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}
+        >
+          ⬇ 정산서 다운로드
+        </button>
       </div>
 
       <div style={{ fontSize: 12, fontWeight: 700, color: "#854F0B", marginBottom: 8 }}>거래명세서 검색</div>
@@ -5583,7 +5921,11 @@ function OrdersTab({
           const groups = [];
           const groupIndex = {};
           orders.forEach((o) => {
-            const key = `${o.recipient?.phone || o.recipient?.name || o.id}|${orderGroupLabel(o)}`;
+            // 같은 사람이라도 "같은 날짜"만으로 묶으면, 예전에 이미 발송 끝난 주문과 오늘 새로
+            // 등록한 주문이 한 카드에 섞여버려 혼동될 수 있음(중복 처리 위험) → batchId(한 번의
+            // 등록 작업에서 함께 생성된 박스만 공유하는 고유번호)를 기준으로 정확하게 그룹핑.
+            // batchId가 없는 옛 데이터는 createdAt으로, 그마저 없으면 주문 하나만 따로 표시.
+            const key = `${o.recipient?.phone || o.recipient?.name || o.id}|${o.batchId || o.createdAt || o.id}`;
             if (groupIndex[key] === undefined) {
               groupIndex[key] = groups.length;
               groups.push({ key, list: [] });
@@ -7606,6 +7948,11 @@ const addBtnStyle = {
 
 const removeBtnStyle = {
   border: "none", background: "none", color: "#A32D2D", fontSize: 12, cursor: "pointer",
+};
+
+const quickPeriodBtnStyle = {
+  flex: 1, padding: "8px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff",
+  color: "#185FA5", fontWeight: 700, fontSize: 11.5, cursor: "pointer",
 };
 
 
