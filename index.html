@@ -770,6 +770,37 @@ function App() {
   const prevOrderCountRef = useRef(null); // 직전 주문 수 (새 주문 감지용)
   const justSubmittedRef = useRef(false); // 내가 방금 주문을 등록했는지 (내 등록은 알림 제외)
   const [newOrderAlert, setNewOrderAlert] = useState(0); // 새로 도착한 주문 수 (화면 알림용)
+  // 이 탭(세션)을 구분하기 위한 고유번호 + 언제 열렸는지. 데이터 이상 발생시 원인 진단용 기록에 사용.
+  const sessionIdRef = useRef("s_" + Math.random().toString(36).slice(2, 10));
+  const sessionStartRef = useRef(Date.now());
+  const [diagLog, setDiagLog] = useState(null); // null=닫힘 | "loading" | 배열
+  async function loadDiagLog() {
+    setDiagLog("loading");
+    try {
+      const snap = await fbDb.collection("stores").doc("_diagnostics").collection("save_events").orderBy("at", "desc").limit(30).get();
+      setDiagLog(snap.docs.map((d) => d.data()));
+    } catch (e) {
+      setDiagLog([]);
+      fireToast("진단 기록을 불러오지 못했어요");
+    }
+  }
+  // 데이터 저장 관련 사건(정상저장/차단됨 등)을 별도 진단용 기록으로 남김 - 문제 발생시 원인 추적용
+  function logDiag(event, extra) {
+    if (!firebaseReady) return;
+    try {
+      fbDb.collection("stores").doc("_diagnostics").collection("save_events").add({
+        event,
+        at: new Date().toISOString(),
+        sessionId: sessionIdRef.current,
+        sessionAgeSec: Math.round((Date.now() - sessionStartRef.current) / 1000),
+        counts: { customers: customers.length, orders: orders.length, products: products.length, vendors: vendors.length },
+        ua: (navigator.userAgent || "").slice(0, 150),
+        href: window.location.href.slice(0, 200),
+        visibility: document.visibilityState,
+        ...extra,
+      }).catch(() => {});
+    } catch { /* 진단 기록 실패는 무시(핵심 기능에 영향 없어야 함) */ }
+  }
 
   // 알림 소리 재생 (브라우저 기본 비프음)
   function playAlertSound() {
@@ -1081,24 +1112,32 @@ function App() {
       );
       if (suspicious) {
         // 직전엔 데이터가 있었는데 특정 항목이 갑자기 비었음 → 사고일 가능성. 저장하지 않음.
+        logDiag("blocked_dropped_to_empty", { prevCounts: { customers: (prev.customers || []).length, orders: (prev.orders || []).length, products: (prev.products || []).length, vendors: (prev.vendors || []).length } });
         return;
       }
-      // 비정상 삭제 방어 2: 새로고침 등으로 이번 세션엔 "직전 데이터"가 없어도(prev가 null이어도),
-      // 이 기기가 예전에 폰에 기억해둔 규모와 비교해서 지금 갑자기 텅 비었으면 역시 저장 보류
-      if (!prev) {
+      // 비정상 삭제 방어 2 (핵심): 지금 저장하려는 내용이 "통째로 텅 비어" 있으면, 이 세션의
+      // prev가 어떤 상태이든(즉 prev가 null이든, 혹은 오래 방치된 탭이라 prev 자체가 이미
+      // 비어있는 상태로 굳어있든 상관없이) 무조건 폰에 기록해둔 "예전 규모"와 비교해서 검증.
+      // → 몇 시간 전부터 열려있던 탭이 계속 빈 상태를 기억하고 있다가, prev도 이미 비어있어서
+      //   "비정상 삭제 방어 1"을 그냥 통과해버리는 구멍을 막기 위함 (실제 사고 원인이었음)
+      const nowTotallyEmpty = customers.length === 0 && orders.length === 0 && products.length === 0 && vendors.length === 0;
+      if (nowTotallyEmpty) {
         try {
           const raw = localStorage.getItem("joassam_last_counts_" + DATA_DOC);
           if (raw) {
             const before = JSON.parse(raw);
-            const droppedVsStored =
-              (before.customers > 0 && customers.length === 0) ||
-              (before.orders > 0 && orders.length === 0) ||
-              (before.products > 0 && products.length === 0) ||
-              (before.vendors > 0 && vendors.length === 0);
-            if (droppedVsStored) return;
+            const hadRealDataBefore = (before.customers > 0) || (before.orders > 0) || (before.products > 0) || (before.vendors > 0);
+            if (hadRealDataBefore) {
+              // 폰이 예전에 실제 데이터를 본 적이 있는데 지금 통째로 비어있음 → 저장 거부 + 경고
+              fireToast("⚠ 데이터가 비어있는 상태로 감지되어 저장을 막았어요. 새로고침 후 다시 확인해주세요");
+              logDiag("blocked_now_totally_empty", { storedCounts: before });
+              return;
+            }
           }
         } catch { /* ignore */ }
+        logDiag("saved_empty_first_use"); // 이 기기에서 예전 기록이 없어 "진짜 최초 사용"으로 판단하고 저장 허용한 경우
       }
+      logDiag("saved");
       fbDb.collection("stores").doc(DATA_DOC).set(data, { merge: true })
         .then(() => {
           lastGoodDataRef.current = data;
@@ -1313,7 +1352,7 @@ function App() {
   // 확인이 필요한 배송이 있으면, 앱을 열었을 때 딱 한 번 큰 팝업 + 알림음으로 강하게 알려줌
   const [showOverdueAlert, setShowOverdueAlert] = useState(false);
   const overdueAlertShownRef = useRef(false);
-  function playAlertSound() {
+  function playOverdueAlertSound() {
     try {
       const Ctx = window.AudioContext || window.webkitAudioContext;
       if (!Ctx) return;
@@ -1343,7 +1382,7 @@ function App() {
     if (overdueDeliveries.length > 0) {
       overdueAlertShownRef.current = true;
       setShowOverdueAlert(true);
-      playAlertSound();
+      playOverdueAlertSound();
     }
   }, [dataLoaded, overdueDeliveries.length]);
 
@@ -3707,6 +3746,45 @@ function App() {
           </div>
         )}
 
+        {diagLog !== null && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "flex-end", zIndex: 100001 }}>
+            <div style={{ background: "#fff", borderRadius: "16px 16px 0 0", padding: "18px 16px", maxHeight: "80vh", width: "100%", display: "flex", flexDirection: "column" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                <h2 style={{ fontSize: 15, fontWeight: 700, margin: 0 }}>🔍 진단 기록 (최근 30건)</h2>
+                <button onClick={() => setDiagLog(null)} style={{ border: "none", background: "none", fontSize: 20, cursor: "pointer", color: "#888780" }}>×</button>
+              </div>
+              <p style={{ fontSize: 10.5, color: "#888780", margin: "0 0 10px" }}>
+                sessionAge(분)가 크면 오래 켜져있던 탭이라는 뜻이에요. blocked_*는 안전장치가 저장을 막은 기록이에요.
+              </p>
+              <div style={{ overflowY: "auto", flex: 1 }}>
+                {diagLog === "loading" && <div style={{ textAlign: "center", padding: 30, color: "#888780", fontSize: 13 }}>불러오는 중...</div>}
+                {Array.isArray(diagLog) && diagLog.length === 0 && <div style={{ textAlign: "center", padding: 30, color: "#888780", fontSize: 13 }}>아직 기록이 없어요</div>}
+                {Array.isArray(diagLog) && diagLog.map((ev, i) => {
+                  const isBlocked = (ev.event || "").startsWith("blocked");
+                  return (
+                    <div key={i} style={{ border: "1px solid #E2E4DD", borderLeft: `4px solid ${isBlocked ? "#A32D2D" : "#2F6F4E"}`, borderRadius: 8, padding: "8px 10px", marginBottom: 6 }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: isBlocked ? "#A32D2D" : "#2F6F4E" }}>{ev.event}</div>
+                      <div style={{ fontSize: 10.5, color: "#5F5E5A", marginTop: 2 }}>
+                        {ev.at} · 세션 {Math.round((ev.sessionAgeSec || 0) / 60)}분째 · 화면상태 {ev.visibility}
+                      </div>
+                      <div style={{ fontSize: 10.5, color: "#5F5E5A" }}>
+                        저장하려던 값 — 고객{ev.counts?.customers} 주문{ev.counts?.orders} 상품{ev.counts?.products} 업체{ev.counts?.vendors}
+                      </div>
+                      {ev.prevCounts && (
+                        <div style={{ fontSize: 10.5, color: "#888780" }}>직전 정상값 — 고객{ev.prevCounts.customers} 주문{ev.prevCounts.orders} 상품{ev.prevCounts.products} 업체{ev.prevCounts.vendors}</div>
+                      )}
+                      {ev.storedCounts && (
+                        <div style={{ fontSize: 10.5, color: "#888780" }}>폰에 기억된 값 — 고객{ev.storedCounts.customers} 주문{ev.storedCounts.orders} 상품{ev.storedCounts.products} 업체{ev.storedCounts.vendors}</div>
+                      )}
+                      <div style={{ fontSize: 9.5, color: "#B9BBB2", marginTop: 2, wordBreak: "break-all" }}>{ev.sessionId} · {ev.href}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
         {busyMessage && (
           <div style={{ position: "fixed", inset: 0, background: "rgba(27,36,48,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 99999 }}>
             <div style={{ background: "#fff", borderRadius: 14, padding: "26px 30px", display: "flex", flexDirection: "column", alignItems: "center", gap: 12, minWidth: 200 }}>
@@ -3762,6 +3840,7 @@ function App() {
             backupInputRef={backupInputRef}
             importBackup={importBackup}
             restoreFromCloudBackup={restoreFromCloudBackup}
+            onOpenDiagnostics={loadDiagLog}
             onClose={() => setSideMenuOpen(false)}
             onNavigate={(t) => { setTab(t); setSideMenuOpen(false); setSelectedOrderId(null); }}
             askConfirm={askConfirm}
@@ -6569,7 +6648,7 @@ function sheetBtnStyle(bg, color) {
   };
 }
 
-function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onClose, onNavigate, askConfirm, handleLogout, fireToast }) {
+function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onClose, onNavigate, askConfirm, handleLogout, fireToast }) {
   const [editingName, setEditingName] = useState(false);
   const [draftName, setDraftName] = useState(appName);
   const [restoreDate, setRestoreDate] = useState(todayStr());
@@ -6657,6 +6736,12 @@ function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, 
               복원
             </button>
           </div>
+          <button
+            onClick={() => { onOpenDiagnostics(); onClose(); }}
+            style={{ width: "100%", marginTop: 10, padding: "9px 0", borderRadius: 8, border: "1px solid #993C1D", background: "#fff", color: "#993C1D", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
+          >
+            🔍 진단 기록 보기 (데이터 이상 원인 확인용)
+          </button>
         </div>
 
         <div style={{ padding: "8px 0", borderBottom: "1px solid #F1F2EC" }}>
