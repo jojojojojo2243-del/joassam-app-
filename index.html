@@ -374,7 +374,10 @@ function squishStr(s) {
   return String(s || "").replace(/\s+/g, "").toLowerCase();
 }
 function coreStr(s) {
-  return squishStr(s).replace(/\d+(\.\d+)?(kg|g|개|박스|봉|팩|병|호|입|매|ml|l)?/g, "").replace(/[()[\]{}]/g, "");
+  return squishStr(s)
+    .replace(/\d+(\.\d+)?(kg|g|개|박스|봉|팩|병|호|입|매|ml|l)?/g, "")
+    .replace(/[x×*]/g, "") // "1kg X 1개" 같은 표기에서 숫자 지우고 남는 곱하기 기호(x/×/*)도 제거
+    .replace(/[()[\]{}]/g, "");
 }
 
 // 저장해도 안전한지 판단하는 핵심 방어 로직 (독립적으로 20개 시나리오 테스트를 거침)
@@ -1933,7 +1936,7 @@ function App() {
     orderList.forEach((o) => {
       const key = `${o.vendorId || ""}|${o.recipient?.name || ""}|${o.orderDate || ""}`;
       if (!groups[key]) groups[key] = { ...o, items: [], _groupKey: key };
-      o.items.forEach((it) => {
+      (o.items || []).forEach((it) => {
         const ex = groups[key].items.find((x) => (x.productId || x.name) === (it.productId || it.name));
         if (ex) ex.qty += it.qty;
         else groups[key].items.push({ ...it });
@@ -2384,7 +2387,7 @@ function App() {
     const parsed = parseOrderMessage(text, products);
     const matched = customers.find((c) => parsed.recipPhone && (c.phone || "").replace(/-/g, "") === parsed.recipPhone.replace(/-/g, ""));
     const cart = {};
-    parsed.items.forEach((it) => {
+    (parsed.items || []).forEach((it) => {
       cart[it.productId] = (cart[it.productId] || 0) + it.qty;
     });
     setDraft((prev) => ({
@@ -3721,7 +3724,7 @@ function App() {
         </div>
 
         {toast && (
-          <div style={{ position: "fixed", bottom: "calc(74px + env(safe-area-inset-bottom, 0px))", left: 16, right: 16, maxWidth: 358, margin: "0 auto", background: "#1B2430", color: "#fff", padding: "10px 14px", borderRadius: 12, fontSize: 12, textAlign: "center", zIndex: 50 }}>
+          <div style={{ position: "fixed", bottom: "calc(74px + env(safe-area-inset-bottom, 0px))", left: 16, right: 16, maxWidth: 358, margin: "0 auto", background: "#1B2430", color: "#fff", padding: "10px 14px", borderRadius: 12, fontSize: 12, textAlign: "center", zIndex: 300000 }}>
             {toast}
           </div>
         )}
@@ -4809,7 +4812,7 @@ function SubscriptionRow({ subscription: s, customers, products, updateSubscript
     memo: s.memo || "",
   });
 
-  const itemsText = s.items.map((it) => `${products.find((p) => p.id === it.productId)?.name || "삭제된 상품"} x${it.qty}`).join(", ");
+  const itemsText = (s.items || []).map((it) => `${products.find((p) => p.id === it.productId)?.name || "삭제된 상품"} x${it.qty}`).join(", ");
   const nextOccurrence = (s.occurrenceCount || 0) + 1;
 
   function startEdit() {
@@ -6713,7 +6716,10 @@ function InvoiceModal({ order, couriers, appName, smsTemplate, onClose, onSave, 
 
 const overlayStyle = {
   position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", display: "flex",
-  alignItems: "flex-end", justifyContent: "center", zIndex: 100,
+  alignItems: "flex-end", justifyContent: "center", zIndex: 200000,
+  // 확인/취소를 묻는 팝업이라 다른 모든 화면(팝업/모달) 위에 항상 떠야 함.
+  // (전에는 100이라, 오늘 새로 만든 백업목록 등 z-index가 높은 화면 뒤에 숨어서
+  //  "눌러도 반응 없음"처럼 보이는 사고가 있었음)
 };
 
 const sheetStyle = {
