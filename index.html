@@ -1884,31 +1884,116 @@ function App() {
       fireToast(`${startDate} ~ ${endDate} 기간에 ${vName}의 거래명세서가 없어요`);
       return;
     }
-    const rows = [];
+    // 기간 안의 모든 거래명세서를 하나로 합쳐서, 항목마다 날짜를 붙인 리스트로 만듦
+    const lineItems = [];
     let grandTotal = 0;
     list.forEach((inv) => {
-      const invTotal = (inv.items || []).reduce((s, it) => s + (it.price || 0) * (it.qty || 0), 0);
-      grandTotal += invTotal;
-      (inv.items || []).forEach((it, idx) => {
+      (inv.items || []).forEach((it) => {
         const amount = (it.price || 0) * (it.qty || 0);
-        rows.push({
-          "거래일자": idx === 0 ? inv.date : "",
-          "상품명": it.name || "상품",
-          "규격": it.unit || "kg",
-          "수량": it.qty || 0,
-          "단가": it.price || 0,
-          "공급가액": amount,
-          "일자별 합계": idx === 0 ? invTotal : "",
-        });
+        grandTotal += amount;
+        lineItems.push({ date: inv.date, name: it.name || "상품", unit: it.unit || "kg", qty: it.qty || 0, price: it.price || 0, amount });
       });
     });
-    rows.push({ "거래일자": "", "상품명": "", "규격": "", "수량": "", "단가": "총 합계", "공급가액": grandTotal, "일자별 합계": "" });
-    downloadWorkbook(
-      rows,
-      "정산서",
-      nextFilename(`${vName}_정산서(${startDate}~${endDate})`),
-      ["거래일자", "상품명", "규격", "수량", "단가", "공급가액", "일자별 합계"]
-    );
+
+    // ===== 정식 거래명세표 형식으로 엑셀 시트 작성 (7열: 월/일/품목/규격/수량/단가/공급가액) =====
+    const ws = {};
+    const colLetter = (n) => { let s = ""; n += 1; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
+    const A = (r, c) => colLetter(c) + (r + 1);
+    const set = (r, c, v) => { ws[A(r, c)] = { v, t: typeof v === "number" ? "n" : "s" }; };
+    const thin = { style: "thin", color: { rgb: "000000" } };
+    const medium = { style: "medium", color: { rgb: "000000" } };
+    const allThin = { top: thin, bottom: thin, left: thin, right: thin };
+    const center = { vertical: "center", horizontal: "center", wrapText: true };
+    const styleCell = (r, c, opts = {}) => {
+      const addr = A(r, c);
+      if (!ws[addr]) ws[addr] = { v: "", t: "s" };
+      // 테두리는 opts.border가 없으면 매번 새 객체를 만들어야 함 (공유 객체를 쓰면, 나중에
+      // 바깥쪽 셀 하나에만 굵게 바꾸려 해도 그 객체를 같이 쓰는 다른 모든 셀까지 같이 굵어짐)
+      ws[addr].s = {
+        border: opts.border || { top: thin, bottom: thin, left: thin, right: thin },
+        alignment: opts.align ? { ...center, horizontal: opts.align } : center,
+        font: { name: "맑은 고딕", sz: opts.sz || 10, bold: !!opts.bold, color: opts.color ? { rgb: opts.color } : undefined },
+      };
+      if (opts.fill) ws[addr].s.fill = { fgColor: { rgb: opts.fill }, patternType: "solid" };
+      if (opts.num) ws[addr].z = "#,##0";
+    };
+    const NCOLS = 7; // 월,일,품목,규격,수량,단가,공급가액
+
+    // 제목
+    set(0, 0, "거   래   명   세   서"); styleCell(0, 0, { sz: 20, bold: true, color: "1F4E9C", border: {} });
+    set(0, 4, `기간: ${startDate} ~ ${endDate}`); styleCell(0, 4, { sz: 11, align: "right", border: {} });
+
+    // 공급받는자 / 공급자 정보 박스 (행 2~6)
+    set(2, 0, "공급받는자"); styleCell(2, 0, { bold: true, fill: "EAF1FB" });
+    set(2, 1, "상호(업체명)"); styleCell(2, 1, { sz: 9 });
+    set(2, 2, vName); styleCell(2, 2, { bold: true, color: "1F4E9C", sz: 12 });
+    set(3, 1, "주소"); styleCell(3, 1, { sz: 9 });
+    set(3, 2, vendor?.address || ""); styleCell(3, 2, { align: "left" });
+    set(4, 1, "연락처"); styleCell(4, 1, { sz: 9 });
+    set(4, 2, vendor?.phone || ""); styleCell(4, 2, {});
+
+    set(2, 4, "공급자"); styleCell(2, 4, { bold: true, fill: "EAF1FB" });
+    set(2, 5, "상호(법인명)"); styleCell(2, 5, { sz: 9 });
+    set(2, 6, supplier.name || ""); styleCell(2, 6, { bold: true, color: "1F4E9C", sz: 12 });
+    set(3, 5, "사업자번호"); styleCell(3, 5, { sz: 9 });
+    set(3, 6, supplier.bizNo || ""); styleCell(3, 6, {});
+    set(4, 5, "전화번호"); styleCell(4, 5, { sz: 9 });
+    set(4, 6, supplier.phone || ""); styleCell(4, 6, {});
+
+    set(5, 0, "합계금액"); styleCell(5, 0, { bold: true, fill: "EAF1FB" });
+    set(5, 1, "₩" + grandTotal.toLocaleString()); styleCell(5, 1, { bold: true, color: "1F4E9C", sz: 12 });
+    set(5, 4, "거래건수"); styleCell(5, 4, { bold: true, fill: "EAF1FB" });
+    set(5, 5, `${list.length}건 (품목 ${lineItems.length}개)`); styleCell(5, 5, { bold: true });
+    for (let c = 2; c <= 3; c++) styleCell(5, c, {});
+    for (let c = 6; c <= 6; c++) styleCell(5, c, {});
+
+    // 품목 헤더
+    const HEAD = 7;
+    ["월", "일", "품목", "규격", "수량", "단가", "공급가액"].forEach((t, c) => {
+      set(HEAD, c, t); styleCell(HEAD, c, { bold: true, fill: "EAF1FB", sz: 10 });
+    });
+
+    // 품목 행 (기간 안의 모든 거래를 날짜순으로, 항목 수만큼 동적으로 생성)
+    lineItems.forEach((it, i) => {
+      const r = HEAD + 1 + i;
+      const parts = (it.date || "").split("-");
+      set(r, 0, parts[1] ? Number(parts[1]) : ""); styleCell(r, 0, { sz: 9 });
+      set(r, 1, parts[2] ? Number(parts[2]) : ""); styleCell(r, 1, { sz: 9 });
+      set(r, 2, it.name); styleCell(r, 2, { sz: 9, align: "left" });
+      set(r, 3, it.unit); styleCell(r, 3, { sz: 9 });
+      set(r, 4, it.qty); styleCell(r, 4, { sz: 9, num: true });
+      set(r, 5, it.price); styleCell(r, 5, { sz: 9, num: true, align: "right" });
+      set(r, 6, it.amount); styleCell(r, 6, { sz: 9, num: true, align: "right" });
+    });
+
+    // 합계 행
+    const SUM = HEAD + 1 + lineItems.length;
+    set(SUM, 0, "합      계"); styleCell(SUM, 0, { bold: true, fill: "EAF1FB" });
+    for (let c = 1; c <= 5; c++) styleCell(SUM, c, { fill: "EAF1FB" });
+    set(SUM, 6, grandTotal); styleCell(SUM, 6, { bold: true, num: true, align: "right", fill: "EAF1FB" });
+
+    // 바깥 테두리를 굵게
+    for (let c = 0; c < NCOLS; c++) {
+      const topAddr = A(2, c); if (ws[topAddr]?.s?.border) ws[topAddr].s.border.top = medium;
+      const botAddr = A(SUM, c); if (ws[botAddr]?.s?.border) ws[botAddr].s.border.bottom = medium;
+    }
+    for (let r = 2; r <= SUM; r++) {
+      const leftAddr = A(r, 0); if (ws[leftAddr]?.s?.border) ws[leftAddr].s.border.left = medium;
+      const rightAddr = A(r, NCOLS - 1); if (ws[rightAddr]?.s?.border) ws[rightAddr].s.border.right = medium;
+    }
+
+    ws["!cols"] = [{ wch: 5 }, { wch: 5 }, { wch: 22 }, { wch: 8 }, { wch: 8 }, { wch: 10 }, { wch: 12 }];
+    ws["!merges"] = [
+      { s: { r: 0, c: 0 }, e: { r: 0, c: 3 } },
+      { s: { r: 0, c: 4 }, e: { r: 0, c: 6 } },
+      { s: { r: 5, c: 2 }, e: { r: 5, c: 3 } },
+      { s: { r: SUM, c: 0 }, e: { r: SUM, c: 5 } },
+    ];
+    ws["!ref"] = "A1:" + A(SUM, NCOLS - 1);
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "정산서");
+    XLSX.writeFile(wb, `거래명세서_${vName}_정산(${startDate}~${endDate}).xlsx`);
     fireToast(`${vName} 정산서 (거래 ${list.length}건, 합계 ${grandTotal.toLocaleString()}원)를 다운로드했어요`);
   }
 
@@ -3966,9 +4051,12 @@ function DeliveryCheckTab({ orders, customerMap, onConfirm, onSelectOrder, onBac
 
   function trackingUrl(o) {
     if (!o.invoiceNo) return null;
-    // 네이버에서 "택배사 + 운송장번호 배송조회"로 검색하면, 택배사를 자동으로 인식해서
-    // 검색결과 화면에 바로 배송 현황이 나와요. 우체국 사이트에 직접 들어가는 것보다 간편해요.
-    return `https://search.naver.com/search.naver?query=${encodeURIComponent((o.courier || "우체국택배") + " " + o.invoiceNo + " 배송조회")}`;
+    // 네이버 통합 배송조회는 우체국택배를 지원 안 해서(일반 검색결과만 나옴), 우체국은
+    // 인터넷우체국 사이트로 직접 연결. 그 외 택배사(CJ대한통운, 한진, 롯데 등)는 네이버가 잘 되어서 그대로 사용.
+    if ((o.courier || "").includes("우체국")) {
+      return `https://service.epost.go.kr/trace.RetrieveDomRigiTraceList.comm?sid1=${o.invoiceNo}`;
+    }
+    return `https://search.naver.com/search.naver?query=${encodeURIComponent((o.courier || "택배") + " " + o.invoiceNo + " 배송조회")}`;
   }
 
   return (
