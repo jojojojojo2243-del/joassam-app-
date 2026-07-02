@@ -147,15 +147,58 @@ function resolveOrderField(label, o) {
 
 // 주문 목록을 훑어서, 아직 고객 목록에 없는 사람(받는분·주문자)을 찾아 새 고객 후보로 반환
 // 새 주문 화면 저장, 엑셀 대량 업로드, "과거 주문에서 고객 채우기" 기능에서 공통으로 사용
+// 이미 등록된 고객(이름+전화번호 일치)이 이전과 다른 주소로 주문한 경우(예: 선물을 여러 곳에 보냄,
+// 집/회사 주소를 번갈아 씀 등) → 그 고객 정보를 지우거나 덮어쓰지 않고, "추가 배송지"로 메모에 기록해서
+// 다음에 그 사람 이름/전화번호로 검색하면 예전에 쓰던 주소들을 다 볼 수 있게 함
+function syncCustomerAddressNotes(ordersToScan, existingCustomers) {
+  const normPhone = (p) => (p || "").replace(/[^0-9]/g, "");
+  const patches = {}; // customerId -> 추가할 memo 텍스트 누적
+  ordersToScan.forEach((o) => {
+    if (o.isBusiness) return;
+    [o.recipient, o.sender].forEach((who) => {
+      const nm = (who?.name || "").trim();
+      const ph = normPhone(who?.phone);
+      const addr = (who?.address || "").trim();
+      if (!nm || !ph || !addr) return;
+      const cust = existingCustomers.find((c) => normPhone(c.phone) === ph && (c.name || "").trim() === nm);
+      if (!cust) return;
+      const curAddr = (cust.address || "").trim();
+      if (!curAddr) return; // 원래 주소가 비어있으면 등록 단계에서 이미 채워짐(여기선 손 안 댐)
+      if (curAddr === addr) return; // 같은 주소면 기록할 필요 없음
+      const curMemo = (patches[cust.id] ?? cust.memo) || "";
+      if (curMemo.includes(addr)) return; // 이미 기록된 주소면 중복 방지
+      patches[cust.id] = `${curMemo ? curMemo + "\n" : ""}추가배송지: ${addr}`;
+    });
+  });
+  return patches; // { [customerId]: 새 memo 문자열 }
+}
+
 function findMissingCustomersFromOrders(ordersToScan, existingCustomers) {
   const normPhone = (p) => (p || "").replace(/[^0-9]/g, "");
   const existing = existingCustomers;
-  // 이미 있는 사람인지 확인 (전화번호 우선, 없으면 이름)
-  const findExisting = (name, phone, extraList) => {
+  // 같은 사람인지 판단:
+  // - 전화번호가 같으면 원칙적으로 같은 사람. 다만 이름까지 서로 다르면(한 사람이 여러 곳에
+  //   선물을 보내며 자기 전화번호를 계속 쓰는 경우) 받는분마다 별도 사람으로 등록
+  // - 전화번호가 없으면 이름으로 판단하되, 주소까지 다르면(동명이인 등) 별도 사람으로 등록
+  const findExisting = (name, phone, address, extraList) => {
     const ph = normPhone(phone);
     const nm = (name || "").trim();
-    return existing.find((cu) => (ph && normPhone(cu.phone) === ph) || (!ph && nm && cu.name === nm))
-      || extraList.find((cu) => (ph && normPhone(cu.phone) === ph) || (!ph && nm && cu.name === nm));
+    const addr = (address || "").trim();
+    const sameEntry = (cu) => {
+      const cuPh = normPhone(cu.phone);
+      const cuNm = (cu.name || "").trim();
+      const cuAddr = (cu.address || "").trim();
+      if (ph && cuPh === ph) {
+        if (nm && cuNm && nm !== cuNm) return false; // 전화번호는 같아도 이름이 다르면 다른 사람
+        return true;
+      }
+      if (!ph && nm && cuNm === nm) {
+        if (addr && cuAddr && cuAddr !== addr) return false; // 이름은 같아도 주소가 다르면 다른 사람
+        return true;
+      }
+      return false;
+    };
+    return existing.find(sameEntry) || extraList.find(sameEntry);
   };
   const toAdd = [];
   ordersToScan.forEach((o) => {
@@ -166,7 +209,7 @@ function findMissingCustomersFromOrders(ordersToScan, existingCustomers) {
     const recipName = (recip.name || "").trim();
     const recipPhone = (recip.phone || "").trim();
     if (recipName || recipPhone) {
-      if (!findExisting(recipName, recipPhone, toAdd)) {
+      if (!findExisting(recipName, recipPhone, recip.address, toAdd)) {
         // 받는분이 주문자와 다른 경우(선물) → 메모에 보내는분 남기기
         const isGift = (snd.name && snd.name.trim() !== recipName) || (normPhone(snd.phone) && normPhone(snd.phone) !== normPhone(recipPhone));
         const giftMemo = isGift && (snd.name || snd.phone) ? `보내는분: ${snd.name || ""}님 ${snd.phone || ""}`.trim() : "";
@@ -185,7 +228,7 @@ function findMissingCustomersFromOrders(ordersToScan, existingCustomers) {
     const sndPhone = (snd.phone || "").trim();
     const sndDiffers = sndName !== recipName || normPhone(sndPhone) !== normPhone(recipPhone);
     if ((sndName || sndPhone) && sndDiffers) {
-      if (!findExisting(sndName, sndPhone, toAdd)) {
+      if (!findExisting(sndName, sndPhone, "", toAdd)) {
         toAdd.push({
           id: uid("c"),
           name: sndName || "이름없음",
@@ -888,6 +931,12 @@ function App() {
     const docRef = fbDb.collection("stores").doc(DATA_DOC);
     const unsubData = docRef.onSnapshot(
       (snap) => {
+        // 캐시(폰에 잠깐 저장된 옛 기억)로 받은 스냅샷은 진짜 서버 데이터가 아직 아님 → 완전히 무시
+        // (이걸 체크 안 하면, 새 기기·오래 방치된 브라우저에서 "비어있는 캐시"를 진짜 데이터로 착각해서
+        //  그 빈 상태가 실제 데이터 위에 저장되어버리는 사고로 이어질 수 있음)
+        if (snap.metadata && snap.metadata.fromCache) {
+          return;
+        }
         if (snap.exists) {
           const data = snap.data();
           if (data.appName) setAppName(data.appName); if (data.appLogo) setAppLogo(data.appLogo);
@@ -929,10 +978,32 @@ function App() {
             products: data.products || prevGood.products,
             vendors: data.vendors || prevGood.vendors,
           };
+          // 이 기기(브라우저)에서 실제 데이터를 정상적으로 확인했다는 표시 + 규모를 남겨둠(다음 확인용)
+          try {
+            const counts = {
+              customers: (data.customers || []).length,
+              orders: (data.orders || []).length,
+              products: (data.products || []).length,
+              vendors: (data.vendors || []).length,
+            };
+            if (counts.customers || counts.orders || counts.products || counts.vendors) {
+              localStorage.setItem("joassam_seen_real_data_" + DATA_DOC, "1");
+              localStorage.setItem("joassam_last_counts_" + DATA_DOC, JSON.stringify(counts));
+            }
+          } catch { /* localStorage 사용 불가 환경이면 무시 */ }
         } else {
-          // 문서가 아직 없음(최초 사용). 빈 상태를 기준으로 첫 로드 완료 처리.
-          // 시드 데이터는 쓰지 않으므로, 사용자가 직접 등록한 것만 저장됨.
-          fbFirstLoadRef.current = true;
+          // 문서가 "없다"고 나온 상황. 정말 처음 쓰는 가게인지, 원래 있던 문서를 순간적으로
+          // 못 읽어온 착오 상황인지 구분해야 함 → 이 기기에서 예전에 실제 데이터를 본 적이
+          // 있다면(localStorage에 표시가 남아있다면) "처음 사용"으로 보지 않고 저장을 계속 막음
+          let sawRealDataBefore = false;
+          try { sawRealDataBefore = localStorage.getItem("joassam_seen_real_data_" + DATA_DOC) === "1"; } catch { /* ignore */ }
+          if (sawRealDataBefore) {
+            // 착오 상황으로 판단 → 저장 계속 금지, 화면에 경고
+            fireToast("⚠ 데이터를 불러오지 못했어요. 화면을 새로고침 해주세요 (저장은 안전을 위해 잠시 막아둡니다)");
+          } else {
+            // 이 기기에서 한 번도 실제 데이터를 본 적 없음 → 진짜 최초 사용으로 판단, 저장 허용
+            fbFirstLoadRef.current = true;
+          }
         }
         setDataLoaded(true);
       },
@@ -976,8 +1047,7 @@ function App() {
     if (firebaseReady) {
       // Firebase에서 첫 데이터를 받기 전에는 저장하지 않음 (시드/빈값이 실데이터를 덮어쓰는 사고 방지)
       if (!fbFirstLoadRef.current) return;
-      // 비정상 삭제 방어: 직전에 있던 항목(고객/주문/상품/업체) 중 "하나라도" 갑자기 통째로 비면 저장 보류
-      // (예전엔 넷이 "동시에" 다 비어야만 막았는데, 그 사이의 구멍으로 실제 사고가 발생해 더 엄격하게 고침)
+      // 비정상 삭제 방어 1: 같은 세션 안에서, 직전에 있던 항목 중 "하나라도" 갑자기 통째로 비면 저장 보류
       const prev = lastGoodDataRef.current;
       const droppedToEmpty = (key, current) => {
         const prevArr = prev && prev[key];
@@ -992,6 +1062,22 @@ function App() {
       if (suspicious) {
         // 직전엔 데이터가 있었는데 특정 항목이 갑자기 비었음 → 사고일 가능성. 저장하지 않음.
         return;
+      }
+      // 비정상 삭제 방어 2: 새로고침 등으로 이번 세션엔 "직전 데이터"가 없어도(prev가 null이어도),
+      // 이 기기가 예전에 폰에 기억해둔 규모와 비교해서 지금 갑자기 텅 비었으면 역시 저장 보류
+      if (!prev) {
+        try {
+          const raw = localStorage.getItem("joassam_last_counts_" + DATA_DOC);
+          if (raw) {
+            const before = JSON.parse(raw);
+            const droppedVsStored =
+              (before.customers > 0 && customers.length === 0) ||
+              (before.orders > 0 && orders.length === 0) ||
+              (before.products > 0 && products.length === 0) ||
+              (before.vendors > 0 && vendors.length === 0);
+            if (droppedVsStored) return;
+          }
+        } catch { /* ignore */ }
       }
       fbDb.collection("stores").doc(DATA_DOC).set(data, { merge: true })
         .then(() => {
@@ -2007,23 +2093,34 @@ function App() {
   }
 
   // 고객 자동 등록: 주문 목록에 들어간 받는분·주문자를 고객 리스트에 추가 (새 사람만, 중복 방지)
+  // + 이미 있는 고객이 새로운(다른) 주소로 주문했으면, 그 주소를 메모에 "추가배송지"로 기록
   // 새 주문 화면 저장과 엑셀 대량 업로드 등록, 양쪽에서 공통으로 사용
   function registerNewCustomersFromOrders(ordersToScan) {
     setCustomers((prevCustomers) => {
       const toAdd = findMissingCustomersFromOrders(ordersToScan, prevCustomers);
-      return toAdd.length > 0 ? [...prevCustomers, ...toAdd] : prevCustomers;
+      const merged = toAdd.length > 0 ? [...prevCustomers, ...toAdd] : prevCustomers;
+      const patches = syncCustomerAddressNotes(ordersToScan, merged);
+      if (Object.keys(patches).length === 0) return merged;
+      return merged.map((c) => (patches[c.id] !== undefined ? { ...c, memo: patches[c.id] } : c));
     });
   }
 
   // 과거에 등록된 주문 전체를 훑어서, 고객 목록에 빠진 사람을 찾아 한 번에 채워넣기
+  // + 이미 등록된 고객이 예전에 다른 주소로도 주문한 적 있으면 그 주소도 메모에 기록
   function backfillMissingCustomers() {
     const toAdd = findMissingCustomersFromOrders(orders, customers);
-    if (toAdd.length === 0) {
-      fireToast("빠진 고객이 없어요, 이미 다 등록되어 있어요");
+    const merged = toAdd.length > 0 ? [...customers, ...toAdd] : customers;
+    const patches = syncCustomerAddressNotes(orders, merged);
+    const patchCount = Object.keys(patches).length;
+    if (toAdd.length === 0 && patchCount === 0) {
+      fireToast("빠진 고객이나 추가 주소가 없어요, 이미 다 정리되어 있어요");
       return;
     }
-    setCustomers((prev) => [...prev, ...toAdd]);
-    fireToast(`과거 주문에서 고객 ${toAdd.length}명을 새로 찾아서 등록했어요`);
+    setCustomers(merged.map((c) => (patches[c.id] !== undefined ? { ...c, memo: patches[c.id] } : c)));
+    const parts = [];
+    if (toAdd.length > 0) parts.push(`신규 고객 ${toAdd.length}명`);
+    if (patchCount > 0) parts.push(`추가 주소 ${patchCount}건`);
+    fireToast(`과거 주문에서 ${parts.join(", ")}을 찾아서 반영했어요`);
   }
 
   function submitOrder(manualBoxesByIdx) {
