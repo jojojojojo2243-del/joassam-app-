@@ -368,6 +368,15 @@ async function sharedSet(key, value) {
   }
 }
 
+// 상품명 비교용: 공백/대소문자 무시, 단위·숫자 제거한 핵심 이름 추출
+// (엑셀 대량 업로드에서 상품명을 등록 상품과 매칭할 때 재사용 — 매 행마다 새로 만들지 않도록 최상위로 분리)
+function squishStr(s) {
+  return String(s || "").replace(/\s+/g, "").toLowerCase();
+}
+function coreStr(s) {
+  return squishStr(s).replace(/\d+(\.\d+)?(kg|g|개|박스|봉|팩|병|호|입|매|ml|l)?/g, "").replace(/[()[\]{}]/g, "");
+}
+
 function estimatePostalCode(address) {
   if (!address || !address.trim()) return "";
   let hash = 0;
@@ -704,47 +713,58 @@ function downloadWorkbook(rows, sheetName, filename, columnOrder, rowFillFn) {
   XLSX.writeFile(wb, filename);
 }
 
-function readWorkbookFile(file, onRows) {
+function readWorkbookFile(file, onRows, onError) {
   const reader = new FileReader();
+  reader.onerror = () => {
+    if (onError) onError(reader.error);
+  };
   reader.onload = (e) => {
-    const data = new Uint8Array(e.target.result);
-    const wb = XLSX.read(data, { type: "array" });
-    // 네이버는 시트명이 '발송처리'인 경우가 있어 우선 사용, 없으면 첫 시트
-    const sheetName = wb.SheetNames.find((n) => /발송처리|주문|order/i.test(n)) || wb.SheetNames[0];
-    const sheet = wb.Sheets[sheetName];
-    // 먼저 행렬로 읽어서 진짜 제목 줄(헤더)이 몇 번째인지 찾는다
-    const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
-    // 제목으로 인정할 키워드들 (쇼핑몰 공통)
-    const headerKeywords = ["상품주문번호", "수취인명", "받는분", "주문번호", "상품명", "수취인연락처1", "통합배송지", "구매자명"];
-    let headerIdx = 0;
-    for (let i = 0; i < Math.min(matrix.length, 10); i++) {
-      const rowCells = (matrix[i] || []).map((c) => String(c).trim());
-      // 셀 전체가 제목 키워드와 정확히 일치하는 경우만 카운트 (설명문 줄 오인 방지)
-      const hits = headerKeywords.filter((k) => rowCells.some((c) => c === k)).length;
-      if (hits >= 2) { headerIdx = i; break; }
+    try {
+      const data = new Uint8Array(e.target.result);
+      const wb = XLSX.read(data, { type: "array" });
+      // 네이버는 시트명이 '발송처리'인 경우가 있어 우선 사용, 없으면 첫 시트
+      const sheetName = wb.SheetNames.find((n) => /발송처리|주문|order/i.test(n)) || wb.SheetNames[0];
+      const sheet = wb.Sheets[sheetName];
+      // 먼저 행렬로 읽어서 진짜 제목 줄(헤더)이 몇 번째인지 찾는다
+      const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+      // 제목으로 인정할 키워드들 (쇼핑몰 공통)
+      const headerKeywords = ["상품주문번호", "수취인명", "받는분", "주문번호", "상품명", "수취인연락처1", "통합배송지", "구매자명"];
+      let headerIdx = 0;
+      for (let i = 0; i < Math.min(matrix.length, 10); i++) {
+        const rowCells = (matrix[i] || []).map((c) => String(c).trim());
+        // 셀 전체가 제목 키워드와 정확히 일치하는 경우만 카운트 (설명문 줄 오인 방지)
+        const hits = headerKeywords.filter((k) => rowCells.some((c) => c === k)).length;
+        if (hits >= 2) { headerIdx = i; break; }
+      }
+      // 찾은 제목 줄을 기준으로 객체 배열 생성
+      const header = (matrix[headerIdx] || []).map((c) => String(c).trim());
+      const rows = [];
+      for (let i = headerIdx + 1; i < matrix.length; i++) {
+        const cells = matrix[i] || [];
+        const obj = {};
+        let hasData = false;
+        header.forEach((h, ci) => {
+          if (!h) return;
+          const val = cells[ci] !== undefined ? cells[ci] : "";
+          obj[h] = val;
+          if (String(val).trim()) hasData = true;
+        });
+        if (hasData) rows.push(obj);
+      }
+      onRows(rows);
+    } catch (err) {
+      // 파일이 깨졌거나 지원하지 않는 형식이면, 조용히 멈추지 말고 반드시 알림
+      if (onError) onError(err);
     }
-    // 찾은 제목 줄을 기준으로 객체 배열 생성
-    const header = (matrix[headerIdx] || []).map((c) => String(c).trim());
-    const rows = [];
-    for (let i = headerIdx + 1; i < matrix.length; i++) {
-      const cells = matrix[i] || [];
-      const obj = {};
-      let hasData = false;
-      header.forEach((h, ci) => {
-        if (!h) return;
-        const val = cells[ci] !== undefined ? cells[ci] : "";
-        obj[h] = val;
-        if (String(val).trim()) hasData = true;
-      });
-      if (hasData) rows.push(obj);
-    }
-    onRows(rows);
   };
   reader.readAsArrayBuffer(file);
 }
 
 function App() {
   const [dataLoaded, setDataLoaded] = useState(false);
+  // 엑셀 등 무거운 파일을 처리하는 동안 "처리 중"을 화면에 보여주기 위한 상태
+  // (표시가 없으면 계산하는 몇 초 동안 앱이 멈춘 것처럼 보이는 문제가 있어 추가)
+  const [busyMessage, setBusyMessage] = useState(null);
   const fbFirstLoadRef = useRef(false); // Firebase에서 첫 데이터를 받았는지 (받기 전엔 저장 금지)
   const lastGoodDataRef = useRef(null); // 마지막으로 정상 저장/로드된 데이터 (복구·방어 기준)
   const prevOrderCountRef = useRef(null); // 직전 주문 수 (새 주문 감지용)
@@ -1229,6 +1249,13 @@ function App() {
     return m;
   }, [products]);
 
+  // 엑셀 대량 주문 업로드시 상품명 매칭 속도 개선용: 상품마다 정규화된 이름을 미리 계산해둠
+  // (products가 바뀔 때만 다시 계산 — 업로드한 행마다 매번 새로 계산하지 않도록)
+  const productIndex = useMemo(
+    () => products.map((p) => ({ p, sq: squishStr(p.name), co: coreStr(p.name) })),
+    [products]
+  );
+
   function orderTotal(order) {
     return order.items.reduce((sum, it) => {
       const p = productMap[it.productId];
@@ -1652,6 +1679,7 @@ function App() {
   function handleVendorUpload(e) {
     const file = e.target.files?.[0];
     if (!file) return;
+    setBusyMessage("업체 엑셀 파일을 읽고 있어요...");
     readWorkbookFile(file, (rows) => {
       const added = rows
         .map((r) => {
@@ -1660,9 +1688,13 @@ function App() {
           return { id: uid("v"), name, bizNo: String(r["사업자번호"] || "").trim(), ceo: String(r["대표자"] || r["성명"] || "").trim(), phone: String(r["전화번호"] || r["전화"] || "").trim(), address: String(r["주소"] || "").trim(), memo: String(r["메모"] || "").trim() };
         })
         .filter(Boolean);
-      if (added.length === 0) { fireToast("추가할 업체 정보를 찾지 못했습니다"); return; }
+      if (added.length === 0) { fireToast("추가할 업체 정보를 찾지 못했습니다"); setBusyMessage(null); return; }
       setVendors((prev) => [...prev, ...added]);
       fireToast(`업체 ${added.length}곳을 추가했습니다`);
+      setBusyMessage(null);
+    }, () => {
+      setBusyMessage(null);
+      fireToast("파일을 읽지 못했어요. 엑셀(.xlsx) 형식이 맞는지 확인해주세요");
     });
     e.target.value = "";
   }
@@ -1762,6 +1794,7 @@ function App() {
   function handleInvoiceFileUpload(e) {
     const file = e.target.files?.[0];
     if (!file) return;
+    setBusyMessage("거래명세서 파일을 읽고 있어요...");
     readWorkbookFile(file, (rows) => {
       const items = [];
       let vendorName = "";
@@ -1774,9 +1807,13 @@ function App() {
         if (nm && (qty || price)) items.push({ name: nm, unit, qty: qty || 1, price });
         if (!vendorName && (r["상호(법인명)"] || r["상호"] || r["공급받는자"])) vendorName = String(r["상호(법인명)"] || r["상호"] || r["공급받는자"]).trim();
       });
-      if (items.length === 0) { fireToast("거래명세서에서 품목을 찾지 못했습니다. 양식을 확인해주세요"); return; }
+      if (items.length === 0) { fireToast("거래명세서에서 품목을 찾지 못했습니다. 양식을 확인해주세요"); setBusyMessage(null); return; }
       const matchedVendor = vendors.find((v) => v.name === vendorName);
       addInvoice({ vendorId: matchedVendor ? matchedVendor.id : "", vendorName: vendorName || "거래처", date, items, memo: "업로드한 명세서" });
+      setBusyMessage(null);
+    }, () => {
+      setBusyMessage(null);
+      fireToast("파일을 읽지 못했어요. 엑셀(.xlsx) 형식이 맞는지 확인해주세요");
     });
     e.target.value = "";
   }
@@ -2315,6 +2352,9 @@ function App() {
     const memo = String(r["메모"] || "").trim();
     const courier = String(r["택배사"] || "").trim();
     const invoiceNo = String(r["송장번호"] || r["운송장번호"] || "").trim();
+    // "구분(일반/업체)" 칸이 있으면 업체 주문 여부 판별에 사용
+    const gubunRaw = String(r["구분 (일반 /업체)"] || r["구분"] || "").trim();
+    const isBiz = /업체/.test(gubunRaw);
     const payRaw = String(r["입금금액"] || r["결제금액"] || r["상품별 총 주문금액"] || "").replace(/[^0-9.]/g, "");
     // 상품명: 네이버는 '상품명' + '옵션정보'(예: "상품선택: 모듬쌈 1Kg")가 따로. 옵션이 있으면 옵션 우선
     const optionText = String(r["옵션정보"] || r["옵션"] || "").replace(/^상품선택\s*:\s*/, "").trim();
@@ -2325,43 +2365,43 @@ function App() {
     const rowPrice = priceRaw ? Number(priceRaw) : 0;
 
     // 상품명 매칭: 불확실한 이름도 등록 상품과 가까우면 등록 상품명으로 변경해서 등록
+    // (squish/core는 미리 계산해둔 productIndex를 사용 — 행마다 다시 계산하지 않아 대량 업로드가 빨라짐)
     const items = [];
     const unmatched = [];
-    const squish = (s) => s.replace(/\s+/g, "").toLowerCase();
-    // 단위/숫자/괄호를 제거한 핵심 토큰 (예: "모듬쌈 1kg" → "모듬쌈")
-    const core = (s) => squish(s).replace(/\d+(\.\d+)?(kg|g|개|박스|봉|팩|병|호|입|매|ml|l)?/g, "").replace(/[()[\]{}]/g, "");
+    const squish = squishStr;
+    const core = coreStr;
     const matchProduct = (nm) => {
       const q = squish(nm), qc = core(nm);
       if (!q) return { product: null, confidence: "none", candidates: [] };
       // 입력에 포함된 단위 토큰 추출 (예: "모듬쌈 800g" → "800g")
       const unitTok = (squish(nm).match(/\d+(\.\d+)?(kg|g|개|박스|봉|팩|병|호|입|매|ml|l)/g) || []);
       // 1) 정확/공백무시 일치 → 확신 높음, 그대로 사용
-      const exact = products.find((p) => squish(p.name) === q);
-      if (exact) return { product: exact, confidence: "exact", candidates: [] };
+      const exact = productIndex.find((e) => e.sq === q);
+      if (exact) return { product: exact.p, confidence: "exact", candidates: [] };
       // 2) 핵심 토큰(단위/숫자 제거) 일치
-      let coreMatches = qc ? products.filter((p) => core(p.name) === qc) : [];
-      if (coreMatches.length === 1) return { product: coreMatches[0], confidence: "exact", candidates: [] };
+      let coreMatches = qc ? productIndex.filter((e) => e.co === qc) : [];
+      if (coreMatches.length === 1) return { product: coreMatches[0].p, confidence: "exact", candidates: [] };
       if (coreMatches.length > 1 && unitTok.length) {
-        const withUnit = coreMatches.filter((p) => unitTok.every((u) => squish(p.name).includes(u)));
-        if (withUnit.length === 1) return { product: withUnit[0], confidence: "exact", candidates: [] };
+        const withUnit = coreMatches.filter((e) => unitTok.every((u) => e.sq.includes(u)));
+        if (withUnit.length === 1) return { product: withUnit[0].p, confidence: "exact", candidates: [] };
         if (withUnit.length > 1) coreMatches = withUnit; // 단위까지 같은데 여러개면 후보로 넘김(아래에서 확인요청)
       }
       if (coreMatches.length >= 1) {
         // 이름은 같은데(예: "모듬쌈") 용량이 여러 개(500g/800g/1kg 등)라 헷갈릴 수 있음 → 추천목록으로
-        return { product: coreMatches[0], confidence: "low", candidates: coreMatches.slice(0, 4) };
+        return { product: coreMatches[0].p, confidence: "low", candidates: coreMatches.slice(0, 4).map((e) => e.p) };
       }
       // 3) 부분 포함 (한쪽이 다른쪽 이름을 포함)
-      let contains = products.filter((p) => { const ps = squish(p.name); return ps && (ps.includes(q) || q.includes(ps)); });
+      let contains = productIndex.filter((e) => e.sq && (e.sq.includes(q) || q.includes(e.sq)));
       if (contains.length > 1 && unitTok.length) {
-        const u = contains.filter((p) => unitTok.every((t) => squish(p.name).includes(t)));
+        const u = contains.filter((e) => unitTok.every((t) => e.sq.includes(t)));
         if (u.length) contains = u;
       }
-      contains.sort((a, b) => squish(b.name).length - squish(a.name).length);
-      if (contains.length) return { product: contains[0], confidence: "low", candidates: contains.slice(0, 4) };
+      contains.sort((a, b) => b.sq.length - a.sq.length);
+      if (contains.length) return { product: contains[0].p, confidence: "low", candidates: contains.slice(0, 4).map((e) => e.p) };
       // 4) 핵심 토큰 부분 포함 (제일 느슨한 매칭 → 확신 낮음)
       if (qc) {
-        const c2 = products.filter((p) => { const pc = core(p.name); return pc && (pc.includes(qc) || qc.includes(pc)); }).sort((a, b) => core(b.name).length - core(a.name).length);
-        if (c2.length) return { product: c2[0], confidence: "low", candidates: c2.slice(0, 4) };
+        const c2 = productIndex.filter((e) => e.co && (e.co.includes(qc) || qc.includes(e.co))).sort((a, b) => b.co.length - a.co.length);
+        if (c2.length) return { product: c2[0].p, confidence: "low", candidates: c2.slice(0, 4).map((e) => e.p) };
       }
       return { product: null, confidence: "none", candidates: [] };
     };
@@ -2400,7 +2440,7 @@ function App() {
       checked: true,
       senderName, senderPhone, recipName, recipPhone,
       address, postalCode, deliveryMessage, reserveDate, boxVolume, memo,
-      courier, invoiceNo,
+      courier, invoiceNo, isBusiness: isBiz,
       paymentAmount: payRaw ? Number(payRaw) : "",
       items, unmatched, productText,
     };
@@ -2418,6 +2458,7 @@ function App() {
   function handleBulkOrderUpload(e) {
     const file = e.target.files?.[0];
     if (!file) return;
+    setBusyMessage("엑셀 파일을 분석하고 있어요...");
     readWorkbookFile(file, (rows) => {
       const parsed = rows
         .map((r, i) => rowToBulkOrder(r, i))
@@ -2428,6 +2469,11 @@ function App() {
       } else {
         setBulkOrderModal((prev) => ({ step: "preview", mode: prev?.mode || "multi", rows: parsed }));
       }
+      setBusyMessage(null);
+    }, () => {
+      setBusyMessage(null);
+      fireToast("파일을 읽지 못했어요. 엑셀(.xlsx) 형식이 맞는지 확인해주세요");
+      setBulkOrderModal(null);
     });
     e.target.value = "";
   }
@@ -2468,12 +2514,37 @@ function App() {
       return;
     }
     const stamp = nowStamp();
+
+    // "구분"이 업체로 표시된 행은, 기존 업체와 매칭하거나(전화번호/이름) 없으면 새 업체로 등록
+    const normPhone = (p) => (p || "").replace(/[^0-9]/g, "");
+    const vendorIdByRow = {};
+    const newVendors = [];
+    toAdd.forEach((r) => {
+      if (!r.isBusiness) return;
+      const ph = normPhone(r.recipPhone);
+      const nm = (r.recipName || "").trim();
+      const existing = vendors.find((v) => (ph && normPhone(v.phone) === ph) || (nm && v.name === nm));
+      if (existing) { vendorIdByRow[r.tempId] = existing.id; return; }
+      const dup = newVendors.find((v) => (ph && normPhone(v.phone) === ph) || (nm && v.name === nm));
+      if (dup) { vendorIdByRow[r.tempId] = dup.id; return; }
+      if (!nm && !ph) return;
+      const created = {
+        id: uid("v"), name: nm || "이름없음", bizNo: "", ceo: "", phone: r.recipPhone || "",
+        email: "", address: r.address || "", memo: "엑셀 업로드에서 자동 등록됨", bizLicense: "",
+      };
+      newVendors.push(created);
+      vendorIdByRow[r.tempId] = created.id;
+    });
+    if (newVendors.length > 0) setVendors((prev) => [...prev, ...newVendors]);
+
     const newOrders = toAdd.map((r) => {
       const matched = customers.find((c) => r.recipPhone && c.phone.replace(/-/g, "") === r.recipPhone.replace(/-/g, ""));
       const total = r.items.reduce((s, it) => s + ((productMap[it.productId]?.price ?? it.price ?? 0) * it.qty), 0);
       return {
         id: uid("o"),
         customerId: matched ? matched.id : null,
+        isBusiness: !!r.isBusiness,
+        vendorId: r.isBusiness ? (vendorIdByRow[r.tempId] || "") : "",
         sender: { name: r.senderName || r.recipName, phone: r.senderPhone || r.recipPhone },
         recipient: { name: r.recipName, phone: r.recipPhone, address: r.address, postalCode: r.postalCode },
         items: r.items.map((it) => ({ productId: it.productId, name: it.name, qty: it.qty, price: it.price })),
@@ -2491,8 +2562,9 @@ function App() {
       };
     });
     setOrders((prev) => [...newOrders, ...prev]);
-    registerNewCustomersFromOrders(newOrders);
-    fireToast(`엑셀에서 주문 ${newOrders.length}건을 등록했습니다`);
+    registerNewCustomersFromOrders(newOrders); // 업체 주문은 이 함수 내부에서 자동 제외됨
+    const bizCount = newOrders.filter((o) => o.isBusiness).length;
+    fireToast(`엑셀에서 주문 ${newOrders.length}건을 등록했습니다${newVendors.length ? ` (신규 업체 ${newVendors.length}곳 자동 등록)` : ""}`);
     setBulkOrderModal(null);
     setTab("orders");
   }
@@ -2558,6 +2630,7 @@ function App() {
   function handleInvoiceUpload(e) {
     const file = e.target.files?.[0];
     if (!file) return;
+    setBusyMessage("송장번호 파일을 읽고 있어요...");
     readWorkbookFile(file, (rows) => {
       const matches = [];
       rows.forEach((row) => {
@@ -2580,6 +2653,10 @@ function App() {
       } else {
         setInvoicePreview({ rows: matches });
       }
+      setBusyMessage(null);
+    }, () => {
+      setBusyMessage(null);
+      fireToast("파일을 읽지 못했어요. 엑셀(.xlsx) 형식이 맞는지 확인해주세요");
     });
     e.target.value = "";
   }
@@ -2619,6 +2696,9 @@ function App() {
       })
     );
     setInvoicePreview(null);
+    // 혹시 이 주문들의 받는분·주문자가 아직 고객 목록에 없다면 이 참에 같이 등록(안전망)
+    const touchedOrders = orders.filter((o) => toApply.some((r) => r.orderId === o.id));
+    registerNewCustomersFromOrders(touchedOrders);
     if (smsRows.length > 0) {
       setSmsBatch({ rows: smsRows });
     } else {
@@ -2716,6 +2796,7 @@ function App() {
   function handleProductUpload(e) {
     const file = e.target.files?.[0];
     if (!file) return;
+    setBusyMessage("상품 엑셀 파일을 읽고 있어요...");
     readWorkbookFile(file, (rows) => {
       const added = rows
         .map((r) => {
@@ -2748,6 +2829,7 @@ function App() {
 
       if (added.length === 0) {
         fireToast("추가할 상품 정보를 찾지 못했습니다");
+        setBusyMessage(null);
         return;
       }
 
@@ -2769,6 +2851,10 @@ function App() {
         fireToast(`상품 ${newOnes.length}건 추가, ${updates.length}건 갱신했습니다`);
         return next;
       });
+      setBusyMessage(null);
+    }, () => {
+      setBusyMessage(null);
+      fireToast("파일을 읽지 못했어요. 엑셀(.xlsx) 형식이 맞는지 확인해주세요");
     });
     e.target.value = "";
   }
@@ -2841,13 +2927,30 @@ function App() {
     const files = Array.from(e.target.files || []);
     if (files.length === 0) return;
 
+    setBusyMessage(files.length > 1 ? `고객 엑셀 파일 ${files.length}개를 읽고 있어요...` : "고객 엑셀 파일을 읽고 있어요...");
     let remaining = files.length;
     let combined = [];
+    let failCount = 0;
+    const checkDone = () => {
+      remaining -= 1;
+      if (remaining === 0) {
+        setBusyMessage(null);
+        if (combined.length === 0 && failCount > 0) {
+          fireToast("파일을 읽지 못했어요. 엑셀(.xlsx) 형식이 맞는지 확인해주세요");
+          return;
+        }
+        finalizeCustomerImport(combined);
+        if (failCount > 0) fireToast(`${failCount}개 파일은 읽지 못해 건너뛰었어요`);
+      }
+    };
     files.forEach((file) => {
       readWorkbookFile(file, (rows) => {
         combined = combined.concat(parseCustomerRows(rows));
-        remaining -= 1;
-        if (remaining === 0) finalizeCustomerImport(combined);
+        checkDone();
+      }, () => {
+        // 이 파일 하나가 깨져도 나머지 파일 처리는 계속 진행 (한 파일 오류로 전체가 멈추지 않도록)
+        failCount += 1;
+        checkDone();
       });
     });
     e.target.value = "";
@@ -2999,7 +3102,7 @@ function App() {
 
         <div style={{ padding: "16px 16px 16px", maxWidth: "none", flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
           {tab === "home" && (
-            <HomeTab appName={appName} orders={orders} counts={counts} customerMap={customerMap} productMap={productMap} orderTotal={orderTotal} exportBackup={exportBackup} importBackup={importBackup} backupInputRef={backupInputRef} fireToast={fireToast} setTab={setTab} members={members} nickname={nickname} onSelectOrder={(id) => { setTab("orders"); setSelectedOrderId(id); }} couriers={couriers} />
+            <HomeTab appName={appName} orders={orders} counts={counts} customerMap={customerMap} productMap={productMap} orderTotal={orderTotal} exportBackup={exportBackup} importBackup={importBackup} backupInputRef={backupInputRef} fireToast={fireToast} setTab={setTab} members={members} nickname={nickname} onSelectOrder={(id) => { setTab("orders"); setSelectedOrderId(id); }} couriers={couriers} customerCount={customers.length} vendorCount={vendors.length} />
           )}
 
           {tab === "orders" && !selectedOrder && !invoicePreview && (
@@ -3268,6 +3371,16 @@ function App() {
               });
             }}
           />
+        )}
+
+        {busyMessage && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(27,36,48,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 99999 }}>
+            <div style={{ background: "#fff", borderRadius: 14, padding: "26px 30px", display: "flex", flexDirection: "column", alignItems: "center", gap: 12, minWidth: 200 }}>
+              <div style={{ width: 34, height: 34, border: "3px solid #E2E4DD", borderTopColor: "#2F6F4E", borderRadius: "50%", animation: "joassamSpin 0.8s linear infinite" }} />
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#1B2430", textAlign: "center" }}>{busyMessage}</div>
+            </div>
+            <style>{"@keyframes joassamSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }"}</style>
+          </div>
         )}
 
         {confirmDialog && (
@@ -3644,7 +3757,7 @@ function batchBtnStyle(bg, color) {
   return { flex: 1, padding: "8px 0", borderRadius: 7, border: "none", background: bg, color, fontWeight: 700, fontSize: 11.5, cursor: "pointer" };
 }
 
-function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal, exportBackup, importBackup, backupInputRef, fireToast, setTab, members, nickname, onSelectOrder, couriers }) {
+function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal, exportBackup, importBackup, backupInputRef, fireToast, setTab, members, nickname, onSelectOrder, couriers, customerCount, vendorCount }) {
   const recentOrders = [...orders]
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
     .slice(0, 5);
@@ -3662,6 +3775,8 @@ function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal,
         <HomeStatTile label="결제완료" value={counts.pending} color="#854F0B" bg="#FAEEDA" onClick={() => setTab("orders")} />
         <HomeStatTile label="발송준비" value={counts.ready} color="#185FA5" bg="#E6F1FB" onClick={() => setTab("orders")} />
         <HomeStatTile label="발송완료" value={counts.shipped} color="#27500A" bg="#EAF3DE" onClick={() => setTab("orders")} />
+        <HomeStatTile label="고객수" value={customerCount} color="#6B4EA6" bg="#EFE9F7" onClick={() => setTab("customers")} />
+        <HomeStatTile label="업체수" value={vendorCount} color="#0F7B7B" bg="#E3F3F3" onClick={() => setTab("vendorhub")} />
       </div>
 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
