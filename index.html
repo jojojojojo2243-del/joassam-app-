@@ -377,6 +377,25 @@ function coreStr(s) {
   return squishStr(s).replace(/\d+(\.\d+)?(kg|g|개|박스|봉|팩|병|호|입|매|ml|l)?/g, "").replace(/[()[\]{}]/g, "");
 }
 
+// 저장해도 안전한지 판단하는 핵심 방어 로직 (독립적으로 20개 시나리오 테스트를 거침)
+// 고객/주문/상품/업체 중 하나라도, "이번 세션 기록(prev)" 또는 "이 기기에 저장된 기록(storedFloor)"
+// 중 어느 하나라도 원래 데이터가 있었다고 하는데 지금 0건이면 사고로 보고 저장을 막음.
+// (한쪽 기준만 보면, 그 기준 자체가 오염되어 있을 때 놓칠 수 있어서 반드시 둘 다 확인함)
+function evaluateSaveGuard({ current, prev, storedFloor }) {
+  const arr = (obj, key) => (obj && obj[key]) || [];
+  const keys = ["customers", "orders", "products", "vendors"];
+  for (const key of keys) {
+    const curLen = arr(current, key).length;
+    if (curLen > 0) continue;
+    const prevLen = prev ? arr(prev, key).length : 0;
+    const storedLen = storedFloor ? (storedFloor[key] || 0) : 0;
+    if (prevLen > 0 || storedLen > 0) {
+      return { blocked: true, reason: key + "_dropped_to_empty" };
+    }
+  }
+  return { blocked: false, reason: null };
+}
+
 function estimatePostalCode(address) {
   if (!address || !address.trim()) return "";
   let hash = 0;
@@ -1098,53 +1117,37 @@ function App() {
     if (firebaseReady) {
       // Firebase에서 첫 데이터를 받기 전에는 저장하지 않음 (시드/빈값이 실데이터를 덮어쓰는 사고 방지)
       if (!fbFirstLoadRef.current) return;
-      // 비정상 삭제 방어 1: 같은 세션 안에서, 직전에 있던 항목 중 "하나라도" 갑자기 통째로 비면 저장 보류
-      const prev = lastGoodDataRef.current;
-      const droppedToEmpty = (key, current) => {
-        const prevArr = prev && prev[key];
-        return prevArr && prevArr.length > 0 && (!current || current.length === 0);
-      };
-      const suspicious = prev && (
-        droppedToEmpty("customers", customers) ||
-        droppedToEmpty("orders", orders) ||
-        droppedToEmpty("products", products) ||
-        droppedToEmpty("vendors", vendors)
-      );
-      if (suspicious) {
-        // 직전엔 데이터가 있었는데 특정 항목이 갑자기 비었음 → 사고일 가능성. 저장하지 않음.
-        logDiag("blocked_dropped_to_empty", { prevCounts: { customers: (prev.customers || []).length, orders: (prev.orders || []).length, products: (prev.products || []).length, vendors: (prev.vendors || []).length } });
+
+      // 저장해도 안전한지 검증 (독립적으로 20개 시나리오 테스트를 거친 함수 사용)
+      let storedFloor = null;
+      try {
+        const raw = localStorage.getItem("joassam_last_counts_" + DATA_DOC);
+        if (raw) storedFloor = JSON.parse(raw);
+      } catch { /* ignore */ }
+      const guard = evaluateSaveGuard({ current: { customers, orders, products, vendors }, prev: lastGoodDataRef.current, storedFloor });
+      if (guard.blocked) {
+        fireToast("⚠ 데이터가 비어있는 상태로 감지되어 저장을 막았어요. 새로고침 후 다시 확인해주세요");
+        logDiag("blocked_" + guard.reason, {
+          prevCounts: lastGoodDataRef.current ? { customers: (lastGoodDataRef.current.customers || []).length, orders: (lastGoodDataRef.current.orders || []).length, products: (lastGoodDataRef.current.products || []).length, vendors: (lastGoodDataRef.current.vendors || []).length } : null,
+          storedCounts: storedFloor,
+        });
         return;
-      }
-      // 비정상 삭제 방어 2 (핵심): 지금 저장하려는 내용이 "통째로 텅 비어" 있으면, 이 세션의
-      // prev가 어떤 상태이든(즉 prev가 null이든, 혹은 오래 방치된 탭이라 prev 자체가 이미
-      // 비어있는 상태로 굳어있든 상관없이) 무조건 폰에 기록해둔 "예전 규모"와 비교해서 검증.
-      // → 몇 시간 전부터 열려있던 탭이 계속 빈 상태를 기억하고 있다가, prev도 이미 비어있어서
-      //   "비정상 삭제 방어 1"을 그냥 통과해버리는 구멍을 막기 위함 (실제 사고 원인이었음)
-      const nowTotallyEmpty = customers.length === 0 && orders.length === 0 && products.length === 0 && vendors.length === 0;
-      if (nowTotallyEmpty) {
-        try {
-          const raw = localStorage.getItem("joassam_last_counts_" + DATA_DOC);
-          if (raw) {
-            const before = JSON.parse(raw);
-            const hadRealDataBefore = (before.customers > 0) || (before.orders > 0) || (before.products > 0) || (before.vendors > 0);
-            if (hadRealDataBefore) {
-              // 폰이 예전에 실제 데이터를 본 적이 있는데 지금 통째로 비어있음 → 저장 거부 + 경고
-              fireToast("⚠ 데이터가 비어있는 상태로 감지되어 저장을 막았어요. 새로고침 후 다시 확인해주세요");
-              logDiag("blocked_now_totally_empty", { storedCounts: before });
-              return;
-            }
-          }
-        } catch { /* ignore */ }
-        logDiag("saved_empty_first_use"); // 이 기기에서 예전 기록이 없어 "진짜 최초 사용"으로 판단하고 저장 허용한 경우
       }
       logDiag("saved");
       fbDb.collection("stores").doc(DATA_DOC).set(data, { merge: true })
         .then(() => {
           lastGoodDataRef.current = data;
-          // 하루 단위 백업: 날짜 키로 백업 문서에 저장(있으면 갱신)
+          // 하루 단위 백업: 그날의 "첫 저장"만 기록하고, 그 이후로는 같은 날짜 백업을 덮어쓰지 않음
+          // (전에는 그날 저장될 때마다 계속 갱신돼서, 중간에 사고가 나면 그날 백업도 같이
+          //  나빠진 내용으로 바뀌어버리는 문제가 있었음 → 이제는 그날 첫 정상 저장 시점만 보존됨)
           try {
             const today = todayStr();
-            fbDb.collection("stores").doc((IS_TEST ? "test_backup_" : "backup_") + today).set({ ...data, backedUpAt: nowStamp() }, { merge: true }).catch(() => {});
+            const backupRef = fbDb.collection("stores").doc((IS_TEST ? "test_backup_" : "backup_") + today);
+            backupRef.get().then((backupSnap) => {
+              if (!backupSnap.exists) {
+                backupRef.set({ ...data, backedUpAt: nowStamp() }).catch(() => {});
+              }
+            }).catch(() => {});
           } catch (e) {}
         })
         .catch(() => {});
@@ -3290,6 +3293,36 @@ function App() {
   }
 
   // 클라우드에 매일 자동 저장되는 백업(backup_YYYY-MM-DD)에서 통째로 복원
+  // 저장된 모든 날짜별 백업을 한 번에 훑어서, 각 날짜에 데이터가 실제로 몇 건씩 들어있는지 보여줌
+  // (어느 날짜가 진짜 정상 데이터인지 하나씩 추측하지 않고 한눈에 확인하기 위함)
+  const [backupList, setBackupList] = useState(null); // null=닫힘 | "loading" | 배열
+  async function loadBackupList() {
+    setBackupList("loading");
+    try {
+      const snap = await fbDb.collection("stores").get();
+      const prefix = IS_TEST ? "test_backup_" : "backup_";
+      const list = snap.docs
+        .filter((d) => d.id.startsWith(prefix))
+        .map((d) => {
+          const data = d.data() || {};
+          return {
+            id: d.id,
+            dateStr: d.id.replace(prefix, ""),
+            customers: (data.customers || []).length,
+            orders: (data.orders || []).length,
+            products: (data.products || []).length,
+            vendors: (data.vendors || []).length,
+            backedUpAt: data.backedUpAt || "",
+          };
+        })
+        .sort((a, b) => (a.dateStr < b.dateStr ? 1 : -1)); // 최신 날짜부터
+      setBackupList(list);
+    } catch (e) {
+      setBackupList([]);
+      fireToast("백업 목록을 불러오지 못했어요");
+    }
+  }
+
   async function restoreFromCloudBackup(dateStr) {
     if (!firebaseReady) { fireToast("Firebase 연결 상태에서만 사용할 수 있어요"); return; }
     try {
@@ -3746,6 +3779,52 @@ function App() {
           </div>
         )}
 
+        {backupList !== null && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "flex-end", zIndex: 100001 }}>
+            <div style={{ background: "#fff", borderRadius: "16px 16px 0 0", padding: "18px 16px", maxHeight: "80vh", width: "100%", display: "flex", flexDirection: "column" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                <h2 style={{ fontSize: 15, fontWeight: 700, margin: 0 }}>📋 전체 백업 목록</h2>
+                <button onClick={() => setBackupList(null)} style={{ border: "none", background: "none", fontSize: 20, cursor: "pointer", color: "#888780" }}>×</button>
+              </div>
+              <p style={{ fontSize: 10.5, color: "#888780", margin: "0 0 10px" }}>
+                날짜별로 실제 몇 건씩 저장되어 있는지 한눈에 보여요. 데이터가 들어있는 날짜를 찾아서 "이 날짜로 복원"을 누르세요.
+              </p>
+              <div style={{ overflowY: "auto", flex: 1 }}>
+                {backupList === "loading" && <div style={{ textAlign: "center", padding: 30, color: "#888780", fontSize: 13 }}>불러오는 중...</div>}
+                {Array.isArray(backupList) && backupList.length === 0 && <div style={{ textAlign: "center", padding: 30, color: "#888780", fontSize: 13 }}>백업이 없어요</div>}
+                {Array.isArray(backupList) && backupList.map((b) => {
+                  const hasData = b.customers > 0 || b.orders > 0 || b.products > 0;
+                  return (
+                    <div key={b.id} style={{ border: "1px solid #E2E4DD", borderLeft: `4px solid ${hasData ? "#2F6F4E" : "#B9BBB2"}`, borderRadius: 8, padding: "10px 12px", marginBottom: 8 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <span style={{ fontSize: 13, fontWeight: 700, color: hasData ? "#1B2430" : "#B9BBB2" }}>{b.dateStr}</span>
+                        {hasData ? (
+                          <button
+                            onClick={() => askConfirm(
+                              `${b.dateStr} 백업(고객${b.customers}·주문${b.orders}·상품${b.products}·업체${b.vendors})으로 되돌릴까요?`,
+                              () => { restoreFromCloudBackup(b.dateStr); setBackupList(null); },
+                              "복원"
+                            )}
+                            style={{ border: "none", background: "#185FA5", color: "#fff", borderRadius: 6, padding: "5px 10px", fontWeight: 700, fontSize: 11, cursor: "pointer" }}
+                          >
+                            이 날짜로 복원
+                          </button>
+                        ) : (
+                          <span style={{ fontSize: 10.5, color: "#B9BBB2" }}>데이터 없음</span>
+                        )}
+                      </div>
+                      <div style={{ fontSize: 10.5, color: "#5F5E5A", marginTop: 4 }}>
+                        고객 {b.customers} · 주문 {b.orders} · 상품 {b.products} · 업체 {b.vendors}
+                      </div>
+                      {b.backedUpAt && <div style={{ fontSize: 9.5, color: "#B9BBB2", marginTop: 2 }}>백업 시각: {b.backedUpAt}</div>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
         {diagLog !== null && (
           <div style={{ position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "flex-end", zIndex: 100001 }}>
             <div style={{ background: "#fff", borderRadius: "16px 16px 0 0", padding: "18px 16px", maxHeight: "80vh", width: "100%", display: "flex", flexDirection: "column" }}>
@@ -3841,6 +3920,7 @@ function App() {
             importBackup={importBackup}
             restoreFromCloudBackup={restoreFromCloudBackup}
             onOpenDiagnostics={loadDiagLog}
+            onOpenBackupList={loadBackupList}
             onClose={() => setSideMenuOpen(false)}
             onNavigate={(t) => { setTab(t); setSideMenuOpen(false); setSelectedOrderId(null); }}
             askConfirm={askConfirm}
@@ -6648,7 +6728,7 @@ function sheetBtnStyle(bg, color) {
   };
 }
 
-function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onClose, onNavigate, askConfirm, handleLogout, fireToast }) {
+function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onOpenBackupList, onClose, onNavigate, askConfirm, handleLogout, fireToast }) {
   const [editingName, setEditingName] = useState(false);
   const [draftName, setDraftName] = useState(appName);
   const [restoreDate, setRestoreDate] = useState(todayStr());
@@ -6741,6 +6821,12 @@ function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, 
             style={{ width: "100%", marginTop: 10, padding: "9px 0", borderRadius: 8, border: "1px solid #993C1D", background: "#fff", color: "#993C1D", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
           >
             🔍 진단 기록 보기 (데이터 이상 원인 확인용)
+          </button>
+          <button
+            onClick={() => { onOpenBackupList(); onClose(); }}
+            style={{ width: "100%", marginTop: 8, padding: "9px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
+          >
+            📋 전체 백업 목록 보기 (날짜별 데이터 개수 확인)
           </button>
         </div>
 
