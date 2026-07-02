@@ -131,7 +131,7 @@ function resolveOrderField(label, o) {
     "우편번호": o.recipient?.postalCode || estimatePostalCode(o.recipient?.address),
     "받는분 주소(전체)": o.recipient?.address || "",
     "상품명": orderItemsText(o),
-    "수량": o.items.reduce((s, it) => s + it.qty, 0),
+    "수량": (o.items || []).reduce((s, it) => s + (it.qty || 0), 0),
     "박스부피": o.boxVolume || "",
     "배송메시지": o.deliveryMessage || "",
     "메모": o.memo || "",
@@ -1257,15 +1257,15 @@ function App() {
   );
 
   function orderTotal(order) {
-    return order.items.reduce((sum, it) => {
+    return (order.items || []).reduce((sum, it) => {
       const p = productMap[it.productId];
       const price = p ? p.price : (it.price || 0);
-      return sum + price * it.qty;
+      return sum + price * (it.qty || 0);
     }, 0);
   }
 
   function orderItemsText(order) {
-    return order.items.map((it) => `${(productMap[it.productId]?.name) || it.name || "상품"} x${it.qty}`).join(", ");
+    return (order.items || []).map((it) => `${(productMap[it.productId]?.name) || it.name || "상품"} x${it.qty || 0}`).join(", ");
   }
 
   function fireToast(msg) {
@@ -1371,7 +1371,7 @@ function App() {
     const n = checkedIds.size;
     setOrders((prev) => prev.map((o) => (checkedIds.has(o.id) ? { ...o, status } : o)));
     setCheckedIds(new Set());
-    fireToast(`주문 ${n}건의 상태를 ${STATUS[status].label}(으)로 변경했습니다`);
+    fireToast(`주문 ${n}건의 상태를 ${(STATUS[status] || STATUS.pending).label}(으)로 변경했습니다`);
   }
 
   function setCheckedOrdersBusiness(toBusiness) {
@@ -4149,7 +4149,7 @@ function SubscriptionRow({ subscription: s, customers, products, updateSubscript
     name: s.recipient.name, phone: s.recipient.phone, address: s.recipient.address,
     cycleDays: String(s.cycleDays), nextDate: s.nextDate,
     totalOccurrences: s.totalOccurrences ? String(s.totalOccurrences) : "",
-    cart: Object.fromEntries(s.items.map((it) => [it.productId, it.qty])),
+    cart: Object.fromEntries((s.items || []).map((it) => [it.productId, it.qty])),
     memo: s.memo || "",
   });
 
@@ -4161,7 +4161,7 @@ function SubscriptionRow({ subscription: s, customers, products, updateSubscript
       name: s.recipient.name, phone: s.recipient.phone, address: s.recipient.address,
       cycleDays: String(s.cycleDays), nextDate: s.nextDate,
       totalOccurrences: s.totalOccurrences ? String(s.totalOccurrences) : "",
-      cart: Object.fromEntries(s.items.map((it) => [it.productId, it.qty])),
+      cart: Object.fromEntries((s.items || []).map((it) => [it.productId, it.qty])),
       memo: s.memo || "",
     });
     setEditing(true);
@@ -6387,7 +6387,7 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
     deliveryMessage: order.deliveryMessage || "",
     memo: order.memo || "",
     reserveDate: order.reserveDate || "",
-    cart: Object.fromEntries(order.items.map((it) => [it.productId, it.qty])),
+    cart: Object.fromEntries((order.items || []).map((it) => [it.productId, it.qty])),
   }));
 
   function startEdit() {
@@ -6398,7 +6398,7 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
       deliveryMessage: order.deliveryMessage || "",
       memo: order.memo || "",
       reserveDate: order.reserveDate || "",
-      cart: Object.fromEntries(order.items.map((it) => [it.productId, it.qty])),
+      cart: Object.fromEntries((order.items || []).map((it) => [it.productId, it.qty])),
     });
     setEditing(true);
   }
@@ -6476,8 +6476,8 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
             <FieldRow label="받는분 연락처" value={recipient?.phone || "-"} />
             <FieldRow label="우편번호" value={recipient?.address ? (recipient.postalCode || estimatePostalCode(recipient.address)) : "-"} />
             <FieldRow label="받는분 주소(전체)" value={recipient?.address || "-"} />
-            <FieldRow label="상품명" value={order.items.map((it) => productMap[it.productId]?.name || it.name || "상품").join(", ") || "-"} />
-            <FieldRow label="수량" value={String(order.items.reduce((s, it) => s + it.qty, 0))} />
+            <FieldRow label="상품명" value={(order.items || []).map((it) => productMap[it.productId]?.name || it.name || "상품").join(", ") || "-"} />
+            <FieldRow label="수량" value={String((order.items || []).reduce((s, it) => s + (it.qty || 0), 0))} />
             <FieldRow label="박스부피" value={order.boxVolume || "-"} />
             {order.boxInfo && <FieldRow label="박스" value={order.boxInfo} />}
             {(() => {
@@ -6511,7 +6511,7 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
           </div>
 
           <div style={{ borderTop: "1px dashed #D3D1C7", borderBottom: "1px dashed #D3D1C7", padding: "10px 0", margin: "0 0 14px" }}>
-            {order.items.map((it, idx) => {
+            {(order.items || []).map((it, idx) => {
               const p = productMap[it.productId];
               const dispName = p ? p.name : (it.name || "상품");
               const dispPrice = p ? p.price : (it.price || 0);
