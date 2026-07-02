@@ -2064,7 +2064,7 @@ function App() {
 
   function applyParsedMessage(text) {
     const parsed = parseOrderMessage(text, products);
-    const matched = customers.find((c) => parsed.recipPhone && c.phone.replace(/-/g, "") === parsed.recipPhone.replace(/-/g, ""));
+    const matched = customers.find((c) => parsed.recipPhone && (c.phone || "").replace(/-/g, "") === parsed.recipPhone.replace(/-/g, ""));
     const cart = {};
     parsed.items.forEach((it) => {
       cart[it.productId] = (cart[it.productId] || 0) + it.qty;
@@ -2538,7 +2538,7 @@ function App() {
     if (newVendors.length > 0) setVendors((prev) => [...prev, ...newVendors]);
 
     const newOrders = toAdd.map((r) => {
-      const matched = customers.find((c) => r.recipPhone && c.phone.replace(/-/g, "") === r.recipPhone.replace(/-/g, ""));
+      const matched = customers.find((c) => r.recipPhone && (c.phone || "").replace(/-/g, "") === r.recipPhone.replace(/-/g, ""));
       const total = r.items.reduce((s, it) => s + ((productMap[it.productId]?.price ?? it.price ?? 0) * it.qty), 0);
       return {
         id: uid("o"),
@@ -2726,7 +2726,7 @@ function App() {
     const targets = smsBatch.rows.filter((r) => r.checked);
     if (targets.length === 0) { fireToast("보낼 대상을 선택해주세요"); return; }
     // 문자 내용이 모두 동일하면 한 번에, 아니면 첫 번째 기준으로 안내
-    const phones = targets.map((r) => r.phone.replace(/[^0-9]/g, "")).join(",");
+    const phones = targets.map((r) => (r.phone || "").replace(/[^0-9]/g, "")).join(",");
     const body = targets.length === 1
       ? targets[0].message
       : targets[0].message; // 대표 1건 본문(번호별 상이 시 아래 복사 기능 권장)
@@ -7605,7 +7605,54 @@ const removeBtnStyle = {
 };
 
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+// 화면 전체를 감싸서, 예상 못한 오류가 어디서 나든 "하얀 화면"이 아니라
+// 안내 메시지 + 새로고침 버튼을 보여주기 위한 안전망(Error Boundary).
+// 이게 없으면, 코드 어딘가에서 처리 안 된 오류 하나만 나도 화면 전체가 하얗게 멈춰버림.
+class AppErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidCatch(error, info) {
+    // 콘솔에는 남겨서 나중에 원인 파악에 쓸 수 있게 함
+    console.error("조아저씨쌈 앱 오류:", error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{
+          minHeight: "100vh", display: "flex", flexDirection: "column", alignItems: "center",
+          justifyContent: "center", padding: 24, textAlign: "center", fontFamily: "'Apple SD Gothic Neo','Malgun Gothic',system-ui,sans-serif",
+          background: "#F7F8F4",
+        }}>
+          <div style={{ fontSize: 40, marginBottom: 12 }}>⚠️</div>
+          <div style={{ fontSize: 16, fontWeight: 700, color: "#1B2430", marginBottom: 8 }}>
+            일시적인 문제가 발생했어요
+          </div>
+          <div style={{ fontSize: 13, color: "#5F5E5A", marginBottom: 20, lineHeight: 1.5 }}>
+            방금 하신 작업 중 예상 못한 오류가 있었어요.<br />
+            새로고침 하면 대부분 정상으로 돌아와요. 데이터는 안전하게 저장되어 있어요.
+          </div>
+          <button
+            onClick={() => window.location.reload()}
+            style={{
+              border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700,
+              fontSize: 14, padding: "12px 28px", borderRadius: 10, cursor: "pointer",
+            }}
+          >
+            새로고침 하기
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<AppErrorBoundary><App /></AppErrorBoundary>);
 
 // 테스트 환경이면 화면 맨 위에 눈에 띄는 빨간 띠 표시 (실제 앱과 헷갈리지 않도록)
 if (IS_TEST) {
