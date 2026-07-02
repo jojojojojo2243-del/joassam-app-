@@ -135,7 +135,7 @@ function resolveOrderField(label, o) {
     "박스부피": o.boxVolume || "",
     "배송메시지": o.deliveryMessage || "",
     "메모": o.memo || "",
-    "상태": STATUS[o.status].label,
+    "상태": (STATUS[o.status] || STATUS.pending).label,
     "송장번호": o.invoiceNo || "",
     "운송장번호": o.invoiceNo || "",
     "택배사": o.courier || "",
@@ -2508,65 +2508,69 @@ function App() {
   }
 
   function applyBulkOrders() {
-    const toAdd = bulkOrderModal.rows.filter((r) => r.checked && r.items.length > 0);
-    if (toAdd.length === 0) {
-      fireToast("등록할 항목을 선택해주세요 (상품명이 있는 행만 등록됩니다)");
-      return;
+    try {
+      const toAdd = bulkOrderModal.rows.filter((r) => r.checked && r.items.length > 0);
+      if (toAdd.length === 0) {
+        fireToast("등록할 항목을 선택해주세요 (상품명이 있는 행만 등록됩니다)");
+        return;
+      }
+      const stamp = nowStamp();
+
+      // "구분"이 업체로 표시된 행은, 기존 업체와 매칭하거나(전화번호/이름) 없으면 새 업체로 등록
+      const normPhone = (p) => (p || "").replace(/[^0-9]/g, "");
+      const vendorIdByRow = {};
+      const newVendors = [];
+      toAdd.forEach((r) => {
+        if (!r.isBusiness) return;
+        const ph = normPhone(r.recipPhone);
+        const nm = (r.recipName || "").trim();
+        const existing = vendors.find((v) => (ph && normPhone(v.phone) === ph) || (nm && v.name === nm));
+        if (existing) { vendorIdByRow[r.tempId] = existing.id; return; }
+        const dup = newVendors.find((v) => (ph && normPhone(v.phone) === ph) || (nm && v.name === nm));
+        if (dup) { vendorIdByRow[r.tempId] = dup.id; return; }
+        if (!nm && !ph) return;
+        const created = {
+          id: uid("v"), name: nm || "이름없음", bizNo: "", ceo: "", phone: r.recipPhone || "",
+          email: "", address: r.address || "", memo: "엑셀 업로드에서 자동 등록됨", bizLicense: "",
+        };
+        newVendors.push(created);
+        vendorIdByRow[r.tempId] = created.id;
+      });
+      if (newVendors.length > 0) setVendors((prev) => [...prev, ...newVendors]);
+
+      const newOrders = toAdd.map((r) => {
+        const matched = customers.find((c) => r.recipPhone && (c.phone || "").replace(/-/g, "") === r.recipPhone.replace(/-/g, ""));
+        const total = r.items.reduce((s, it) => s + ((productMap[it.productId]?.price ?? it.price ?? 0) * (it.qty || 0)), 0);
+        return {
+          id: uid("o"),
+          customerId: matched ? matched.id : null,
+          isBusiness: !!r.isBusiness,
+          vendorId: r.isBusiness ? (vendorIdByRow[r.tempId] || "") : "",
+          sender: { name: r.senderName || r.recipName || "", phone: r.senderPhone || r.recipPhone || "" },
+          recipient: { name: r.recipName || "", phone: r.recipPhone || "", address: r.address || "", postalCode: r.postalCode || "" },
+          items: (r.items || []).map((it) => ({ productId: it.productId || null, name: it.name || "상품", qty: it.qty || 1, price: it.price || 0 })),
+          status: r.invoiceNo ? "shipped" : "pending",
+          invoiceNo: r.invoiceNo || "",
+          courier: r.courier || "",
+          createdAt: stamp,
+          orderDate: todayStr(),
+          reserveDate: r.reserveDate || "",
+          boxVolume: r.boxVolume || "",
+          deliveryMessage: r.deliveryMessage || "",
+          memo: r.memo || "",
+          message: "",
+          paymentAmount: r.paymentAmount !== "" && r.paymentAmount !== undefined ? r.paymentAmount : total,
+        };
+      });
+      setOrders((prev) => [...newOrders, ...prev]);
+      registerNewCustomersFromOrders(newOrders); // 업체 주문은 이 함수 내부에서 자동 제외됨
+      fireToast(`엑셀에서 주문 ${newOrders.length}건을 등록했습니다${newVendors.length ? ` (신규 업체 ${newVendors.length}곳 자동 등록)` : ""}`);
+      setBulkOrderModal(null);
+      setTab("orders");
+    } catch (err) {
+      console.error("applyBulkOrders 오류:", err);
+      fireToast("등록 중 오류가 발생했어요: " + (err && err.message ? err.message : String(err)));
     }
-    const stamp = nowStamp();
-
-    // "구분"이 업체로 표시된 행은, 기존 업체와 매칭하거나(전화번호/이름) 없으면 새 업체로 등록
-    const normPhone = (p) => (p || "").replace(/[^0-9]/g, "");
-    const vendorIdByRow = {};
-    const newVendors = [];
-    toAdd.forEach((r) => {
-      if (!r.isBusiness) return;
-      const ph = normPhone(r.recipPhone);
-      const nm = (r.recipName || "").trim();
-      const existing = vendors.find((v) => (ph && normPhone(v.phone) === ph) || (nm && v.name === nm));
-      if (existing) { vendorIdByRow[r.tempId] = existing.id; return; }
-      const dup = newVendors.find((v) => (ph && normPhone(v.phone) === ph) || (nm && v.name === nm));
-      if (dup) { vendorIdByRow[r.tempId] = dup.id; return; }
-      if (!nm && !ph) return;
-      const created = {
-        id: uid("v"), name: nm || "이름없음", bizNo: "", ceo: "", phone: r.recipPhone || "",
-        email: "", address: r.address || "", memo: "엑셀 업로드에서 자동 등록됨", bizLicense: "",
-      };
-      newVendors.push(created);
-      vendorIdByRow[r.tempId] = created.id;
-    });
-    if (newVendors.length > 0) setVendors((prev) => [...prev, ...newVendors]);
-
-    const newOrders = toAdd.map((r) => {
-      const matched = customers.find((c) => r.recipPhone && (c.phone || "").replace(/-/g, "") === r.recipPhone.replace(/-/g, ""));
-      const total = r.items.reduce((s, it) => s + ((productMap[it.productId]?.price ?? it.price ?? 0) * it.qty), 0);
-      return {
-        id: uid("o"),
-        customerId: matched ? matched.id : null,
-        isBusiness: !!r.isBusiness,
-        vendorId: r.isBusiness ? (vendorIdByRow[r.tempId] || "") : "",
-        sender: { name: r.senderName || r.recipName, phone: r.senderPhone || r.recipPhone },
-        recipient: { name: r.recipName, phone: r.recipPhone, address: r.address, postalCode: r.postalCode },
-        items: r.items.map((it) => ({ productId: it.productId, name: it.name, qty: it.qty, price: it.price })),
-        status: r.invoiceNo ? "shipped" : "pending",
-        invoiceNo: r.invoiceNo || "",
-        courier: r.courier || "",
-        createdAt: stamp,
-        orderDate: todayStr(),
-        reserveDate: r.reserveDate || "",
-        boxVolume: r.boxVolume || "",
-        deliveryMessage: r.deliveryMessage || "",
-        memo: r.memo || "",
-        message: "",
-        paymentAmount: r.paymentAmount !== "" ? r.paymentAmount : total,
-      };
-    });
-    setOrders((prev) => [...newOrders, ...prev]);
-    registerNewCustomersFromOrders(newOrders); // 업체 주문은 이 함수 내부에서 자동 제외됨
-    const bizCount = newOrders.filter((o) => o.isBusiness).length;
-    fireToast(`엑셀에서 주문 ${newOrders.length}건을 등록했습니다${newVendors.length ? ` (신규 업체 ${newVendors.length}곳 자동 등록)` : ""}`);
-    setBulkOrderModal(null);
-    setTab("orders");
   }
 
 
@@ -3792,7 +3796,7 @@ function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal,
         <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 18 }}>
           {recentOrders.map((o) => {
             const c = customerMap[o.customerId];
-            const st = STATUS[o.status];
+            const st = STATUS[o.status] || STATUS.pending;
             const displayName = o.recipient?.name || (c ? c.name : "") || "현장 주문";
             return (
               <button
@@ -5606,7 +5610,7 @@ function OrdersTab({
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 2px 4px" }}>
                   <span style={{ fontSize: 11, fontWeight: 700, color: "#888780" }}>{orderGroupLabel(first)}</span>
                 </div>
-                <div style={{ background: "#fff", border: "1px solid #E2E4DD", borderLeft: `4px solid ${STATUS[first.status].color}`, borderRadius: 10, padding: "10px 12px" }}>
+                <div style={{ background: "#fff", border: "1px solid #E2E4DD", borderLeft: `4px solid ${(STATUS[first.status] || STATUS.pending).color}`, borderRadius: 10, padding: "10px 12px" }}>
                   {/* 고객(받는분) 정보 - 그룹당 한 번만 표시 */}
                   <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
                     <input
@@ -5641,7 +5645,7 @@ function OrdersTab({
                   {/* 박스(상품)별 줄 - 각자 수량/가격/송장/상태를 따로 가짐 */}
                   <div style={{ display: "flex", flexDirection: "column", marginTop: 8 }}>
                     {list.map((o, i) => {
-                      const st = STATUS[o.status];
+                      const st = STATUS[o.status] || STATUS.pending;
                       return (
                         <div key={o.id} style={{ borderTop: "1px solid #F1F2EC", paddingTop: 7, marginTop: i === 0 ? 0 : 7 }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -6370,7 +6374,7 @@ function InvoicePreview({ preview, toggleRow, onApply, onCancel }) {
 }
 
 function OrderDetail({ order, customer, productMap, products, total, onBack, setOrderStatus, updateOrder, deleteOrder, askConfirm, couriers }) {
-  const st = STATUS[order.status];
+  const st = STATUS[order.status] || STATUS.pending;
   // 주문 당시 저장된 받는분 정보를 항상 우선. 아주 오래된 주문 등 저장된 정보가 없을 때만 연결된 고객 정보로 보완.
   const recipient = order.recipient || (customer ? { name: customer.name, phone: customer.phone, address: customer.address, postalCode: customer.postalCode } : {});
 
@@ -7611,10 +7615,10 @@ const removeBtnStyle = {
 class AppErrorBoundary extends React.Component {
   constructor(props) {
     super(props);
-    this.state = { hasError: false };
+    this.state = { hasError: false, errorText: "" };
   }
-  static getDerivedStateFromError() {
-    return { hasError: true };
+  static getDerivedStateFromError(error) {
+    return { hasError: true, errorText: (error && (error.stack || error.message)) || String(error) };
   }
   componentDidCatch(error, info) {
     // 콘솔에는 남겨서 나중에 원인 파악에 쓸 수 있게 함
@@ -7640,11 +7644,27 @@ class AppErrorBoundary extends React.Component {
             onClick={() => window.location.reload()}
             style={{
               border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700,
-              fontSize: 14, padding: "12px 28px", borderRadius: 10, cursor: "pointer",
+              fontSize: 14, padding: "12px 28px", borderRadius: 10, cursor: "pointer", marginBottom: 20,
             }}
           >
             새로고침 하기
           </button>
+          {this.state.errorText && (
+            <div style={{ maxWidth: 520, width: "100%" }}>
+              <div style={{ fontSize: 11.5, color: "#888780", marginBottom: 6 }}>
+                아래 내용을 캡처해서 개발자에게 보여주시면 빠르게 고칠 수 있어요
+              </div>
+              <textarea
+                readOnly
+                value={this.state.errorText}
+                onClick={(e) => e.target.select()}
+                style={{
+                  width: "100%", height: 140, fontSize: 11, fontFamily: "monospace", color: "#5F5E5A",
+                  background: "#fff", border: "1px solid #E2E4DD", borderRadius: 8, padding: 10, resize: "vertical",
+                }}
+              />
+            </div>
+          )}
         </div>
       );
     }
