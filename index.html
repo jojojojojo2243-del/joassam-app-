@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 1;
+const APP_VERSION = 4;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -380,7 +380,7 @@ function squishStr(s) {
 function coreStr(s) {
   return squishStr(s)
     .replace(/\d+(\.\d+)?(kg|g|개|박스|봉|팩|병|호|입|매|ml|l)?/g, "")
-    .replace(/[x×*]/g, "") // "1kg X 1개" 같은 표기에서 숫자 지우고 남는 곱하기 기호(x/×/*)도 제거
+    .replace(/[xX×*]/g, "") // "1kg X 1개" 같은 표기에서 숫자 지우고 남는 곱하기 기호(x/×/*)도 제거
     .replace(/[()[\]{}]/g, "");
 }
 
@@ -681,7 +681,7 @@ function parseOrderMessage(text, products) {
     const head = text.slice(Math.max(0, realIdx - 6), realIdx);
     let qty = 1;
     // 뒤쪽 우선: "2개", "x2", "2박스", "2 개", "두 개"
-    const tailNum = tail.match(/\s*[x×*]?\s*(\d+)\s*(?:개|박스|병|봉|세트|팩|kg|키로)?/);
+    const tailNum = tail.match(/\s*[xX×*]?\s*(\d+)\s*(?:개|박스|병|봉|세트|팩|kg|키로)?/);
     const tailWord = tail.match(new RegExp("\\s*(" + QTY_WORD + ")\\s*(?:개|박스|병|봉|세트|팩)"));
     // 앞쪽: "2 아메리카노"
     const headNum = head.match(/(\d+)\s*(?:개|박스|병|봉|세트|팩)?\s*$/);
@@ -2384,7 +2384,8 @@ function App() {
       deliveries: prev.deliveries.map((d) => {
         if (d.id !== deliveryId) return d;
         const cart = { ...d.cart };
-        const next = Math.round(((cart[productId] || 0) + delta) * 10) / 10;
+        // 업체 상품도 소수점(0.1kg 단위) 없이 정수(1개 단위)로만 조절
+        const next = Math.round((cart[productId] || 0) + delta);
         if (next <= 0) delete cart[productId];
         else cart[productId] = next;
         return { ...d, cart };
@@ -2745,8 +2746,11 @@ function App() {
     const matchProduct = (nm) => {
       const q = squish(nm), qc = core(nm);
       if (!q) return { product: null, confidence: "none", candidates: [] };
-      // 입력에 포함된 단위 토큰 추출 (예: "모듬쌈 800g" → "800g")
-      const unitTok = (squish(nm).match(/\d+(\.\d+)?(kg|g|개|박스|봉|팩|병|호|입|매|ml|l)/g) || []);
+      // 입력에 포함된 "크기/용량" 단위 토큰만 추출 (예: "모듬쌈 800g" → "800g")
+      // "개/박스/팩/세트" 등은 상품의 크기가 아니라 "주문 수량"을 나타내는 경우가 대부분이라
+      // (예: "모듬쌈1kg (1개)"의 "1개"), 여기 섞이면 등록된 상품 이름엔 "1개"가 없어서
+      // 오히려 크기가 다른 엉뚱한 상품이 골라지는 사고로 이어짐 → 무게/부피 단위만 신뢰
+      const unitTok = (squish(nm).match(/\d+(\.\d+)?(kg|g|ml|l)/g) || []);
       // 1) 정확/공백무시 일치 → 확신 높음, 그대로 사용
       const exact = productIndex.find((e) => e.sq === q);
       if (exact) return { product: exact.p, confidence: "exact", candidates: [] };
@@ -2780,23 +2784,29 @@ function App() {
 
     if (productText) {
       const parts = productText.split(/[,/]|·/).map((s) => s.trim()).filter(Boolean);
-      const multi = parts.length > 1 || /[x×*]\s*\d/.test(productText);
-      const pushItem = (nm, q) => {
+      const multi = parts.length > 1 || /[xX×*]\s*\d/.test(productText) || /\(\s*\d+\s*(개|박스|봉|팩|병|세트)\s*\)/.test(productText);
+      const pushItem = (nmRaw, q) => {
+        // "상품선택: 모듬쌈 1Kg"처럼 쇼핑몰 옵션 접두어가 상품명 칸에 그대로 섞여 들어온 경우도
+        // (옵션정보가 별도 칸이 아니라 상품명 칸에 합쳐져 있는 경우) 항상 제거하고 매칭
+        const nm = String(nmRaw || "").replace(/^상품선택\s*[:：]\s*/, "").trim();
         const { product: prod, confidence, candidates } = matchProduct(nm);
         if (prod && confidence === "exact") {
           items.push({ productId: prod.id, name: prod.name, qty: q, confidence });
-        } else if (prod) {
-          // 확신이 낮은 매칭: 일단 가장 비슷한 상품을 기본값으로 넣어두되, 사장님이 직접 다시 고를 수 있게 후보 목록을 함께 담아둠
-          items.push({ productId: prod.id, name: prod.name, qty: q, confidence, candidates, originalText: nm });
-          unmatched.push(nm);
         } else {
-          items.push({ productId: null, name: nm, qty: q, price: rowPrice, confidence: "none", candidates, originalText: nm });
+          // 확실하지 않은 매칭(비슷하지만 확신이 낮은 경우 포함, 전혀 못 찾은 경우 포함) 전부:
+          // 절대 추측해서 엉뚱한 상품으로 등록하지 않고, 업로드한 원본 상품명을 그대로 사용함.
+          // (추측한 상품이 틀렸는데 그대로 발송되면 큰 사고로 이어질 수 있어서, 확실하지 않으면
+          //  "상품 미지정(원본 이름 그대로 등록)" 상태로 두고 사장님이 직접 확인해서 고르게 함)
+          items.push({ productId: null, name: nm, qty: q, price: rowPrice, confidence: prod ? "low" : "none", candidates, originalText: nm });
           unmatched.push(nm);
         }
       };
       if (multi) {
         parts.forEach((part) => {
-          const m = part.match(/(.+?)\s*[x×*]\s*(\d+)/);
+          // "채소 2kg X 2개" 형식
+          let m = part.match(/(.+?)\s*[xX×*]\s*(\d+)/);
+          // "모듬쌈1kg (1개)" 형식 (X가 없고 괄호로 수량을 표시하는 경우)
+          if (!m) m = part.match(/(.+?)\s*\(\s*(\d+)\s*(?:개|박스|봉|팩|병|세트)?\s*\)/);
           const nm = (m ? m[1] : part).trim();
           const q = m ? parseInt(m[2], 10) : 1;
           pushItem(nm, q);
@@ -4351,10 +4361,13 @@ function batchBtnStyle(bg, color) {
 function DeliveryTrackTab({ orders, customerMap, onConfirm, onSelectOrder, onBack, expectedArrivalDeadline }) {
   function trackingUrl(o) {
     if (!o.invoiceNo) return null;
-    if ((o.courier || "").includes("우체국")) {
+    // 택배사가 비어있으면(엑셀에 안 채워졌거나 수기 입력 누락 등) 주로 쓰시는 우체국택배로 간주
+    // (그냥 "택배"로만 검색하면 네이버가 특정 택배사를 못 찾아서 검색결과가 아예 안 나왔음)
+    const courier = o.courier || "우체국택배";
+    if (courier.includes("우체국")) {
       return `https://service.epost.go.kr/trace.RetrieveDomRigiTraceList.comm?sid1=${o.invoiceNo}`;
     }
-    return `https://search.naver.com/search.naver?query=${encodeURIComponent((o.courier || "택배") + " " + o.invoiceNo + " 배송조회")}`;
+    return `https://search.naver.com/search.naver?query=${encodeURIComponent(courier + " " + o.invoiceNo + " 배송조회")}`;
   }
 
   const sorted = [...orders].sort((a, b) => (a.shippedAt || "") < (b.shippedAt || "") ? 1 : -1); // 최근 발송이 위로
@@ -4426,12 +4439,13 @@ function DeliveryCheckTab({ orders, recentlyConfirmed, customerMap, onConfirm, o
 
   function trackingUrl(o) {
     if (!o.invoiceNo) return null;
-    // 네이버 통합 배송조회는 우체국택배를 지원 안 해서(일반 검색결과만 나옴), 우체국은
-    // 인터넷우체국 사이트로 직접 연결. 그 외 택배사(CJ대한통운, 한진, 롯데 등)는 네이버가 잘 되어서 그대로 사용.
-    if ((o.courier || "").includes("우체국")) {
+    // 택배사가 비어있으면(엑셀에 안 채워졌거나 수기 입력 누락 등) 주로 쓰시는 우체국택배로 간주
+    // (그냥 "택배"로만 검색하면 네이버가 특정 택배사를 못 찾아서 검색결과가 아예 안 나왔음)
+    const courier = o.courier || "우체국택배";
+    if (courier.includes("우체국")) {
       return `https://service.epost.go.kr/trace.RetrieveDomRigiTraceList.comm?sid1=${o.invoiceNo}`;
     }
-    return `https://search.naver.com/search.naver?query=${encodeURIComponent((o.courier || "택배") + " " + o.invoiceNo + " 배송조회")}`;
+    return `https://search.naver.com/search.naver?query=${encodeURIComponent(courier + " " + o.invoiceNo + " 배송조회")}`;
   }
 
   function toggleChecked(id) {
@@ -7916,9 +7930,9 @@ function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, ch
                         <div style={{ fontSize: 11, color: isBizProduct ? "#854F0B" : "#5F5E5A" }}>{won(showPrice)}{isBizProduct && p.wholesalePrice ? " (업체가)" : ""}{p.unit ? ` / ${p.unit}` : ""}</div>
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <button onClick={() => changeCartQty(d.id, p.id, isBizProduct ? -0.1 : -1)} style={qtyBtnStyle}>−</button>
-                        <span style={{ fontSize: 12.5, fontWeight: 700, minWidth: 24, textAlign: "center" }}>{isBizProduct ? qty.toFixed(1) : qty}</span>
-                        <button onClick={() => changeCartQty(d.id, p.id, isBizProduct ? 0.1 : 1)} style={qtyBtnStyle}>+</button>
+                        <button onClick={() => changeCartQty(d.id, p.id, -1)} style={qtyBtnStyle}>−</button>
+                        <span style={{ fontSize: 12.5, fontWeight: 700, minWidth: 24, textAlign: "center" }}>{qty}</span>
+                        <button onClick={() => changeCartQty(d.id, p.id, 1)} style={qtyBtnStyle}>+</button>
                       </div>
                     </div>
                   );
