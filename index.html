@@ -35,6 +35,10 @@ const { useState, useMemo, useRef, useEffect } = React;
 // 테스트 앱 여부: 주소(URL)에 'test'가 들어있으면 테스트 모드
 // 테스트 모드면 데이터를 'test_main'에 따로 저장 → 실제 데이터와 분리
 const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.hostname + window.location.pathname);
+// 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
+// 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
+// (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
+const APP_VERSION = 1;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -796,6 +800,19 @@ function App() {
   const sessionIdRef = useRef("s_" + Math.random().toString(36).slice(2, 10));
   const sessionStartRef = useRef(Date.now());
   const [diagLog, setDiagLog] = useState(null); // null=닫힘 | "loading" | 배열
+  const [isStaleVersion, setIsStaleVersion] = useState(false); // 이 기기가 오래된 버전으로 판단되면 true (쓰기 금지)
+  const [updateAvailable, setUpdateAvailable] = useState(false); // 새 버전이 배포되어 업데이트 가능하면 true
+  useEffect(() => {
+    const handler = () => setUpdateAvailable(true);
+    window.addEventListener("joassam-update-available", handler);
+    // 혹시 이 화면이 뜨기 전에 이미 업데이트가 감지되어 있었으면 바로 반영
+    if (window.__joassamPendingUpdate) setUpdateAvailable(true);
+    return () => window.removeEventListener("joassam-update-available", handler);
+  }, []);
+  function applyAppUpdate() {
+    if (window.__joassamApplyUpdate) window.__joassamApplyUpdate();
+    else window.location.reload();
+  }
   async function loadDiagLog() {
     setDiagLog("loading");
     try {
@@ -812,6 +829,7 @@ function App() {
     try {
       fbDb.collection("stores").doc("_diagnostics").collection("save_events").add({
         event,
+        appVersion: APP_VERSION,
         at: new Date().toISOString(),
         sessionId: sessionIdRef.current,
         sessionAgeSec: Math.round((Date.now() - sessionStartRef.current) / 1000),
@@ -1064,6 +1082,17 @@ function App() {
               localStorage.setItem("joassam_last_counts_" + DATA_DOC, JSON.stringify(counts));
             }
           } catch { /* localStorage 사용 불가 환경이면 무시 */ }
+          // 버전 검사: 서버에 기록된 "최소 허용 버전"보다 내가 낮으면 오래된 기기로 판단해 쓰기 금지.
+          // 반대로 내가 더 최신이면, 기준을 내 버전으로 올려서 이후 접속하는 구버전 기기들을 막음.
+          try {
+            const storedMinVersion = data.appMinVersion || 0;
+            if (APP_VERSION < storedMinVersion) {
+              setIsStaleVersion(true);
+              logDiag("stale_version_detected", { myVersion: APP_VERSION, requiredVersion: storedMinVersion });
+            } else if (APP_VERSION > storedMinVersion) {
+              fbDb.collection("stores").doc(DATA_DOC).set({ appMinVersion: APP_VERSION }, { merge: true }).catch(() => {});
+            }
+          } catch { /* ignore */ }
         } else {
           // 문서가 "없다"고 나온 상황. 정말 처음 쓰는 가게인지, 원래 있던 문서를 순간적으로
           // 못 읽어온 착오 상황인지 구분해야 함 → 이 기기에서 예전에 실제 데이터를 본 적이
@@ -1120,6 +1149,7 @@ function App() {
     if (firebaseReady) {
       // Firebase에서 첫 데이터를 받기 전에는 저장하지 않음 (시드/빈값이 실데이터를 덮어쓰는 사고 방지)
       if (!fbFirstLoadRef.current) return;
+      if (isStaleVersion) return; // 오래된 버전으로 판단된 기기는 저장 자체를 하지 않음
 
       // 저장해도 안전한지 검증 (독립적으로 20개 시나리오 테스트를 거친 함수 사용)
       let storedFloor = null;
@@ -1159,7 +1189,7 @@ function App() {
     } else {
       saveStoredData({ ...data, members });
     }
-  }, [dataLoaded, appName, appLogo, customers, products, orders, vendors, supplier, invoices, subscriptions, integrations, customMarketplaces, couriers, smsTemplate, orderTemplate, customerTemplate, productTemplate, courierTemplates]);
+  }, [dataLoaded, appName, appLogo, customers, products, orders, vendors, supplier, invoices, subscriptions, integrations, customMarketplaces, couriers, smsTemplate, orderTemplate, customerTemplate, productTemplate, courierTemplates, isStaleVersion]);
 
   function updateIntegration(marketplaceId, fieldUpdates) {
     setIntegrations((prev) => ({
@@ -3755,6 +3785,41 @@ function App() {
           />
         )}
 
+        {updateAvailable && !isStaleVersion && (
+          <div style={{ position: "fixed", left: 12, right: 12, bottom: "calc(80px + env(safe-area-inset-bottom, 0px))", maxWidth: 360, margin: "0 auto", zIndex: 250000, background: "#185FA5", color: "#fff", borderRadius: 12, padding: "12px 14px", display: "flex", alignItems: "center", gap: 10, boxShadow: "0 6px 20px rgba(0,0,0,0.3)" }}>
+            <span style={{ fontSize: 20 }}>🔄</span>
+            <span style={{ flex: 1, fontSize: 12.5, fontWeight: 700, lineHeight: 1.4 }}>
+              새 버전이 있어요!<br />
+              <span style={{ fontWeight: 400, fontSize: 11, opacity: 0.9 }}>눌러서 최신 화면으로 업데이트하세요</span>
+            </span>
+            <button
+              onClick={applyAppUpdate}
+              style={{ border: "none", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12, padding: "9px 14px", borderRadius: 8, cursor: "pointer", whiteSpace: "nowrap" }}
+            >
+              지금 업데이트
+            </button>
+          </div>
+        )}
+
+        {isStaleVersion && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(153,60,29,0.96)", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", zIndex: 400000, padding: 24, textAlign: "center" }}>
+            <div style={{ fontSize: 48, marginBottom: 12 }}>🚫</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: "#fff", marginBottom: 10 }}>이 화면은 오래된 버전이에요</div>
+            <div style={{ fontSize: 13, color: "#FAECE7", marginBottom: 24, lineHeight: 1.6 }}>
+              더 새로운 버전이 있어서, 사고 방지를 위해 이 화면에서는<br />
+              데이터를 저장하지 않도록 막아뒀어요.<br /><br />
+              이 아이콘/탭은 더 이상 사용하지 마시고,<br />
+              아래 버튼으로 최신 화면을 새로 열어주세요.
+            </div>
+            <button
+              onClick={() => window.location.reload(true)}
+              style={{ border: "none", background: "#fff", color: "#993C1D", fontWeight: 700, fontSize: 14, padding: "13px 30px", borderRadius: 10, cursor: "pointer" }}
+            >
+              새로고침 하기
+            </button>
+          </div>
+        )}
+
         {showOverdueAlert && (
           <div style={{ position: "fixed", inset: 0, background: "rgba(27,36,48,0.65)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100000, padding: 24 }}>
             <div style={{ background: "#fff", borderRadius: 16, padding: "28px 24px", display: "flex", flexDirection: "column", alignItems: "center", gap: 12, maxWidth: 340, width: "100%", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" }}>
@@ -3847,7 +3912,7 @@ function App() {
                     <div key={i} style={{ border: "1px solid #E2E4DD", borderLeft: `4px solid ${isBlocked ? "#A32D2D" : "#2F6F4E"}`, borderRadius: 8, padding: "8px 10px", marginBottom: 6 }}>
                       <div style={{ fontSize: 12, fontWeight: 700, color: isBlocked ? "#A32D2D" : "#2F6F4E" }}>{ev.event}</div>
                       <div style={{ fontSize: 10.5, color: "#5F5E5A", marginTop: 2 }}>
-                        {ev.at} · 세션 {Math.round((ev.sessionAgeSec || 0) / 60)}분째 · 화면상태 {ev.visibility}
+                        {ev.at} · v{ev.appVersion ?? "?"} · 세션 {Math.round((ev.sessionAgeSec || 0) / 60)}분째 · 화면상태 {ev.visibility}
                       </div>
                       <div style={{ fontSize: 10.5, color: "#5F5E5A" }}>
                         저장하려던 값 — 고객{ev.counts?.customers} 주문{ev.counts?.orders} 상품{ev.counts?.products} 업체{ev.counts?.vendors}
@@ -8419,25 +8484,35 @@ if (IS_TEST) {
 
 </script>
 <script>
-  // 앱 자동 업데이트: 새 버전이 올라오면 자동으로 감지해서 최신으로 새로고침
+  // 앱 업데이트 감지: 새 버전이 올라오면 화면에 "업데이트 있음" 알림을 띄우고,
+  // 사장님/직원이 버튼을 눌러야 새 버전으로 바뀌도록 함 (조용히 자동으로 바뀌지 않음)
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("service-worker.js").then((reg) => {
-      // 새 서비스워커가 발견되면 즉시 적용
+      // 새 서비스워커가 발견되면, 설치 완료 시 "업데이트 있음" 이벤트를 화면(React)에 알림
       reg.addEventListener("updatefound", () => {
         const newWorker = reg.installing;
         if (!newWorker) return;
         newWorker.addEventListener("statechange", () => {
-          // 새 버전이 설치 완료되었고, 기존 버전이 돌고 있던 상태면 → 새 버전으로 교체
           if (newWorker.state === "installed" && navigator.serviceWorker.controller) {
-            newWorker.postMessage({ type: "SKIP_WAITING" });
+            window.__joassamPendingUpdate = newWorker;
+            window.dispatchEvent(new CustomEvent("joassam-update-available"));
           }
         });
       });
-      // 주기적으로 업데이트 확인 (앱이 켜져 있는 동안 1시간마다)
-      setInterval(() => { reg.update().catch(() => {}); }, 60 * 60 * 1000);
+      // 주기적으로 업데이트 확인 (앱이 켜져 있는 동안 30분마다 - 예전보다 더 자주 확인)
+      setInterval(() => { reg.update().catch(() => {}); }, 30 * 60 * 1000);
+      // 페이지를 처음 열 때도 한 번 확인
+      reg.update().catch(() => {});
     }).catch(() => {});
 
-    // 새 서비스워커가 제어권을 가져오면 페이지를 한 번 자동 새로고침 (최신 화면 적용)
+    // "지금 업데이트" 버튼을 누르면 새 버전에게 제어권을 넘기라고 요청
+    window.__joassamApplyUpdate = function () {
+      if (window.__joassamPendingUpdate) {
+        window.__joassamPendingUpdate.postMessage({ type: "SKIP_WAITING" });
+      }
+    };
+
+    // 새 서비스워커가 실제로 제어권을 가져오면 그때 페이지를 새로고침 (버튼을 누른 직후에만 발생)
     let refreshing = false;
     navigator.serviceWorker.addEventListener("controllerchange", () => {
       if (refreshing) return;
@@ -8446,7 +8521,7 @@ if (IS_TEST) {
     });
   }
 
-  // 앱이 다시 화면에 보일 때(다른 앱 갔다 돌아올 때) 업데이트 확인
+  // 앱이 다시 화면에 보일 때(다른 앱 갔다 돌아올 때)도 업데이트 확인
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && navigator.serviceWorker && navigator.serviceWorker.getRegistration) {
       navigator.serviceWorker.getRegistration().then((reg) => { if (reg) reg.update().catch(() => {}); }).catch(() => {});
