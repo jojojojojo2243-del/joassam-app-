@@ -802,16 +802,28 @@ function App() {
   const [diagLog, setDiagLog] = useState(null); // null=닫힘 | "loading" | 배열
   const [isStaleVersion, setIsStaleVersion] = useState(false); // 이 기기가 오래된 버전으로 판단되면 true (쓰기 금지)
   const [updateAvailable, setUpdateAvailable] = useState(false); // 새 버전이 배포되어 업데이트 가능하면 true
+  const [checkingUpdate, setCheckingUpdate] = useState(false); // "업데이트 확인하기" 버튼을 눌러 확인 중인지
   useEffect(() => {
     const handler = () => setUpdateAvailable(true);
+    const noUpdateHandler = () => { setCheckingUpdate(false); fireToast("이미 최신 버전이에요 ✅"); };
     window.addEventListener("joassam-update-available", handler);
+    window.addEventListener("joassam-no-update", noUpdateHandler);
     // 혹시 이 화면이 뜨기 전에 이미 업데이트가 감지되어 있었으면 바로 반영
     if (window.__joassamPendingUpdate) setUpdateAvailable(true);
-    return () => window.removeEventListener("joassam-update-available", handler);
+    return () => {
+      window.removeEventListener("joassam-update-available", handler);
+      window.removeEventListener("joassam-no-update", noUpdateHandler);
+    };
   }, []);
   function applyAppUpdate() {
     if (window.__joassamApplyUpdate) window.__joassamApplyUpdate();
     else window.location.reload();
+  }
+  function checkForAppUpdate() {
+    setCheckingUpdate(true);
+    fireToast("최신 버전인지 확인하고 있어요...");
+    if (window.__joassamCheckForUpdate) window.__joassamCheckForUpdate();
+    else { setCheckingUpdate(false); window.location.reload(); }
   }
   async function loadDiagLog() {
     setDiagLog("loading");
@@ -1354,6 +1366,11 @@ function App() {
     dl.setHours(23, 59, 59, 999);
     return dl;
   }
+
+  // 발송완료 상태이고 아직 "도착확인"을 안 누른 주문 전체 (지연 여부와 상관없이 전부) - 배송 추적용
+  const allInTransit = useMemo(() => {
+    return orders.filter((o) => o.status === "shipped" && o.invoiceNo && !o.deliveryConfirmed);
+  }, [orders]);
 
   const overdueDeliveries = useMemo(() => {
     const now = new Date();
@@ -3731,6 +3748,17 @@ function App() {
             />
           )}
 
+          {tab === "deliverytrack" && (
+            <DeliveryTrackTab
+              orders={allInTransit}
+              customerMap={customerMap}
+              onConfirm={(id) => confirmDeliveries([id])}
+              onSelectOrder={(id) => { setTab("orders"); setSelectedOrderId(id); }}
+              onBack={() => setTab("home")}
+              expectedArrivalDeadline={expectedArrivalDeadline}
+            />
+          )}
+
           {tab === "vendors" && (
             <VendorsTab
               vendors={vendors}
@@ -3989,6 +4017,8 @@ function App() {
             restoreFromCloudBackup={restoreFromCloudBackup}
             onOpenDiagnostics={loadDiagLog}
             onOpenBackupList={loadBackupList}
+            onCheckUpdate={checkForAppUpdate}
+            checkingUpdate={checkingUpdate}
             onClose={() => setSideMenuOpen(false)}
             onNavigate={(t) => { setTab(t); setSideMenuOpen(false); setSelectedOrderId(null); }}
             askConfirm={askConfirm}
@@ -4318,6 +4348,78 @@ function batchBtnStyle(bg, color) {
   return { flex: 1, padding: "8px 0", borderRadius: 7, border: "none", background: bg, color, fontWeight: 700, fontSize: 11.5, cursor: "pointer" };
 }
 
+function DeliveryTrackTab({ orders, customerMap, onConfirm, onSelectOrder, onBack, expectedArrivalDeadline }) {
+  function trackingUrl(o) {
+    if (!o.invoiceNo) return null;
+    if ((o.courier || "").includes("우체국")) {
+      return `https://service.epost.go.kr/trace.RetrieveDomRigiTraceList.comm?sid1=${o.invoiceNo}`;
+    }
+    return `https://search.naver.com/search.naver?query=${encodeURIComponent((o.courier || "택배") + " " + o.invoiceNo + " 배송조회")}`;
+  }
+
+  const sorted = [...orders].sort((a, b) => (a.shippedAt || "") < (b.shippedAt || "") ? 1 : -1); // 최근 발송이 위로
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+        <button onClick={onBack} style={{ border: "none", background: "none", fontSize: 18, cursor: "pointer", padding: 0 }}>‹</button>
+        <h1 style={{ fontSize: 19, fontWeight: 700, margin: 0, letterSpacing: "-0.02em" }}>배송 추적</h1>
+      </div>
+      <p style={{ fontSize: 11.5, color: "#888780", margin: "6px 0 16px", lineHeight: 1.6 }}>
+        발송 후 아직 "도착 확인"을 안 누른 주문을 전부 모아 보여줘요. 정상 배송중인 것도 언제든 다시 눌러서 조회하고 확인할 수 있어요.
+      </p>
+
+      {sorted.length === 0 && (
+        <div style={{ padding: "40px 0", textAlign: "center", color: "#888780", fontSize: 13 }}>
+          지금 배송중인(확인 대기) 주문이 없어요
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {sorted.map((o) => {
+          const c = customerMap[o.customerId];
+          const name = o.recipient?.name || (c ? c.name : "") || "고객";
+          const url = trackingUrl(o);
+          const dl = expectedArrivalDeadline(o.shippedAt || o.orderDate);
+          const isLate = dl && new Date() > dl;
+          return (
+            <div key={o.id} style={{ background: "#fff", border: `1px solid ${isLate ? "#E9B9B9" : "#D7E6DC"}`, borderLeft: `4px solid ${isLate ? "#A32D2D" : "#2F6F4E"}`, borderRadius: 10, padding: "12px 14px" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+                <div onClick={() => onSelectOrder(o.id)} style={{ cursor: "pointer", flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#1B2430" }}>
+                    {name} <span style={{ fontWeight: 400, color: "#888780", fontSize: 11 }}>{o.recipient?.phone || ""}</span>
+                  </div>
+                  {o.recipient?.address && (
+                    <div style={{ fontSize: 11, color: "#888780", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {o.recipient.address}
+                    </div>
+                  )}
+                </div>
+                <span style={{ fontSize: 10, fontWeight: 700, color: isLate ? "#A32D2D" : "#27500A", background: isLate ? "#FCEEEE" : "#EAF3DE", padding: "3px 8px", borderRadius: 10, whiteSpace: "nowrap", marginLeft: 8 }}>
+                  {isLate ? "⏰ 확인 필요" : "🚚 배송중"}
+                </span>
+              </div>
+              <div style={{ fontSize: 11, color: "#5F5E5A", marginBottom: 8 }}>
+                {o.courier || "택배"} · {o.invoiceNo} · 발송일 {o.shippedAt || o.orderDate}
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {url && (
+                  <a href={url} target="_blank" rel="noreferrer" style={{ flex: 1, textAlign: "center", padding: "9px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12, textDecoration: "none" }}>
+                    배송조회 열기
+                  </a>
+                )}
+                <button onClick={() => onConfirm(o.id)} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
+                  도착 확인함
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function DeliveryCheckTab({ orders, recentlyConfirmed, customerMap, onConfirm, onConfirmMany, onSelectOrder, onBack }) {
   const [checkedIds, setCheckedIds] = useState(new Set());
   const todayS = todayStr();
@@ -4559,6 +4661,10 @@ function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal,
           <div style={{ fontSize: 12 }}>다운로드</div>
         </button>
       </div>
+
+      <button onClick={() => setTab("deliverytrack")} style={{ width: "100%", padding: "12px 0", borderRadius: 10, border: "1px solid #185FA5", background: "#E6F1FB", color: "#185FA5", fontWeight: 700, fontSize: 13, cursor: "pointer", marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }}>
+        🚚 배송 추적 (배송중인 주문 다시 보기)
+      </button>
 
       <button onClick={() => backupInputRef.current?.click()} style={{ width: "100%", padding: "10px 0", borderRadius: 10, border: "1px solid #2F6F4E", background: "#fff", color: "#27500A", fontWeight: 700, fontSize: 13, cursor: "pointer", marginBottom: 16 }}>
         주문백업 복구 (백업 파일 불러오기)
@@ -6799,7 +6905,7 @@ function sheetBtnStyle(bg, color) {
   };
 }
 
-function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onOpenBackupList, onClose, onNavigate, askConfirm, handleLogout, fireToast }) {
+function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onOpenBackupList, onCheckUpdate, checkingUpdate, onClose, onNavigate, askConfirm, handleLogout, fireToast }) {
   const [editingName, setEditingName] = useState(false);
   const [draftName, setDraftName] = useState(appName);
   const [restoreDate, setRestoreDate] = useState(todayStr());
@@ -6898,6 +7004,13 @@ function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, 
             style={{ width: "100%", marginTop: 8, padding: "9px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
           >
             📋 전체 백업 목록 보기 (날짜별 데이터 개수 확인)
+          </button>
+          <button
+            onClick={onCheckUpdate}
+            disabled={checkingUpdate}
+            style={{ width: "100%", marginTop: 8, padding: "9px 0", borderRadius: 8, border: "1px solid #2F6F4E", background: "#fff", color: "#2F6F4E", fontWeight: 700, fontSize: 12, cursor: checkingUpdate ? "default" : "pointer", opacity: checkingUpdate ? 0.6 : 1 }}
+          >
+            {checkingUpdate ? "확인하는 중..." : `🔄 업데이트 확인하기 (현재 v${APP_VERSION})`}
           </button>
         </div>
 
@@ -8486,8 +8599,12 @@ if (IS_TEST) {
 <script>
   // 앱 업데이트 감지: 새 버전이 올라오면 화면에 "업데이트 있음" 알림을 띄우고,
   // 사장님/직원이 버튼을 눌러야 새 버전으로 바뀌도록 함 (조용히 자동으로 바뀌지 않음)
+  let __joassamManualCheckActive = false; // "지금 확인하기" 버튼으로 확인 중인지
+  let __joassamManualCheckTimer = null;
+
   if ("serviceWorker" in navigator) {
     navigator.serviceWorker.register("service-worker.js").then((reg) => {
+      window.__joassamSWReg = reg;
       // 새 서비스워커가 발견되면, 설치 완료 시 "업데이트 있음" 이벤트를 화면(React)에 알림
       reg.addEventListener("updatefound", () => {
         const newWorker = reg.installing;
@@ -8495,21 +8612,46 @@ if (IS_TEST) {
         newWorker.addEventListener("statechange", () => {
           if (newWorker.state === "installed" && navigator.serviceWorker.controller) {
             window.__joassamPendingUpdate = newWorker;
-            window.dispatchEvent(new CustomEvent("joassam-update-available"));
+            if (__joassamManualCheckActive) {
+              // "지금 확인하기" 버튼으로 확인하던 중이었으면, 새 버전을 바로 자동 적용
+              clearTimeout(__joassamManualCheckTimer);
+              __joassamManualCheckActive = false;
+              newWorker.postMessage({ type: "SKIP_WAITING" });
+            } else {
+              window.dispatchEvent(new CustomEvent("joassam-update-available"));
+            }
           }
         });
       });
-      // 주기적으로 업데이트 확인 (앱이 켜져 있는 동안 30분마다 - 예전보다 더 자주 확인)
+      // 주기적으로 업데이트 확인 (앱이 켜져 있는 동안 30분마다)
       setInterval(() => { reg.update().catch(() => {}); }, 30 * 60 * 1000);
       // 페이지를 처음 열 때도 한 번 확인
       reg.update().catch(() => {});
     }).catch(() => {});
 
-    // "지금 업데이트" 버튼을 누르면 새 버전에게 제어권을 넘기라고 요청
+    // "지금 업데이트" 버튼(알림 배너용): 이미 감지된 새 버전을 적용
     window.__joassamApplyUpdate = function () {
       if (window.__joassamPendingUpdate) {
         window.__joassamPendingUpdate.postMessage({ type: "SKIP_WAITING" });
       }
+    };
+
+    // "업데이트 확인하기" 버튼(설정 메뉴용): 지금 바로 최신 버전인지 확인.
+    // 새 버전이 있으면 자동으로 적용(새로고침)되고, 없으면 "최신 버전입니다" 알림을 띄움.
+    window.__joassamCheckForUpdate = function () {
+      if (!window.__joassamSWReg) {
+        window.dispatchEvent(new CustomEvent("joassam-no-update"));
+        return;
+      }
+      __joassamManualCheckActive = true;
+      window.__joassamSWReg.update().catch(() => {});
+      // 5초 안에 새 버전이 감지되지 않으면 "이미 최신 버전"으로 판단
+      __joassamManualCheckTimer = setTimeout(() => {
+        if (__joassamManualCheckActive) {
+          __joassamManualCheckActive = false;
+          window.dispatchEvent(new CustomEvent("joassam-no-update"));
+        }
+      }, 5000);
     };
 
     // 새 서비스워커가 실제로 제어권을 가져오면 그때 페이지를 새로고침 (버튼을 누른 직후에만 발생)
@@ -8519,6 +8661,10 @@ if (IS_TEST) {
       refreshing = true;
       window.location.reload();
     });
+  } else {
+    window.__joassamCheckForUpdate = function () {
+      window.dispatchEvent(new CustomEvent("joassam-no-update"));
+    };
   }
 
   // 앱이 다시 화면에 보일 때(다른 앱 갔다 돌아올 때)도 업데이트 확인
