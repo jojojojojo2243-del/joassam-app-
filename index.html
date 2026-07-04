@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 5;
+const APP_VERSION = 9;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -311,6 +311,13 @@ if (firebaseReady) {
     fbAuth = firebase.auth();
     fbDb = firebase.firestore();
   }
+  // 앱이 Firebase에 "인증된 상태"로 접속하도록 함 (실제 신원 확인은 아니지만, 최소한 이
+  // 앱 코드를 거쳐야만 데이터베이스에 접근 가능하게 만드는 첫 번째 잠금장치).
+  // 이렇게 해두면 Firebase 콘솔에서 보안규칙을 "로그인(인증)된 사용자만 허용"으로 걸 수 있어서,
+  // 누군가 링크만 알아도 데이터베이스에 무작위로 접근하는 걸 막을 수 있음.
+  try {
+    fbAuth.signInAnonymously().catch(() => {});
+  } catch { /* ignore */ }
 }
 
 function toFirebaseEmail(id) {
@@ -904,6 +911,25 @@ function App() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
+  // 계정(아이디·비밀번호) 목록을 Firebase에서 실시간으로 받아와, 모든 기기가 항상 같은
+  // 계정 정보를 보게 함 (로그인 화면은 이 값이 아직 도착하기 전에도 localStorage에 있던
+  // 값으로 먼저 보여주고, Firebase 값이 도착하면 그걸로 갱신됨)
+  useEffect(() => {
+    if (!firebaseReady) return;
+    const ref = fbDb.collection("stores").doc("_accounts");
+    const unsub = ref.onSnapshot((snap) => {
+      if (snap.metadata && snap.metadata.fromCache) return;
+      if (snap.exists) {
+        const data = snap.data();
+        if (data && data.list) {
+          setAccounts(data.list);
+          try { window.localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(data.list)); } catch {}
+        }
+      }
+    }, () => { /* 읽기 실패해도 로컬에 있던 계정 정보로 계속 동작 */ });
+    return () => unsub();
+  }, []);
+
   // 저장된 로그인 세션이 있으면 자동으로 로그인 유지 (로그아웃 전까지)
   useEffect(() => {
     try {
@@ -917,9 +943,57 @@ function App() {
     }
   }, []);
 
+  function addAccount(id, password) {
+    const trimmedId = id.trim();
+    if (!trimmedId) { fireToast("아이디를 입력해주세요"); return false; }
+    if (accounts[trimmedId]) { fireToast("이미 있는 아이디예요"); return false; }
+    saveAccounts({ ...accounts, [trimmedId]: { password: password.trim() || "" } });
+    addMemberLater(trimmedId);
+    fireToast(`"${trimmedId}" 계정을 추가했어요`);
+    return true;
+  }
+
+  function changeAccountPassword(id, newPassword) {
+    if (!accounts[id]) return;
+    saveAccounts({ ...accounts, [id]: { ...accounts[id], password: newPassword.trim() || "" } });
+    fireToast(`"${id}" 계정의 비밀번호를 변경했어요`);
+  }
+
+  function renameAccount(oldId, newIdRaw) {
+    const newId = newIdRaw.trim();
+    if (!newId) { fireToast("새 아이디를 입력해주세요"); return; }
+    if (newId === oldId) return;
+    if (accounts[newId]) { fireToast("이미 있는 아이디예요"); return; }
+    const next = { ...accounts };
+    next[newId] = next[oldId];
+    delete next[oldId];
+    saveAccounts(next);
+    // 지금 로그인해서 쓰고 있는 계정 이름이 바뀐 경우, 세션과 화면 표시 이름도 같이 갱신
+    if (nickname === oldId) {
+      setNickname(newId);
+      try { window.localStorage.setItem(SESSION_KEY, newId); } catch {}
+    }
+    fireToast(`"${oldId}" → "${newId}"로 아이디를 변경했어요`);
+  }
+
+  function deleteAccount(id) {
+    const next = { ...accounts };
+    delete next[id];
+    saveAccounts(next);
+    fireToast(`"${id}" 계정을 삭제했어요`);
+  }
+
   function saveAccounts(next) {
     setAccounts(next);
     try { window.localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(next)); } catch {}
+    // 계정 정보를 Firebase에도 저장해서, 폰/PC 등 어느 기기에서 로그인하든 같은 계정·비밀번호로
+    // 통하도록 함 (전에는 이 기기의 localStorage에만 저장되어, 다른 기기에서는 계정이 "안 보이고"
+    // 같은 아이디로 다른 비밀번호를 새로 만들 수 있는 상태였음)
+    if (firebaseReady) {
+      try {
+        fbDb.collection("stores").doc("_accounts").set({ list: next }, { merge: true }).catch(() => {});
+      } catch { /* ignore */ }
+    }
   }
 
   function startSession(id) {
@@ -937,24 +1011,19 @@ function App() {
       return;
     }
     const existing = accounts[trimmedId];
-    if (existing && password.trim() && existing.password && existing.password !== password) {
-      setLoginError("비밀번호가 일치하지 않습니다");
-      return;
+    // 이 아이디에 비밀번호가 등록되어 있으면, 입력한 비밀번호가 정확히 일치해야만 통과.
+    // (전에는 비밀번호 칸을 비워두면 검증 자체를 건너뛰어서 아무나 들어갈 수 있는 구멍이 있었음)
+    if (existing && existing.password) {
+      if (password.trim() !== existing.password) {
+        setLoginError("비밀번호가 일치하지 않습니다");
+        return;
+      }
     }
     if (!existing) {
       saveAccounts({ ...accounts, [trimmedId]: { password: password.trim() || "" } });
     }
     addMemberLater(trimmedId);
     startSession(trimmedId);
-  }
-
-  function handleSimpleLogin(provider) {
-    const id = `${provider}_사용자`;
-    if (!accounts[id]) {
-      saveAccounts({ ...accounts, [id]: { password: "" } });
-    }
-    addMemberLater(id);
-    startSession(id);
   }
 
   function handleLogout() {
@@ -3477,7 +3546,6 @@ function App() {
         appLogo={appLogo}
         setAppLogo={setAppLogo}
         onLogin={handleLogin}
-        onSimpleLogin={handleSimpleLogin}
         loginError={loginError}
         isDesktop={isDesktop}
       />
@@ -3757,6 +3825,19 @@ function App() {
               onConfirmMany={confirmDeliveries}
               onSelectOrder={(id) => { setTab("orders"); setSelectedOrderId(id); }}
               onBack={() => setTab("home")}
+            />
+          )}
+
+          {tab === "accounts" && (
+            <AccountsTab
+              accounts={accounts}
+              currentNickname={nickname}
+              onAdd={addAccount}
+              onChangePassword={changeAccountPassword}
+              onRename={renameAccount}
+              onDelete={deleteAccount}
+              onBack={() => setTab("home")}
+              askConfirm={askConfirm}
             />
           )}
 
@@ -4198,11 +4279,12 @@ function CustomerConfirmScreen({ order, dataLoaded, onConfirm }) {
   );
 }
 
-function LoginScreen({ appName, setAppName, appLogo, setAppLogo, onLogin, onSimpleLogin, loginError }) {
+function LoginScreen({ appName, setAppName, appLogo, setAppLogo, onLogin, loginError }) {
   const [editing, setEditing] = useState(false);
   const [draftName, setDraftName] = useState(appName);
   const [idInput, setIdInput] = useState("");
   const [pwInput, setPwInput] = useState("");
+  const [showRecoveryHelp, setShowRecoveryHelp] = useState(false);
 
   function saveName() {
     const trimmed = draftName.trim();
@@ -4306,15 +4388,22 @@ function LoginScreen({ appName, setAppName, appLogo, setAppLogo, onLogin, onSimp
 
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <button onClick={submit} style={loginBtnStyle("#2F6F4E", "#fff", "none")}>로그인</button>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "4px 0" }}>
-            <div style={{ flex: 1, height: 1, background: "#E2E4DD" }} />
-            <span style={{ fontSize: 11, color: "#888780" }}>간편 로그인</span>
-            <div style={{ flex: 1, height: 1, background: "#E2E4DD" }} />
-          </div>
-          <button onClick={() => onSimpleLogin("카카오")} style={loginBtnStyle("#FEE500", "#1B2430", "none")}>카카오계정으로 로그인</button>
-          <button onClick={() => onSimpleLogin("구글")} style={loginBtnStyle("#fff", "#1B2430", "1px solid #D3D1C7")}>구글계정으로 로그인</button>
-          <button onClick={() => onSimpleLogin("QR")} style={loginBtnStyle("#fff", "#1B2430", "1px solid #D3D1C7")}>QR코드로 로그인</button>
         </div>
+
+        <button
+          onClick={() => setShowRecoveryHelp((v) => !v)}
+          style={{ width: "100%", marginTop: 14, border: "none", background: "none", color: "#185FA5", fontSize: 12, fontWeight: 700, cursor: "pointer", textAlign: "center" }}
+        >
+          아이디·비밀번호를 잊으셨나요? {showRecoveryHelp ? "▲" : "▼"}
+        </button>
+        {showRecoveryHelp && (
+          <div style={{ background: "#F7F8F4", border: "1px solid #E2E4DD", borderRadius: 10, padding: "12px 14px", marginTop: 8, fontSize: 11.5, color: "#5F5E5A", lineHeight: 1.7 }}>
+            <div style={{ fontWeight: 700, color: "#1B2430", marginBottom: 4 }}>① 다른 직원이 이미 로그인할 수 있다면</div>
+            그 직원분께 부탁해서, <b>☰ 메뉴 → 계정 관리</b>에서 내 아이디를 찾아 비밀번호를 새로 정해달라고 하세요. (예전 비밀번호를 몰라도 새로 바꿀 수 있어요)
+            <div style={{ fontWeight: 700, color: "#1B2430", margin: "10px 0 4px" }}>② 아무도 로그인을 못 한다면</div>
+            지금 이 화면에서 <b>완전히 새로운 아이디</b>를 만들어서 로그인하세요 (자동 가입돼요). 로그인한 뒤 <b>☰ 메뉴 → 계정 관리</b>에서 원래 쓰던 아이디를 찾아 비밀번호를 새로 정하면 다시 쓸 수 있어요.
+          </div>
+        )}
         <p style={{ marginTop: 20, fontSize: 11, color: "#888780", textAlign: "center" }}>
           {hasSharedStorage
             ? "이 링크를 다른 사람과 공유하면 같은 데이터를 함께 사용할 수 있어요."
@@ -4358,6 +4447,88 @@ function toolBtnStyle(bg) {
 
 function batchBtnStyle(bg, color) {
   return { flex: 1, padding: "8px 0", borderRadius: 7, border: "none", background: bg, color, fontWeight: 700, fontSize: 11.5, cursor: "pointer" };
+}
+
+function AccountsTab({ accounts, currentNickname, onAdd, onChangePassword, onRename, onDelete, onBack, askConfirm }) {
+  const [newId, setNewId] = useState("");
+  const [newPw, setNewPw] = useState("");
+  const [pwEditId, setPwEditId] = useState(null);
+  const [pwEditValue, setPwEditValue] = useState("");
+  const [renameEditId, setRenameEditId] = useState(null);
+  const [renameValue, setRenameValue] = useState("");
+
+  const ids = Object.keys(accounts).sort();
+
+  function submitAdd() {
+    const ok = onAdd(newId, newPw);
+    if (ok) { setNewId(""); setNewPw(""); }
+  }
+
+  const inputStyle = { flex: 1, border: "1px solid #D3D1C7", borderRadius: 8, padding: "9px 10px", fontSize: 13 };
+  const smallBtn = (bg, color) => ({ border: "none", background: bg, color, borderRadius: 6, padding: "6px 10px", fontWeight: 700, fontSize: 11.5, cursor: "pointer" });
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+        <button onClick={onBack} style={{ border: "none", background: "none", fontSize: 18, cursor: "pointer", padding: 0 }}>‹</button>
+        <h1 style={{ fontSize: 19, fontWeight: 700, margin: 0, letterSpacing: "-0.02em" }}>계정 관리</h1>
+      </div>
+      <p style={{ fontSize: 11.5, color: "#888780", margin: "6px 0 16px", lineHeight: 1.6 }}>
+        이 가게장부를 함께 쓰는 직원 계정을 관리해요. 새 계정을 추가하거나, 비밀번호·아이디를 바꾸거나, 안 쓰는 계정을 삭제할 수 있어요.
+        여기서 바꾼 내용은 모든 기기(폰·PC)에 바로 반영돼요.
+      </p>
+
+      <div style={{ border: "1px solid #E2E4DD", borderRadius: 10, padding: "12px 14px", marginBottom: 16, background: "#F7F8F4" }}>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>+ 새 직원 계정 추가</div>
+        <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+          <input placeholder="새 아이디" value={newId} onChange={(e) => setNewId(e.target.value)} style={inputStyle} />
+          <input type="password" placeholder="비밀번호" value={newPw} onChange={(e) => setNewPw(e.target.value)} style={inputStyle} />
+        </div>
+        <button onClick={submitAdd} style={{ width: "100%", padding: "10px 0", borderRadius: 8, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
+          계정 추가
+        </button>
+      </div>
+
+      <div style={{ fontSize: 12.5, fontWeight: 700, color: "#5F5E5A", marginBottom: 8 }}>전체 계정 ({ids.length}개)</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {ids.map((id) => (
+          <div key={id} style={{ border: "1px solid #E2E4DD", borderRadius: 10, padding: "10px 12px" }}>
+            <div style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 8 }}>
+              {id}{id === currentNickname && <span style={{ color: "#185FA5", fontWeight: 400, fontSize: 11.5 }}> (나)</span>}
+            </div>
+
+            {pwEditId === id ? (
+              <div style={{ display: "flex", gap: 6 }}>
+                <input type="password" placeholder="새 비밀번호" value={pwEditValue} onChange={(e) => setPwEditValue(e.target.value)} style={inputStyle} />
+                <button onClick={() => { onChangePassword(id, pwEditValue); setPwEditId(null); setPwEditValue(""); }} style={smallBtn("#2F6F4E", "#fff")}>저장</button>
+                <button onClick={() => setPwEditId(null)} style={smallBtn("#EFEFE9", "#5F5E5A")}>취소</button>
+              </div>
+            ) : renameEditId === id ? (
+              <div style={{ display: "flex", gap: 6 }}>
+                <input placeholder="새 아이디" value={renameValue} onChange={(e) => setRenameValue(e.target.value)} style={inputStyle} />
+                <button onClick={() => { onRename(id, renameValue); setRenameEditId(null); }} style={smallBtn("#2F6F4E", "#fff")}>저장</button>
+                <button onClick={() => setRenameEditId(null)} style={smallBtn("#EFEFE9", "#5F5E5A")}>취소</button>
+              </div>
+            ) : (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                <button onClick={() => { setPwEditId(id); setPwEditValue(""); }} style={smallBtn("#E6F1FB", "#185FA5")}>비밀번호 변경</button>
+                <button onClick={() => { setRenameEditId(id); setRenameValue(id); }} style={smallBtn("#FAEEDA", "#854F0B")}>아이디 변경</button>
+                <button
+                  onClick={() => askConfirm(`"${id}" 계정을 삭제할까요?\n이 아이디로는 더 이상 로그인할 수 없게 돼요.`, () => onDelete(id))}
+                  style={smallBtn("#FCEEEE", "#A32D2D")}
+                >
+                  삭제
+                </button>
+              </div>
+            )}
+          </div>
+        ))}
+        {ids.length === 0 && (
+          <div style={{ padding: "30px 0", textAlign: "center", color: "#888780", fontSize: 13 }}>등록된 계정이 없어요</div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function DeliveryTrackTab({ orders, customerMap, onConfirm, onSelectOrder, onBack, expectedArrivalDeadline }) {
@@ -4705,16 +4876,10 @@ function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal,
           </div>
         )}
         <button
-          onClick={() => {
-            if (hasSharedStorage) {
-              fireToast("이 채팅(아티팩트) 링크를 다른 사람에게 공유하면 같은 가게장부를 함께 사용할 수 있어요");
-            } else {
-              fireToast("지금은 이 기기에만 저장돼요. 실시간 공유는 Claude 안에서 사용하거나 Firebase 연동이 필요해요");
-            }
-          }}
+          onClick={() => setTab("accounts")}
           style={{ width: "100%", marginTop: 12, padding: "9px 0", borderRadius: 8, border: "1px solid #2F6F4E", background: "#fff", color: "#27500A", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
         >
-          공유계정 설정하기
+          계정 관리 (비밀번호·아이디 변경, 추가/삭제)
         </button>
       </div>
 
@@ -6163,7 +6328,6 @@ function GuideTab({ onBack }) {
       title: "1. 시작하기 (로그인 / 앱 이름)",
       items: [
         { h: "로그인", b: "아이디와 비밀번호를 입력하고 \"로그인\"을 누르세요. 처음 쓰는 아이디라면 그 비밀번호로 자동 가입돼요. 로그아웃하기 전까지 계속 로그인 상태가 유지돼요." },
-        { h: "간편 로그인", b: "카카오/구글/QR코드 버튼으로도 바로 들어갈 수 있어요 (비밀번호 없이 데모용 계정으로 입장)." },
         { h: "앱 이름 바꾸기", b: "로그인 화면이나 ☰ 메뉴에서 앱 이름(예: 조아저씨쌈 주문관리) 글자를 누르면 원하는 이름으로 바꿀 수 있어요." },
       ],
     },
@@ -6228,25 +6392,53 @@ function GuideTab({ onBack }) {
       ],
     },
     {
-      title: "9. 백업 / 복구",
+      title: "9. 백업 / 복구 (중요)",
       items: [
-        { h: "백업하기", b: "HOME 또는 ☰ 메뉴 → \"주문백업 다운로드\"로 모든 데이터(주문·고객·상품 등)를 파일 하나로 받아둘 수 있어요." },
-        { h: "복구하기", b: "\"주문백업 복구\"로 그 백업 파일을 다시 불러오면 그 시점 데이터로 되돌아가요." },
+        { h: "자동 백업", b: "1시간마다 자동으로 그 시간대의 데이터가 서버에 저장돼요. 문제가 생겨도 최대 1시간 치만 다시 입력하면 돼요." },
+        { h: "날짜·시간별 복원", b: "☰ 메뉴 → \"날짜·시간별 자동 백업에서 복원\"에서 날짜와 시간(0~23시)을 골라 그 시점 데이터로 되돌릴 수 있어요." },
+        { h: "전체 백업 목록 보기", b: "☰ 메뉴 → \"전체 백업 목록 보기\"를 누르면, 저장된 모든 시점의 데이터 개수를 한눈에 보고 원하는 시점을 골라 바로 복원할 수 있어요." },
+        { h: "진단 기록 보기", b: "☰ 메뉴 → \"진단 기록 보기\"에서, 저장이 언제 어떻게 이뤄졌는지(혹은 이상 감지로 막혔는지) 확인할 수 있어요. 데이터에 문제가 생기면 이 화면을 캡처해서 알려주시면 원인 파악이 빨라요." },
+        { h: "수동 백업 파일", b: "HOME 또는 ☰ 메뉴 → \"주문백업 다운로드\"로 파일 하나로 받아둘 수 있고, \"주문백업 복구\"로 그 파일을 다시 불러올 수 있어요." },
       ],
     },
     {
-      title: "10. 여러 사람이 같이 쓰기 (PC + 폰)",
+      title: "10. 배송 확인 / 배송 추적",
       items: [
-        { h: "같은 아이디로 연동", b: "PC와 폰에서 같은 주소로 들어가서 같은 아이디로 로그인하면, 입력한 데이터가 실시간으로 똑같이 보여요 (Firebase 연동 시)." },
-        { h: "공유계정 목록", b: "HOME의 \"공유계정\"에서 지금까지 이 가게장부를 쓴 사람들 목록을 볼 수 있어요." },
+        { h: "배송 추적", b: "HOME의 \"🚚 배송 추적\" 버튼에서, 발송됐지만 아직 도착 확인 전인 주문을 전부 볼 수 있어요. 정상 배송중(🚚)과 확인 필요(⏰)로 구분돼서 표시돼요." },
+        { h: "배송 확인 알림", b: "정상 도착 예정일이 지났는데 확인이 안 된 주문이 있으면, 앱을 열 때 알림음과 함께 팝업으로 알려줘요. 금요일 발송건은 토요일까지 확인 안 되면 바로 알려줘요 (주말 영업 업체 고려)." },
+        { h: "배송조회 / 도착확인", b: "각 카드의 \"배송조회 열기\"로 택배사 조회 페이지가 바로 열리고, 확인되면 \"도착 확인함\"을 눌러 목록에서 정리해요. 여러 건을 체크해서 한 번에 처리할 수도 있어요." },
       ],
     },
     {
-      title: "11. 자주 묻는 질문",
+      title: "11. 업체 거래명세서 / 정산서",
+      items: [
+        { h: "거래명세서 자동 저장", b: "업체 주문을 등록하면 거래명세서가 자동으로 저장돼요. 업체 탭에서 직접 작성·수정·삭제도 가능해요." },
+        { h: "기간별 정산서", b: "업체 탭 → \"업체별 기간 정산서 만들기\"에서 업체와 기간(직접 선택 또는 최근 1개월/6개월/1년)을 고르면, 그 기간의 거래를 모두 합친 정식 거래명세서 엑셀을 받을 수 있어요." },
+      ],
+    },
+    {
+      title: "12. 여러 사람이 같이 쓰기 (계정 관리)",
+      items: [
+        { h: "같은 데이터 함께 보기", b: "PC와 폰에서 같은 주소로 들어가서 로그인하면, 입력한 데이터가 실시간으로 똑같이 보여요." },
+        { h: "계정 추가 / 비밀번호·아이디 변경", b: "☰ 메뉴 → \"공유계정 관리\"에서 새 직원 계정을 추가하거나, 비밀번호·아이디를 바꾸거나, 안 쓰는 계정을 삭제할 수 있어요. 여기서 바꾼 내용은 모든 기기에 바로 반영돼요." },
+        { h: "아이디·비밀번호를 잊었을 때", b: "로그인 화면의 \"아이디·비밀번호를 잊으셨나요?\"를 눌러 안내를 확인하세요. 다른 직원이 로그인할 수 있으면 그분이 계정 관리에서 비밀번호를 바꿔줄 수 있고, 아무도 못 들어가면 새 아이디로 로그인한 뒤 계정 관리에서 원래 아이디 비밀번호를 다시 정하면 돼요." },
+      ],
+    },
+    {
+      title: "13. 앱 업데이트 / 오류 대응",
+      items: [
+        { h: "업데이트 확인하기", b: "☰ 메뉴 → \"업데이트 확인하기\"를 누르면 최신 버전인지 바로 확인되고, 새 버전이 있으면 자동으로 적용돼요. 화면에 표시되는 버전 번호(v1, v2...)로 지금 어떤 버전인지 알 수 있어요." },
+        { h: "오래된 버전은 저장이 막혀요", b: "안 쓰는 기기에 예전 아이콘이 남아있어도, 오래된 버전은 자동으로 저장이 금지되도록 되어있어서 실수로 데이터를 망가뜨릴 걱정이 적어요." },
+        { h: "오류 화면이 뜨면", b: "\"일시적인 문제가 발생했어요\" 화면이 뜨면 새로고침 버튼을 누르세요. 데이터는 안전하게 저장되어 있어요. 화면에 오류 문구가 함께 보이면 캡처해서 알려주시면 빠르게 원인을 찾을 수 있어요." },
+      ],
+    },
+    {
+      title: "14. 자주 묻는 질문",
       items: [
         { h: "하단 메뉴가 안 보여요", b: "최신 버전으로 다시 배포했는지 확인해주세요. 그래도 안 보이면 화면을 캡처해서 보내주시면 도와드릴게요." },
-        { h: "로그인이 안 돼요", b: "아이디/비밀번호를 처음 쓰시는 거라면 그대로 자동 가입되니, 같은 아이디로 다시 시도해보세요. 비밀번호를 다르게 입력하면 오류가 나요." },
-        { h: "데이터가 기기마다 달라요", b: "Firebase 연동이 안 되어 있으면 각 기기에 따로 저장돼요. PC/폰 연동을 원하시면 Firebase 설정이 필요해요." },
+        { h: "로그인이 안 돼요", b: "아이디/비밀번호를 처음 쓰시는 거라면 그대로 자동 가입되니, 같은 아이디로 다시 시도해보세요. 그래도 안 되면 로그인 화면의 \"아이디·비밀번호를 잊으셨나요?\" 안내를 확인하세요." },
+        { h: "데이터가 기기마다 달라요", b: "항상 정식 주소로만 접속하고, 여러 탭/기기를 동시에 오래 켜두지 마세요. 새로 확인할 땐 항상 새 탭으로 여는 걸 추천해요." },
+        { h: "엑셀 상품명이 이상하게 매칭돼요", b: "확실하지 않은 상품명은 절대 추측해서 등록하지 않고 원본 그대로 남아요. \"확인 필요\" 표시가 있는 항목은 직접 확인하고 올바른 상품을 골라주세요." },
       ],
     },
   ];
@@ -6938,7 +7130,7 @@ function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, 
     { label: "사용법 가이드", onClick: () => onNavigate("guide") },
     { label: "정기배송 관리", onClick: () => onNavigate("subscriptions") },
     { label: "쇼핑몰 연동 설정", onClick: () => onNavigate("integrations") },
-    { label: "공유계정 관리", onClick: () => onNavigate("home") },
+    { label: "공유계정 관리", onClick: () => onNavigate("accounts") },
   ];
 
   const menuRows2 = [
