@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 21;
+const APP_VERSION = 22;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -958,14 +958,17 @@ function App() {
     }
   }, []);
 
-  function addAccount(id, password) {
+  function addAccount(id, password, displayName) {
     const trimmedId = id.trim();
     if (!trimmedId) { fireToast("아이디를 입력해주세요"); return false; }
     if (accounts[trimmedId]) { fireToast("이미 있는 아이디예요"); return false; }
     // 관리자가 직접 추가하는 계정은 기본적으로 "직원" 권한으로 등록됨 (필요하면 나중에 관리자로 승격 가능)
-    saveAccounts({ ...accounts, [trimmedId]: { password: password.trim() || "", role: "staff" } });
+    const entry = { password: password.trim() || "", role: "staff" };
+    const trimmedName = (displayName || "").trim();
+    if (trimmedName) entry.displayName = trimmedName;
+    saveAccounts({ ...accounts, [trimmedId]: entry });
     addMemberLater(trimmedId);
-    fireToast(`"${trimmedId}" 계정을 추가했어요`);
+    fireToast(`"${trimmedName || trimmedId}" 계정을 추가했어요`);
     return true;
   }
 
@@ -4668,6 +4671,7 @@ function batchBtnStyle(bg, color) {
 function AccountsTab({ accounts, members, currentNickname, onAdd, onChangePassword, onRename, onDelete, onBlock, onUnblock, onApprove, onReject, onSetRole, onSetDisplayName, onBack, askConfirm }) {
   const [newId, setNewId] = useState("");
   const [newPw, setNewPw] = useState("");
+  const [newNick, setNewNick] = useState("");
   const [pwEditId, setPwEditId] = useState(null);
   const [pwEditValue, setPwEditValue] = useState("");
   const [renameEditId, setRenameEditId] = useState(null);
@@ -4682,8 +4686,8 @@ function AccountsTab({ accounts, members, currentNickname, onAdd, onChangePasswo
   const ids = Array.from(new Set([...Object.keys(accounts), ...(members || [])])).sort();
 
   function submitAdd() {
-    const ok = onAdd(newId, newPw);
-    if (ok) { setNewId(""); setNewPw(""); }
+    const ok = onAdd(newId, newPw, newNick);
+    if (ok) { setNewId(""); setNewPw(""); setNewNick(""); }
   }
 
   function formatLastLogin(iso) {
@@ -4709,11 +4713,12 @@ function AccountsTab({ accounts, members, currentNickname, onAdd, onChangePasswo
       </p>
 
       <div style={{ border: "1px solid #E2E4DD", borderRadius: 10, padding: "12px 14px", marginBottom: 16, background: "#F7F8F4" }}>
-        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>+ 새 직원 계정 추가</div>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>+ 새 계정 추가</div>
         <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
           <input placeholder="새 아이디" value={newId} onChange={(e) => setNewId(e.target.value)} style={inputStyle} />
           <input type="password" placeholder="비밀번호" value={newPw} onChange={(e) => setNewPw(e.target.value)} style={inputStyle} />
         </div>
+        <input placeholder="닉네임 (예: 김철수, 매장1) - 화면에 이 이름으로 보여요" value={newNick} onChange={(e) => setNewNick(e.target.value)} style={{ ...inputStyle, width: "100%", marginBottom: 8 }} />
         <button onClick={submitAdd} style={{ width: "100%", padding: "10px 0", borderRadius: 8, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>
           계정 추가
         </button>
