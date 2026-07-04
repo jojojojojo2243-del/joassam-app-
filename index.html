@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 17;
+const APP_VERSION = 18;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -4816,14 +4816,17 @@ function AccountsTab({ accounts, members, currentNickname, onAdd, onChangePasswo
                 >
                   차단하기
                 </button>
-                {isRegistered && (
-                  <button
-                    onClick={() => askConfirm(`"${id}" 계정을 목록에서 삭제할까요?\n(참고: 삭제만 하면 같은 아이디로 다시 가입할 수 있어요. 완전히 못 들어오게 하려면 "차단"을 사용하세요.)`, () => onDelete(id))}
-                    style={smallBtn("#EFEFE9", "#5F5E5A")}
-                  >
-                    목록에서 삭제
-                  </button>
-                )}
+                <button
+                  onClick={() => askConfirm(
+                    isRegistered
+                      ? `"${id}" 계정을 목록에서 삭제할까요?\n(참고: 삭제만 하면 같은 아이디로 다시 가입할 수 있어요. 완전히 못 들어오게 하려면 "차단"을 사용하세요.)`
+                      : `"${id}" 이름을 목록에서 지울까요?\n(예전 접속 기록만 지우는 거예요. 나중에 이 이름으로 로그인하면 다시 나타날 수 있어요.)`,
+                    () => onDelete(id)
+                  )}
+                  style={smallBtn("#EFEFE9", "#5F5E5A")}
+                >
+                  목록에서 삭제
+                </button>
               </div>
             )}
           </div>
