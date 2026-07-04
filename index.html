@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 10;
+const APP_VERSION = 11;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -996,6 +996,18 @@ function App() {
     fireToast(`"${id}" 계정을 삭제했어요`);
   }
 
+  function blockAccount(id) {
+    if (!accounts[id]) return;
+    saveAccounts({ ...accounts, [id]: { ...accounts[id], blocked: true } });
+    fireToast(`"${id}" 계정을 차단했어요. 이 아이디로는 더 이상 로그인(재가입 포함)할 수 없어요`);
+  }
+
+  function unblockAccount(id) {
+    if (!accounts[id]) return;
+    saveAccounts({ ...accounts, [id]: { ...accounts[id], blocked: false } });
+    fireToast(`"${id}" 계정의 차단을 해제했어요`);
+  }
+
   function saveAccounts(next) {
     setAccounts(next);
     try { window.localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(next)); } catch {}
@@ -1024,6 +1036,13 @@ function App() {
       return;
     }
     const existing = accounts[trimmedId];
+    // 차단된 계정은 비밀번호를 뭘 입력하든, 새로 가입하려 해도 무조건 거부.
+    // (전에는 계정을 "삭제"해도 같은 아이디로 다시 로그인하면 자동으로 재가입돼서
+    //  퇴사한 직원이 다시 들어올 수 있는 구멍이 있었음 → "차단"은 그 아이디 자체를 막아버림)
+    if (existing && existing.blocked) {
+      setLoginError("차단된 계정이에요. 관리자(사장님)에게 문의해주세요");
+      return;
+    }
     // 이 아이디에 비밀번호가 등록되어 있으면, 입력한 비밀번호가 정확히 일치해야만 통과.
     // (전에는 비밀번호 칸을 비워두면 검증 자체를 건너뛰어서 아무나 들어갈 수 있는 구멍이 있었음)
     if (existing && existing.password) {
@@ -1032,9 +1051,12 @@ function App() {
         return;
       }
     }
-    if (!existing) {
-      saveAccounts({ ...accounts, [trimmedId]: { password: password.trim() || "" } });
-    }
+    // 로그인에 성공할 때마다(신규 가입 포함) "마지막 접속 시각"을 기록해서, 관리자가
+    // 계정 관리 화면에서 직원이 언제 마지막으로 접속했는지 확인할 수 있게 함
+    saveAccounts({
+      ...accounts,
+      [trimmedId]: { ...(existing || {}), password: existing ? existing.password : (password.trim() || ""), lastLoginAt: new Date().toISOString() },
+    });
     addMemberLater(trimmedId);
     startSession(trimmedId);
   }
@@ -3878,6 +3900,8 @@ function App() {
               onChangePassword={changeAccountPassword}
               onRename={renameAccount}
               onDelete={deleteAccount}
+              onBlock={blockAccount}
+              onUnblock={unblockAccount}
               onBack={() => setTab("home")}
               askConfirm={askConfirm}
             />
@@ -4491,7 +4515,7 @@ function batchBtnStyle(bg, color) {
   return { flex: 1, padding: "8px 0", borderRadius: 7, border: "none", background: bg, color, fontWeight: 700, fontSize: 11.5, cursor: "pointer" };
 }
 
-function AccountsTab({ accounts, currentNickname, onAdd, onChangePassword, onRename, onDelete, onBack, askConfirm }) {
+function AccountsTab({ accounts, currentNickname, onAdd, onChangePassword, onRename, onDelete, onBlock, onUnblock, onBack, askConfirm }) {
   const [newId, setNewId] = useState("");
   const [newPw, setNewPw] = useState("");
   const [pwEditId, setPwEditId] = useState(null);
@@ -4506,6 +4530,14 @@ function AccountsTab({ accounts, currentNickname, onAdd, onChangePassword, onRen
     if (ok) { setNewId(""); setNewPw(""); }
   }
 
+  function formatLastLogin(iso) {
+    if (!iso) return "접속 기록 없음";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "접속 기록 없음";
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${d.getMonth() + 1}.${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())} 마지막 접속`;
+  }
+
   const inputStyle = { flex: 1, border: "1px solid #D3D1C7", borderRadius: 8, padding: "9px 10px", fontSize: 13 };
   const smallBtn = (bg, color) => ({ border: "none", background: bg, color, borderRadius: 6, padding: "6px 10px", fontWeight: 700, fontSize: 11.5, cursor: "pointer" });
 
@@ -4516,7 +4548,7 @@ function AccountsTab({ accounts, currentNickname, onAdd, onChangePassword, onRen
         <h1 style={{ fontSize: 19, fontWeight: 700, margin: 0, letterSpacing: "-0.02em" }}>계정 관리</h1>
       </div>
       <p style={{ fontSize: 11.5, color: "#888780", margin: "6px 0 16px", lineHeight: 1.6 }}>
-        이 가게장부를 함께 쓰는 직원 계정을 관리해요. 새 계정을 추가하거나, 비밀번호·아이디를 바꾸거나, 안 쓰는 계정을 삭제할 수 있어요.
+        이 가게장부를 함께 쓰는 직원 계정을 관리해요. 새 계정을 추가하거나, 비밀번호·아이디를 바꾸거나, 직원이 퇴사하면 "차단"으로 다시 못 들어오게 막을 수 있어요.
         여기서 바꾼 내용은 모든 기기(폰·PC)에 바로 반영돼요.
       </p>
 
@@ -4533,13 +4565,25 @@ function AccountsTab({ accounts, currentNickname, onAdd, onChangePassword, onRen
 
       <div style={{ fontSize: 12.5, fontWeight: 700, color: "#5F5E5A", marginBottom: 8 }}>전체 계정 ({ids.length}개)</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-        {ids.map((id) => (
-          <div key={id} style={{ border: "1px solid #E2E4DD", borderRadius: 10, padding: "10px 12px" }}>
-            <div style={{ fontSize: 13.5, fontWeight: 700, marginBottom: 8 }}>
-              {id}{id === currentNickname && <span style={{ color: "#185FA5", fontWeight: 400, fontSize: 11.5 }}> (나)</span>}
+        {ids.map((id) => {
+          const acc = accounts[id] || {};
+          return (
+          <div key={id} style={{ border: `1px solid ${acc.blocked ? "#E9B9B9" : "#E2E4DD"}`, borderRadius: 10, padding: "10px 12px", background: acc.blocked ? "#FCF5F5" : "#fff" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+              <span style={{ fontSize: 13.5, fontWeight: 700 }}>{id}</span>
+              {id === currentNickname && <span style={{ color: "#185FA5", fontWeight: 400, fontSize: 11.5 }}>(나)</span>}
+              {acc.blocked && <span style={{ fontSize: 10, fontWeight: 700, color: "#A32D2D", background: "#FCEEEE", padding: "2px 7px", borderRadius: 10 }}>🚫 차단됨</span>}
             </div>
+            <div style={{ fontSize: 10.5, color: "#888780", marginBottom: 8 }}>{formatLastLogin(acc.lastLoginAt)}</div>
 
-            {pwEditId === id ? (
+            {acc.blocked ? (
+              <button
+                onClick={() => askConfirm(`"${id}" 계정의 차단을 해제할까요?\n다시 로그인할 수 있게 돼요.`, () => onUnblock(id))}
+                style={smallBtn("#EAF3DE", "#27500A")}
+              >
+                차단 해제
+              </button>
+            ) : pwEditId === id ? (
               <div style={{ display: "flex", gap: 6 }}>
                 <input type="password" placeholder="새 비밀번호" value={pwEditValue} onChange={(e) => setPwEditValue(e.target.value)} style={inputStyle} />
                 <button onClick={() => { onChangePassword(id, pwEditValue); setPwEditId(null); setPwEditValue(""); }} style={smallBtn("#2F6F4E", "#fff")}>저장</button>
@@ -4556,15 +4600,22 @@ function AccountsTab({ accounts, currentNickname, onAdd, onChangePassword, onRen
                 <button onClick={() => { setPwEditId(id); setPwEditValue(""); }} style={smallBtn("#E6F1FB", "#185FA5")}>비밀번호 변경</button>
                 <button onClick={() => { setRenameEditId(id); setRenameValue(id); }} style={smallBtn("#FAEEDA", "#854F0B")}>아이디 변경</button>
                 <button
-                  onClick={() => askConfirm(`"${id}" 계정을 삭제할까요?\n이 아이디로는 더 이상 로그인할 수 없게 돼요.`, () => onDelete(id))}
+                  onClick={() => askConfirm(`"${id}" 계정을 차단할까요?\n이 아이디로는 더 이상 로그인(재가입 포함)할 수 없게 돼요. 퇴사한 직원 계정을 막을 때 사용하세요.`, () => onBlock(id))}
                   style={smallBtn("#FCEEEE", "#A32D2D")}
                 >
-                  삭제
+                  차단 (퇴사 처리)
+                </button>
+                <button
+                  onClick={() => askConfirm(`"${id}" 계정을 목록에서 삭제할까요?\n(참고: 삭제만 하면 같은 아이디로 다시 가입할 수 있어요. 완전히 못 들어오게 하려면 "차단"을 사용하세요.)`, () => onDelete(id))}
+                  style={smallBtn("#EFEFE9", "#5F5E5A")}
+                >
+                  목록에서 삭제
                 </button>
               </div>
             )}
           </div>
-        ))}
+          );
+        })}
         {ids.length === 0 && (
           <div style={{ padding: "30px 0", textAlign: "center", color: "#888780", fontSize: 13 }}>등록된 계정이 없어요</div>
         )}
