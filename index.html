@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 15;
+const APP_VERSION = 17;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -895,6 +895,8 @@ function App() {
   const [accounts, setAccounts] = useState(() => {
     try { return JSON.parse(window.localStorage.getItem(ACCOUNTS_KEY) || "{}"); } catch { return {}; }
   });
+  // 현재 로그인한 계정이 관리자인지 여부 (role 필드가 없으면 예전부터 쓰던 계정이므로 관리자로 취급)
+  const isCurrentUserAdmin = !accounts[nickname] || accounts[nickname].role !== "staff";
   const [members, setMembers] = useState([]);
   const [loggedIn, setLoggedIn] = useState(false);
   const [loginError, setLoginError] = useState("");
@@ -960,7 +962,8 @@ function App() {
     const trimmedId = id.trim();
     if (!trimmedId) { fireToast("아이디를 입력해주세요"); return false; }
     if (accounts[trimmedId]) { fireToast("이미 있는 아이디예요"); return false; }
-    saveAccounts({ ...accounts, [trimmedId]: { password: password.trim() || "" } });
+    // 관리자가 직접 추가하는 계정은 기본적으로 "직원" 권한으로 등록됨 (필요하면 나중에 관리자로 승격 가능)
+    saveAccounts({ ...accounts, [trimmedId]: { password: password.trim() || "", role: "staff" } });
     addMemberLater(trimmedId);
     fireToast(`"${trimmedId}" 계정을 추가했어요`);
     return true;
@@ -993,6 +996,7 @@ function App() {
     const next = { ...accounts };
     delete next[id];
     saveAccounts(next);
+    removeMember(id); // 홈 화면 "공유계정" 목록에서도 같이 제거
     fireToast(`"${id}" 계정을 삭제했어요`);
   }
 
@@ -1010,6 +1014,33 @@ function App() {
     fireToast(`"${id}" 계정의 차단을 해제했어요`);
   }
 
+  // 계정의 역할(관리자/직원)을 정하는 함수. role 필드가 아예 없으면 관리자로 취급함(예전부터
+  // 쓰던 계정들이 갑자기 권한을 잃지 않도록 하기 위한 규칙).
+  function isAccountAdmin(acc) {
+    return !acc || acc.role !== "staff";
+  }
+  function setAccountRole(id, role) {
+    if (!accounts[id]) return;
+    if (role === "staff") {
+      // 마지막 남은 관리자는 직원으로 강등 못 하게 막음 (관리자가 아예 없어지는 사고 방지)
+      const adminCount = Object.values(accounts).filter((a) => isAccountAdmin(a)).length;
+      if (adminCount <= 1 && isAccountAdmin(accounts[id])) {
+        fireToast("최소 1명의 관리자는 있어야 해요. 다른 계정을 먼저 관리자로 지정해주세요");
+        return;
+      }
+    }
+    saveAccounts({ ...accounts, [id]: { ...accounts[id], role } });
+    fireToast(`"${id}" 계정을 ${role === "staff" ? "직원" : "관리자"}로 변경했어요`);
+  }
+
+  // 계정에 별명(닉네임)을 지정해서, 같은 아이디를 여러 명이 함께 쓸 때 실제로 누가 쓰는지
+  // 구분할 수 있게 함 (예: "매장1"이라는 아이디를 쓰지만 별명은 "김철수"로 설정)
+  function setAccountDisplayName(id, displayName) {
+    if (!accounts[id]) return;
+    saveAccounts({ ...accounts, [id]: { ...accounts[id], displayName: displayName.trim() } });
+    fireToast(displayName.trim() ? `"${id}" 계정의 별명을 "${displayName.trim()}"(으)로 설정했어요` : `"${id}" 계정의 별명을 지웠어요`);
+  }
+
   function approveAccount(id) {
     if (!accounts[id]) return;
     saveAccounts({ ...accounts, [id]: { ...accounts[id], pending: false } });
@@ -1020,6 +1051,7 @@ function App() {
     const next = { ...accounts };
     delete next[id];
     saveAccounts(next);
+    removeMember(id); // 홈 화면 "공유계정" 목록에서도 같이 제거
     fireToast(`"${id}" 님의 접속 요청을 거부했어요`);
   }
 
@@ -1070,6 +1102,11 @@ function App() {
     // 계정이 단 하나도 없는 "완전 최초" 상태라면, 승인해줄 사람 자체가 없으므로
     // 그 첫 번째 사람은 승인 대기 없이 바로 들어가도록 함 (안 그러면 아무도 못 들어오는 사고가 생김)
     const isVeryFirstAccount = isNewAccount && Object.keys(accounts).length === 0;
+    // 완전 최초 계정은 role 필드 자체를 안 넣어서(undefined=관리자 규칙) 관리자로 취급되고,
+    // 그 외 신규 가입 계정은 기본적으로 "직원" 권한으로 등록됨.
+    // (Firestore는 값이 undefined인 필드를 그대로 저장하면 오류가 날 수 있어서, "필드 자체를 안 넣는"
+    //  방식으로 안전하게 처리함 - role: undefined 처럼 명시적으로 넣으면 안 됨)
+    const roleUpdate = (isNewAccount && !isVeryFirstAccount) ? { role: "staff" } : {};
     // 로그인에 성공할 때마다(신규 가입 포함) "마지막 접속 시각"을 기록해서, 관리자가
     // 계정 관리 화면에서 직원이 언제 마지막으로 접속했는지 확인할 수 있게 함.
     // 신규로 만들어지는 계정은 "승인 대기" 상태로 등록되어, 사장님이 승인하기 전까지는
@@ -1082,6 +1119,7 @@ function App() {
         password: existing ? existing.password : (password.trim() || ""),
         lastLoginAt: new Date().toISOString(),
         pending: (isNewAccount && !isVeryFirstAccount) ? true : !!(existing && existing.pending),
+        ...roleUpdate,
       },
     });
     addMemberLater(trimmedId);
@@ -1426,6 +1464,17 @@ function App() {
     setMembers((prev) => {
       if (prev.includes(name)) return prev;
       const next = [...prev, name];
+      if (firebaseReady) fbDb.collection("stores").doc(MEMBERS_DOC).set({ list: next }, { merge: true }).catch(() => {});
+      else if (hasSharedStorage) sharedSet("store-members", next);
+      return next;
+    });
+  }
+
+  // 계정을 삭제할 때, 홈 화면 "공유계정" 목록에서도 그 이름을 같이 지움
+  function removeMember(name) {
+    setMembers((prev) => {
+      if (!prev.includes(name)) return prev;
+      const next = prev.filter((n) => n !== name);
       if (firebaseReady) fbDb.collection("stores").doc(MEMBERS_DOC).set({ list: next }, { merge: true }).catch(() => {});
       else if (hasSharedStorage) sharedSet("store-members", next);
       return next;
@@ -3720,7 +3769,7 @@ function App() {
 
         <div style={{ padding: "16px 16px 16px", maxWidth: "none", flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
           {tab === "home" && (
-            <HomeTab appName={appName} orders={orders} counts={counts} customerMap={customerMap} productMap={productMap} orderTotal={orderTotal} exportBackup={exportBackup} importBackup={importBackup} backupInputRef={backupInputRef} fireToast={fireToast} setTab={setTab} members={members} nickname={nickname} onSelectOrder={(id) => { setTab("orders"); setSelectedOrderId(id); }} couriers={couriers} customerCount={customers.length} vendorCount={vendors.length} overdueCount={overdueDeliveries.length} pendingApprovalCount={Object.values(accounts).filter((a) => a && a.pending).length} />
+            <HomeTab appName={appName} orders={orders} counts={counts} customerMap={customerMap} productMap={productMap} orderTotal={orderTotal} exportBackup={exportBackup} importBackup={importBackup} backupInputRef={backupInputRef} fireToast={fireToast} setTab={setTab} members={members} nickname={nickname} onSelectOrder={(id) => { setTab("orders"); setSelectedOrderId(id); }} couriers={couriers} customerCount={customers.length} vendorCount={vendors.length} overdueCount={overdueDeliveries.length} pendingApprovalCount={isCurrentUserAdmin ? Object.values(accounts).filter((a) => a && a.pending).length : 0} isAdmin={isCurrentUserAdmin} accounts={accounts} />
           )}
 
           {tab === "orders" && !selectedOrder && !invoicePreview && (
@@ -3950,7 +3999,19 @@ function App() {
             />
           )}
 
-          {tab === "accounts" && (
+          {tab === "accounts" && !isCurrentUserAdmin && (
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+                <button onClick={() => setTab("home")} style={{ border: "none", background: "none", fontSize: 18, cursor: "pointer", padding: 0 }}>‹</button>
+                <h1 style={{ fontSize: 19, fontWeight: 700, margin: 0, letterSpacing: "-0.02em" }}>계정 관리</h1>
+              </div>
+              <div style={{ padding: "50px 20px", textAlign: "center", color: "#888780", fontSize: 13, lineHeight: 1.6 }}>
+                🔒 이 화면은 관리자만 볼 수 있어요.<br />권한이 필요하면 관리자(사장님)에게 문의해주세요.
+              </div>
+            </div>
+          )}
+
+          {tab === "accounts" && isCurrentUserAdmin && (
             <AccountsTab
               accounts={accounts}
               members={members}
@@ -3963,6 +4024,8 @@ function App() {
               onUnblock={unblockAccount}
               onApprove={approveAccount}
               onReject={rejectAccount}
+              onSetRole={setAccountRole}
+              onSetDisplayName={setAccountDisplayName}
               onBack={() => setTab("home")}
               askConfirm={askConfirm}
             />
@@ -4239,6 +4302,7 @@ function App() {
             onOpenBackupList={loadBackupList}
             onCheckUpdate={checkForAppUpdate}
             checkingUpdate={checkingUpdate}
+            isAdmin={isCurrentUserAdmin}
             onClose={() => setSideMenuOpen(false)}
             onNavigate={(t) => { setTab(t); setSideMenuOpen(false); setSelectedOrderId(null); }}
             askConfirm={askConfirm}
@@ -4596,13 +4660,15 @@ function batchBtnStyle(bg, color) {
   return { flex: 1, padding: "8px 0", borderRadius: 7, border: "none", background: bg, color, fontWeight: 700, fontSize: 11.5, cursor: "pointer" };
 }
 
-function AccountsTab({ accounts, members, currentNickname, onAdd, onChangePassword, onRename, onDelete, onBlock, onUnblock, onApprove, onReject, onBack, askConfirm }) {
+function AccountsTab({ accounts, members, currentNickname, onAdd, onChangePassword, onRename, onDelete, onBlock, onUnblock, onApprove, onReject, onSetRole, onSetDisplayName, onBack, askConfirm }) {
   const [newId, setNewId] = useState("");
   const [newPw, setNewPw] = useState("");
   const [pwEditId, setPwEditId] = useState(null);
   const [pwEditValue, setPwEditValue] = useState("");
   const [renameEditId, setRenameEditId] = useState(null);
   const [renameValue, setRenameValue] = useState("");
+  const [nickEditId, setNickEditId] = useState(null);
+  const [nickEditValue, setNickEditValue] = useState("");
 
   const pendingIds = Object.keys(accounts).filter((id) => accounts[id] && accounts[id].pending);
 
@@ -4676,17 +4742,32 @@ function AccountsTab({ accounts, members, currentNickname, onAdd, onChangePasswo
           const acc = accounts[id]; // 정식 등록 안 됐으면 undefined
           const isRegistered = !!acc;
           const info = acc || {};
+          const isAdminAcc = !isRegistered || info.role !== "staff";
           return (
           <div key={id} style={{ border: `1px solid ${info.blocked ? "#E9B9B9" : "#E2E4DD"}`, borderRadius: 10, padding: "10px 12px", background: info.blocked ? "#FCF5F5" : "#fff" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2, flexWrap: "wrap" }}>
               <span style={{ fontSize: 13.5, fontWeight: 700 }}>{id}</span>
+              {info.displayName && <span style={{ fontSize: 12, color: "#5F5E5A" }}>({info.displayName})</span>}
               {id === currentNickname && <span style={{ color: "#185FA5", fontWeight: 400, fontSize: 11.5 }}>(나)</span>}
+              {isRegistered && (
+                <span style={{ fontSize: 10, fontWeight: 700, color: isAdminAcc ? "#854F0B" : "#27500A", background: isAdminAcc ? "#FAEEDA" : "#EAF3DE", padding: "2px 7px", borderRadius: 10 }}>
+                  {isAdminAcc ? "👑 관리자" : "직원"}
+                </span>
+              )}
               {info.blocked && <span style={{ fontSize: 10, fontWeight: 700, color: "#A32D2D", background: "#FCEEEE", padding: "2px 7px", borderRadius: 10 }}>🚫 차단됨</span>}
               {!isRegistered && !info.blocked && <span style={{ fontSize: 10, fontWeight: 700, color: "#888780", background: "#F1F2EC", padding: "2px 7px", borderRadius: 10 }}>정식 등록 전</span>}
             </div>
             <div style={{ fontSize: 10.5, color: "#888780", marginBottom: 8 }}>
               {isRegistered ? formatLastLogin(info.lastLoginAt) : "새 방식으로 아직 로그인 안 함 (비밀번호 보호 없음)"}
             </div>
+
+            {nickEditId === id ? (
+              <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
+                <input placeholder="별명 (예: 김철수)" value={nickEditValue} onChange={(e) => setNickEditValue(e.target.value)} style={inputStyle} />
+                <button onClick={() => { onSetDisplayName(id, nickEditValue); setNickEditId(null); }} style={smallBtn("#2F6F4E", "#fff")}>저장</button>
+                <button onClick={() => setNickEditId(null)} style={smallBtn("#EFEFE9", "#5F5E5A")}>취소</button>
+              </div>
+            ) : null}
 
             {info.blocked ? (
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -4721,6 +4802,12 @@ function AccountsTab({ accounts, members, currentNickname, onAdd, onChangePasswo
                   <>
                     <button onClick={() => { setPwEditId(id); setPwEditValue(""); }} style={smallBtn("#E6F1FB", "#185FA5")}>비밀번호 변경</button>
                     <button onClick={() => { setRenameEditId(id); setRenameValue(id); }} style={smallBtn("#FAEEDA", "#854F0B")}>아이디 변경</button>
+                    <button onClick={() => { setNickEditId(id); setNickEditValue(info.displayName || ""); }} style={smallBtn("#EFE9F7", "#6B4EA6")}>별명 설정</button>
+                    {isAdminAcc ? (
+                      <button onClick={() => onSetRole(id, "staff")} style={smallBtn("#F1F2EC", "#5F5E5A")}>직원으로 변경</button>
+                    ) : (
+                      <button onClick={() => onSetRole(id, "admin")} style={smallBtn("#FAEEDA", "#854F0B")}>관리자로 승격</button>
+                    )}
                   </>
                 )}
                 <button
@@ -4971,7 +5058,7 @@ function DeliveryCheckTab({ orders, recentlyConfirmed, customerMap, onConfirm, o
   );
 }
 
-function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal, exportBackup, importBackup, backupInputRef, fireToast, setTab, members, nickname, onSelectOrder, couriers, customerCount, vendorCount, overdueCount, pendingApprovalCount }) {
+function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal, exportBackup, importBackup, backupInputRef, fireToast, setTab, members, nickname, onSelectOrder, couriers, customerCount, vendorCount, overdueCount, pendingApprovalCount, isAdmin, accounts }) {
   const recentOrders = [...orders]
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
     .slice(0, 5);
@@ -4980,7 +5067,7 @@ function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal,
     <div style={{ position: "relative" }}>
       <div style={{ marginBottom: 16 }}>
         <div style={{ fontSize: 18, fontWeight: 700, color: "#1B2430" }}>{appName}</div>
-        <div style={{ fontSize: 12, color: "#5F5E5A", marginTop: 2 }}>{nickname ? `${nickname}님 환영합니다` : "신선한 농산물을 믿고 주문해 주세요!"}</div>
+        <div style={{ fontSize: 12, color: "#5F5E5A", marginTop: 2 }}>{nickname ? `${(accounts?.[nickname] && accounts[nickname].displayName) || nickname}님 환영합니다` : "신선한 농산물을 믿고 주문해 주세요!"}</div>
       </div>
 
       {pendingApprovalCount > 0 && (
@@ -5105,23 +5192,30 @@ function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal,
           <div style={{ fontSize: 12, color: "#888780" }}>아직 등록된 사용자가 없어요.</div>
         ) : (
           <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
-            {members.map((name, idx) => (
-              <div key={name} style={{ textAlign: "center", width: 64 }}>
-                <div style={{ position: "relative", width: 52, height: 52, borderRadius: "50%", background: "#EAF3DE", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 4px" }}>
-                  {idx === 0 && <span style={{ position: "absolute", top: -8, fontSize: 12 }}>👑</span>}
-                  <span style={{ fontSize: 16, fontWeight: 700, color: "#27500A" }}>{name[0]}</span>
+            {members.map((name) => {
+              const acc = accounts?.[name];
+              const shown = (acc && acc.displayName) || name;
+              const isAdminAcc = !acc || acc.role !== "staff";
+              return (
+                <div key={name} style={{ textAlign: "center", width: 64 }}>
+                  <div style={{ position: "relative", width: 52, height: 52, borderRadius: "50%", background: "#EAF3DE", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 4px" }}>
+                    {isAdminAcc && <span style={{ position: "absolute", top: -8, fontSize: 12 }}>👑</span>}
+                    <span style={{ fontSize: 16, fontWeight: 700, color: "#27500A" }}>{shown[0]}</span>
+                  </div>
+                  <div style={{ fontSize: 11, color: "#1B2430", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{shown}</div>
                 </div>
-                <div style={{ fontSize: 11, color: "#1B2430" }}>{name}</div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
-        <button
-          onClick={() => setTab("accounts")}
-          style={{ width: "100%", marginTop: 12, padding: "9px 0", borderRadius: 8, border: "1px solid #2F6F4E", background: "#fff", color: "#27500A", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
-        >
-          계정 관리 (비밀번호·아이디 변경, 추가/삭제)
-        </button>
+        {isAdmin && (
+          <button
+            onClick={() => setTab("accounts")}
+            style={{ width: "100%", marginTop: 12, padding: "9px 0", borderRadius: 8, border: "1px solid #2F6F4E", background: "#fff", color: "#27500A", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
+          >
+            계정 관리 (비밀번호·아이디 변경, 추가/삭제)
+          </button>
+        )}
       </div>
 
       <div style={{ background: "#fff", border: "1px solid #E2E4DD", borderRadius: 14, padding: 16 }}>
@@ -7354,7 +7448,7 @@ function sheetBtnStyle(bg, color) {
   };
 }
 
-function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onOpenBackupList, onCheckUpdate, checkingUpdate, onClose, onNavigate, askConfirm, handleLogout, fireToast }) {
+function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onOpenBackupList, onCheckUpdate, checkingUpdate, isAdmin, onClose, onNavigate, askConfirm, handleLogout, fireToast }) {
   const [editingName, setEditingName] = useState(false);
   const [draftName, setDraftName] = useState(appName);
   const [restoreDate, setRestoreDate] = useState(todayStr());
@@ -7371,7 +7465,7 @@ function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, 
     { label: "사용법 가이드", onClick: () => onNavigate("guide") },
     { label: "정기배송 관리", onClick: () => onNavigate("subscriptions") },
     { label: "쇼핑몰 연동 설정", onClick: () => onNavigate("integrations") },
-    { label: "공유계정 관리", onClick: () => onNavigate("accounts") },
+    ...(isAdmin ? [{ label: "공유계정 관리", onClick: () => onNavigate("accounts") }] : []),
   ];
 
   const menuRows2 = [
@@ -7420,55 +7514,60 @@ function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, 
           <input ref={backupInputRef} type="file" accept=".json" onChange={importBackup} style={{ display: "none" }} />
         </div>
 
-        <div style={{ padding: "12px 20px", borderBottom: "1px solid #F1F2EC" }}>
-          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>날짜·시간별 자동 백업에서 복원</div>
-          <div style={{ fontSize: 11, color: "#888780", marginBottom: 8 }}>
-            1시간마다 자동으로 저장되는 백업이에요. 데이터에 문제가 생겼을 때, 정상이었던 날짜와 시간으로 되돌릴 수 있어요.
-            (하루 전체가 아니라 원하시는 시간대만 골라서 복원돼요)
-          </div>
-          <div style={{ display: "flex", gap: 6 }}>
-            <input
-              type="date"
-              value={restoreDate}
-              onChange={(e) => setRestoreDate(e.target.value)}
-              style={{ flex: 1.3, border: "1px solid #D3D1C7", borderRadius: 8, padding: "8px 10px", fontSize: 13 }}
-            />
-            <select
-              value={restoreHour}
-              onChange={(e) => setRestoreHour(e.target.value)}
-              style={{ flex: 1, border: "1px solid #D3D1C7", borderRadius: 8, padding: "8px 6px", fontSize: 13, background: "#fff" }}
-            >
-              {Array.from({ length: 24 }, (_, h) => String(h).padStart(2, "0")).map((h) => (
-                <option key={h} value={h}>{h}시</option>
-              ))}
-            </select>
+        {isAdmin && (
+          <div style={{ padding: "12px 20px", borderBottom: "1px solid #F1F2EC" }}>
+            <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>날짜·시간별 자동 백업에서 복원</div>
+            <div style={{ fontSize: 11, color: "#888780", marginBottom: 8 }}>
+              1시간마다 자동으로 저장되는 백업이에요. 데이터에 문제가 생겼을 때, 정상이었던 날짜와 시간으로 되돌릴 수 있어요.
+              (하루 전체가 아니라 원하시는 시간대만 골라서 복원돼요)
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <input
+                type="date"
+                value={restoreDate}
+                onChange={(e) => setRestoreDate(e.target.value)}
+                style={{ flex: 1.3, border: "1px solid #D3D1C7", borderRadius: 8, padding: "8px 10px", fontSize: 13 }}
+              />
+              <select
+                value={restoreHour}
+                onChange={(e) => setRestoreHour(e.target.value)}
+                style={{ flex: 1, border: "1px solid #D3D1C7", borderRadius: 8, padding: "8px 6px", fontSize: 13, background: "#fff" }}
+              >
+                {Array.from({ length: 24 }, (_, h) => String(h).padStart(2, "0")).map((h) => (
+                  <option key={h} value={h}>{h}시</option>
+                ))}
+              </select>
+              <button
+                onClick={() => askConfirm(
+                  `${restoreDate} ${restoreHour}시 백업으로 되돌릴까요?\n지금 화면에 보이는 데이터는 이 백업 내용으로 바뀌어요.`,
+                  () => { restoreFromCloudBackup(`${restoreDate}_${restoreHour}`); onClose(); },
+                  "복원"
+                )}
+                style={{ border: "none", background: "#185FA5", color: "#fff", borderRadius: 8, padding: "0 14px", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}
+              >
+                복원
+              </button>
+            </div>
             <button
-              onClick={() => askConfirm(
-                `${restoreDate} ${restoreHour}시 백업으로 되돌릴까요?\n지금 화면에 보이는 데이터는 이 백업 내용으로 바뀌어요.`,
-                () => { restoreFromCloudBackup(`${restoreDate}_${restoreHour}`); onClose(); },
-                "복원"
-              )}
-              style={{ border: "none", background: "#185FA5", color: "#fff", borderRadius: 8, padding: "0 14px", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}
+              onClick={() => { onOpenDiagnostics(); onClose(); }}
+              style={{ width: "100%", marginTop: 10, padding: "9px 0", borderRadius: 8, border: "1px solid #993C1D", background: "#fff", color: "#993C1D", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
             >
-              복원
+              🔍 진단 기록 보기 (데이터 이상 원인 확인용)
+            </button>
+            <button
+              onClick={() => { onOpenBackupList(); onClose(); }}
+              style={{ width: "100%", marginTop: 8, padding: "9px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
+            >
+              📋 전체 백업 목록 보기 (날짜별 데이터 개수 확인)
             </button>
           </div>
-          <button
-            onClick={() => { onOpenDiagnostics(); onClose(); }}
-            style={{ width: "100%", marginTop: 10, padding: "9px 0", borderRadius: 8, border: "1px solid #993C1D", background: "#fff", color: "#993C1D", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
-          >
-            🔍 진단 기록 보기 (데이터 이상 원인 확인용)
-          </button>
-          <button
-            onClick={() => { onOpenBackupList(); onClose(); }}
-            style={{ width: "100%", marginTop: 8, padding: "9px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
-          >
-            📋 전체 백업 목록 보기 (날짜별 데이터 개수 확인)
-          </button>
+        )}
+
+        <div style={{ padding: "12px 20px", borderBottom: "1px solid #F1F2EC" }}>
           <button
             onClick={onCheckUpdate}
             disabled={checkingUpdate}
-            style={{ width: "100%", marginTop: 8, padding: "9px 0", borderRadius: 8, border: "1px solid #2F6F4E", background: "#fff", color: "#2F6F4E", fontWeight: 700, fontSize: 12, cursor: checkingUpdate ? "default" : "pointer", opacity: checkingUpdate ? 0.6 : 1 }}
+            style={{ width: "100%", padding: "9px 0", borderRadius: 8, border: "1px solid #2F6F4E", background: "#fff", color: "#2F6F4E", fontWeight: 700, fontSize: 12, cursor: checkingUpdate ? "default" : "pointer", opacity: checkingUpdate ? 0.6 : 1 }}
           >
             {checkingUpdate ? "확인하는 중..." : `🔄 업데이트 확인하기 (현재 v${APP_VERSION})`}
           </button>
