@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 25;
+const APP_VERSION = 26;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -7113,11 +7113,17 @@ function OrdersTab({
         <div style={{ flex: 1, textAlign: "center", padding: "7px 0", borderRadius: 8, background: "#EAF3DE", color: "#27500A", fontWeight: 700 }}>일반 {orders.filter((o) => !o.isBusiness).length}</div>
         <div style={{ flex: 1, textAlign: "center", padding: "7px 0", borderRadius: 8, background: "#FAEEDA", color: "#854F0B", fontWeight: 700 }}>🏢 업체 {orders.filter((o) => o.isBusiness).length}</div>
       </div>
-      {!isOrderSearching && (() => {
+      {(() => {
+        // 이 화면(OrdersTab) 안에서 직접 계산 (App 쪽 변수를 잘못 가져다 쓰던 버그 수정)
+        const isSearchingNow = searchQuery.trim() !== "";
+        if (isSearchingNow) return null;
+        const d = new Date();
+        d.setDate(d.getDate() - 3);
+        const cutoff = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
         const hiddenShippedCount = orders.filter((o) => {
           if (o.status !== "shipped") return false;
           const shippedDateStr = (o.shippedAt || o.createdAt || "").slice(0, 10);
-          return shippedDateStr && shippedDateStr < threeDaysAgoStr;
+          return shippedDateStr && shippedDateStr < cutoff;
         }).length;
         return hiddenShippedCount > 0 ? (
           <div style={{ fontSize: 10.5, color: "#888780", marginBottom: 8 }}>
