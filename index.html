@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 22;
+const APP_VERSION = 23;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -177,32 +177,69 @@ function syncCustomerAddressNotes(ordersToScan, existingCustomers) {
   return patches; // { [customerId]: 새 memo 문자열 }
 }
 
+// 이름/전화번호/주소로 "같은 사람(또는 업체)"인지 정교하게 판단하는 공용 함수.
+// 고객과 업체 등록 둘 다 이 함수를 써서 똑같이 신중하게 중복을 판단함.
+// - 전화번호가 같으면 원칙적으로 동일 대상. 다만 이름까지 서로 다르면 별도로 취급
+//   (한 전화번호를 여러 사람/여러 업체가 쓰는 경우가 있어, 이름이 다르면 잘못 합쳐지는
+//   사고를 막기 위함 - 예: 같은 담당자 번호로 여러 업체가 주문하는 경우)
+// - 전화번호가 없으면 이름으로 판단하되, 주소까지 다르면 별도로 취급 (동명이인/동명업체 방지)
+function findMatchingParty(name, phone, address, list) {
+  const normPhone = (p) => (p || "").replace(/[^0-9]/g, "");
+  const ph = normPhone(phone);
+  const nm = (name || "").trim();
+  const addr = (address || "").trim();
+  return list.find((item) => {
+    const itemPh = normPhone(item.phone);
+    const itemNm = (item.name || "").trim();
+    const itemAddr = (item.address || "").trim();
+    if (ph && itemPh === ph) {
+      if (nm && itemNm && nm !== itemNm) return false;
+      return true;
+    }
+    if (!ph && nm && itemNm === nm) {
+      if (addr && itemAddr && itemAddr !== addr) return false;
+      return true;
+    }
+    return false;
+  });
+}
+
+// 같은 전화번호인데 이름이 다르거나, 같은 이름인데 주소가 달라서 "다른 사람(업체)"로
+// 판단된 애매한 경우를 감지함. 이런 경우는 실수로 잘못 등록됐을 수도 있어서, 자동으로
+// 조용히 새로 등록해버리지 않고 사장님이 한 번 더 확인해볼 수 있도록 알려주는 데 씀.
+function findAmbiguousConflict(name, phone, address, list) {
+  const normPhone = (p) => (p || "").replace(/[^0-9]/g, "");
+  const ph = normPhone(phone);
+  const nm = (name || "").trim();
+  const addr = (address || "").trim();
+  return list.find((item) => {
+    const itemPh = normPhone(item.phone);
+    const itemNm = (item.name || "").trim();
+    const itemAddr = (item.address || "").trim();
+    if (ph && itemPh === ph && nm && itemNm && nm !== itemNm) return true;
+    if (!ph && nm && itemNm === nm && addr && itemAddr && itemAddr !== addr) return true;
+    return false;
+  });
+}
+
+// 새로 등록하려는 항목들 중에서, 기존 목록과 "애매하게 비슷한"(전화번호는 같은데 이름이
+// 다르거나, 이름은 같은데 주소가 다른) 경우를 찾아서 목록으로 돌려줌 - 확인 알림용
+function scanAmbiguousNewEntries(newEntries, originalList) {
+  const results = [];
+  (newEntries || []).forEach((entry) => {
+    const conflict = findAmbiguousConflict(entry.name, entry.phone, entry.address, originalList);
+    if (conflict) results.push({ newEntry: entry, conflictWith: conflict });
+  });
+  return results;
+}
+
 function findMissingCustomersFromOrders(ordersToScan, existingCustomers) {
   const normPhone = (p) => (p || "").replace(/[^0-9]/g, "");
   const existing = existingCustomers;
-  // 같은 사람인지 판단:
-  // - 전화번호가 같으면 원칙적으로 같은 사람. 다만 이름까지 서로 다르면(한 사람이 여러 곳에
-  //   선물을 보내며 자기 전화번호를 계속 쓰는 경우) 받는분마다 별도 사람으로 등록
-  // - 전화번호가 없으면 이름으로 판단하되, 주소까지 다르면(동명이인 등) 별도 사람으로 등록
+  // 같은 사람인지 판단하는 기준은 findMatchingParty(공용 함수)에 위임함 - 업체 매칭과
+  // 완전히 동일한 기준(전화번호 같아도 이름 다르면 별도, 이름 같아도 주소 다르면 별도)을 씀
   const findExisting = (name, phone, address, extraList) => {
-    const ph = normPhone(phone);
-    const nm = (name || "").trim();
-    const addr = (address || "").trim();
-    const sameEntry = (cu) => {
-      const cuPh = normPhone(cu.phone);
-      const cuNm = (cu.name || "").trim();
-      const cuAddr = (cu.address || "").trim();
-      if (ph && cuPh === ph) {
-        if (nm && cuNm && nm !== cuNm) return false; // 전화번호는 같아도 이름이 다르면 다른 사람
-        return true;
-      }
-      if (!ph && nm && cuNm === nm) {
-        if (addr && cuAddr && cuAddr !== addr) return false; // 이름은 같아도 주소가 다르면 다른 사람
-        return true;
-      }
-      return false;
-    };
-    return existing.find(sameEntry) || extraList.find(sameEntry);
+    return findMatchingParty(name, phone, address, existing) || findMatchingParty(name, phone, address, extraList);
   };
   const toAdd = [];
   ordersToScan.forEach((o) => {
@@ -1561,6 +1598,20 @@ function App() {
   const [invoicePreview, setInvoicePreview] = useState(null);
   const [smsBatch, setSmsBatch] = useState(null); // { rows: [{name, phone, message, checked}] }
   const [bulkOrderModal, setBulkOrderModal] = useState(null); // { step: 'choose'|'preview', mode, rows }
+  // 신규 등록된 고객/업체 중 기존 정보와 애매하게 겹치는 경우를 담아두는 확인 알림 목록
+  const [ambiguousReview, setAmbiguousReview] = useState(null); // null | [{ type, newEntry, conflictWith }]
+  // 확인 알림에서 "삭제하기"를 누르면, 방금 새로 등록된 그 항목을 목록에서 제거함
+  function deleteAmbiguousEntry(item) {
+    if (item.type === "vendor") {
+      setVendors((prev) => prev.filter((v) => v.id !== item.newEntry.id));
+    } else {
+      setCustomers((prev) => prev.filter((c) => c.id !== item.newEntry.id));
+    }
+    setAmbiguousReview((prev) => (prev ? prev.filter((x) => x !== item) : prev));
+    fireToast(`"${item.newEntry.name}" 등록을 취소했어요`);
+  }
+
+
 
   const invoiceInputRef = useRef(null);
   const customerInputRef = useRef(null);
@@ -1874,13 +1925,13 @@ function App() {
         if (!checkedIds.has(o.id)) return;
         const ph = normPhone(o.recipient?.phone);
         const nm = (o.recipient?.name || "").trim();
-        const existing = vendors.find((x) => (ph && normPhone(x.phone) === ph) || (nm && x.name === nm));
+        const existing = findMatchingParty(nm, o.recipient?.phone, o.recipient?.address, vendors);
         if (existing) {
           vendorIdByOrderId[o.id] = existing.id;
           return;
         }
         // 이미 이번에 새로 만들기로 한 업체와 같은 사람이면 그걸 재사용 (중복 방지)
-        const dup = newVendors.find((v) => (ph && normPhone(v.phone) === ph) || (nm && v.name === nm));
+        const dup = findMatchingParty(nm, o.recipient?.phone, o.recipient?.address, newVendors);
         if (dup) {
           vendorIdByOrderId[o.id] = dup.id;
           return;
@@ -3151,9 +3202,9 @@ function App() {
         if (!r.isBusiness) return;
         const ph = normPhone(r.recipPhone);
         const nm = (r.recipName || "").trim();
-        const existing = vendors.find((v) => (ph && normPhone(v.phone) === ph) || (nm && v.name === nm));
+        const existing = findMatchingParty(nm, r.recipPhone, r.address, vendors);
         if (existing) { vendorIdByRow[r.tempId] = existing.id; return; }
-        const dup = newVendors.find((v) => (ph && normPhone(v.phone) === ph) || (nm && v.name === nm));
+        const dup = findMatchingParty(nm, r.recipPhone, r.address, newVendors);
         if (dup) { vendorIdByRow[r.tempId] = dup.id; return; }
         if (!nm && !ph) return;
         const created = {
@@ -3164,6 +3215,8 @@ function App() {
         vendorIdByRow[r.tempId] = created.id;
       });
       if (newVendors.length > 0) setVendors((prev) => [...prev, ...newVendors]);
+      // 새로 등록되는 업체 중, 기존 업체와 애매하게 겹치는 경우가 있으면 확인 목록에 담아둠
+      const ambiguousVendors = scanAmbiguousNewEntries(newVendors, vendors).map((x) => ({ ...x, type: "vendor" }));
 
       const newOrders = toAdd.map((r) => {
         const matched = customers.find((c) => r.recipPhone && (c.phone || "").replace(/-/g, "") === r.recipPhone.replace(/-/g, ""));
@@ -3191,8 +3244,13 @@ function App() {
         });
       });
       setOrders((prev) => [...newOrders, ...prev]);
+      // 새로 등록되는 고객 중, 기존 고객과 애매하게 겹치는 경우도 미리 확인
+      const missingCustomers = findMissingCustomersFromOrders(newOrders, customers);
+      const ambiguousCustomers = scanAmbiguousNewEntries(missingCustomers, customers).map((x) => ({ ...x, type: "customer" }));
       registerNewCustomersFromOrders(newOrders); // 업체 주문은 이 함수 내부에서 자동 제외됨
       fireToast(`엑셀에서 주문 ${newOrders.length}건을 등록했습니다${newVendors.length ? ` (신규 업체 ${newVendors.length}곳 자동 등록)` : ""}`);
+      const allAmbiguous = [...ambiguousVendors, ...ambiguousCustomers];
+      if (allAmbiguous.length > 0) setAmbiguousReview(allAmbiguous);
       setBulkOrderModal(null);
       setTab("orders");
     } catch (err) {
@@ -4207,6 +4265,49 @@ function App() {
                     </div>
                   );
                 })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {ambiguousReview !== null && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "flex-end", zIndex: 100001 }}>
+            <div style={{ background: "#fff", borderRadius: "16px 16px 0 0", padding: "18px 16px", maxHeight: "80vh", width: "100%", display: "flex", flexDirection: "column" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                <h2 style={{ fontSize: 15, fontWeight: 700, margin: 0 }}>⚠ 확인이 필요해요</h2>
+                <button onClick={() => setAmbiguousReview(null)} style={{ border: "none", background: "none", fontSize: 20, cursor: "pointer", color: "#888780" }}>×</button>
+              </div>
+              <p style={{ fontSize: 11.5, color: "#888780", margin: "0 0 10px", lineHeight: 1.6 }}>
+                새로 등록된 항목이 기존 정보와 비슷한데 다르게 등록됐어요. 같은 사람(업체)이 맞으면 "삭제하기"로 방금 등록된 걸 지우고, 다른 사람(업체)이 맞으면 "그대로 두기"를 눌러주세요.
+              </p>
+              <div style={{ overflowY: "auto", flex: 1 }}>
+                {ambiguousReview.map((item, i) => (
+                  <div key={i} style={{ border: "1px solid #F0C6A8", background: "#FFF7ED", borderRadius: 10, padding: "10px 12px", marginBottom: 8 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "#993C1D", marginBottom: 6 }}>
+                      {item.type === "vendor" ? "🏢 신규 업체" : "👤 신규 고객"}
+                    </div>
+                    <div style={{ fontSize: 12.5, marginBottom: 4 }}>
+                      <b>새로 등록됨:</b> {item.newEntry.name} · {item.newEntry.phone || "번호없음"} {item.newEntry.address ? `· ${item.newEntry.address}` : ""}
+                    </div>
+                    <div style={{ fontSize: 12.5, color: "#5F5E5A", marginBottom: 8 }}>
+                      <b>기존에 있던 것:</b> {item.conflictWith.name} · {item.conflictWith.phone || "번호없음"} {item.conflictWith.address ? `· ${item.conflictWith.address}` : ""}
+                    </div>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button
+                        onClick={() => deleteAmbiguousEntry(item)}
+                        style={{ flex: 1, padding: "8px 0", borderRadius: 8, border: "none", background: "#A32D2D", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
+                      >
+                        삭제하기 (같은 사람/업체임)
+                      </button>
+                      <button
+                        onClick={() => setAmbiguousReview((prev) => prev.filter((x) => x !== item))}
+                        style={{ flex: 1, padding: "8px 0", borderRadius: 8, border: "1px solid #D3D1C7", background: "#fff", color: "#5F5E5A", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
+                      >
+                        그대로 두기 (다른 사람/업체임)
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           </div>
