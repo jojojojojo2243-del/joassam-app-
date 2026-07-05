@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 23;
+const APP_VERSION = 24;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -2216,16 +2216,38 @@ function App() {
     if (!file) return;
     setBusyMessage("업체 엑셀 파일을 읽고 있어요...");
     readWorkbookFile(file, (rows) => {
-      const added = rows
+      const parsed = rows
         .map((r) => {
           const name = String(r["업체명"] || r["상호"] || r["이름"] || "").trim();
           if (!name) return null;
           return { id: uid("v"), name, bizNo: String(r["사업자번호"] || "").trim(), ceo: String(r["대표자"] || r["성명"] || "").trim(), phone: String(r["전화번호"] || r["전화"] || "").trim(), address: String(r["주소"] || "").trim(), memo: String(r["메모"] || "").trim() };
         })
         .filter(Boolean);
-      if (added.length === 0) { fireToast("추가할 업체 정보를 찾지 못했습니다"); setBusyMessage(null); return; }
+      if (parsed.length === 0) { fireToast("추가할 업체 정보를 찾지 못했습니다"); setBusyMessage(null); return; }
+
+      // 중복 방지: 기존 업체 + 이번에 올린 파일 안에서도 서로 겹치는지 정교하게 확인
+      // (전화번호가 같아도 이름이 다르면 별도 업체, 이름이 같아도 주소가 다르면 별도 업체로 취급)
+      const added = [];
+      let dupCount = 0;
+      parsed.forEach((v) => {
+        if (findMatchingParty(v.name, v.phone, v.address, vendors) || findMatchingParty(v.name, v.phone, v.address, added)) {
+          dupCount += 1;
+          return;
+        }
+        added.push(v);
+      });
+
+      // 애매하게 겹치는 경우(번호는 같은데 이름 다름 / 이름은 같은데 주소 다름)는 확인 알림에 담아둠
+      const ambiguous = scanAmbiguousNewEntries(added, vendors).map((x) => ({ ...x, type: "vendor" }));
+
+      if (added.length === 0) {
+        fireToast(dupCount > 0 ? "이미 등록된 업체들이에요 (전부 중복)" : "추가할 업체 정보를 찾지 못했습니다");
+        setBusyMessage(null);
+        return;
+      }
       setVendors((prev) => [...prev, ...added]);
-      fireToast(`업체 ${added.length}곳을 추가했습니다`);
+      fireToast(`업체 ${added.length}곳을 추가했습니다${dupCount > 0 ? ` (중복 ${dupCount}건 제외)` : ""}`);
+      if (ambiguous.length > 0) setAmbiguousReview(ambiguous);
       setBusyMessage(null);
     }, () => {
       setBusyMessage(null);
@@ -3594,27 +3616,33 @@ function App() {
   }
 
   function finalizeCustomerImport(added) {
-    // 같은 이름+연락처가 이미 있으면 중복 추가하지 않고 합치기
+    // 같은 사람인지 정교하게 판단 (전화번호 표기가 달라도-하이픈 유무 등- 같은 사람으로 인식,
+    // 전화번호 같아도 이름 다르면 별도, 이름 같아도 주소 다르면 별도로 취급)
     const dedup = [];
-    const seen = new Set();
     added.forEach((c) => {
-      const key = `${c.name}_${c.phone}`;
-      if (seen.has(key)) return;
-      seen.add(key);
+      if (findMatchingParty(c.name, c.phone, c.address, dedup)) return;
       dedup.push(c);
     });
 
     if (dedup.length > 0) {
-      setCustomers((prev) => {
-        const existingKeys = new Set(prev.map((c) => `${c.name}_${c.phone}`));
-        const newOnes = dedup.filter((c) => !existingKeys.has(`${c.name}_${c.phone}`));
-        if (newOnes.length === 0) {
-          fireToast("이미 등록된 고객들입니다");
-          return prev;
+      const newOnes = [];
+      let dupCount = 0;
+      dedup.forEach((c) => {
+        if (findMatchingParty(c.name, c.phone, c.address, customers)) {
+          dupCount += 1;
+          return;
         }
-        fireToast(`고객 ${newOnes.length}명을 추가했습니다 (중복 ${dedup.length - newOnes.length}건 제외)`);
-        return [...prev, ...newOnes];
+        newOnes.push(c);
       });
+      if (newOnes.length === 0) {
+        fireToast("이미 등록된 고객들입니다");
+        return;
+      }
+      // 애매하게 겹치는 경우(번호는 같은데 이름 다름 / 이름은 같은데 주소 다름)는 확인 알림에 담아둠
+      const ambiguous = scanAmbiguousNewEntries(newOnes, customers).map((x) => ({ ...x, type: "customer" }));
+      setCustomers((prev) => [...prev, ...newOnes]);
+      fireToast(`고객 ${newOnes.length}명을 추가했습니다${dupCount > 0 ? ` (중복 ${dupCount}건 제외)` : ""}`);
+      if (ambiguous.length > 0) setAmbiguousReview(ambiguous);
     } else {
       fireToast("추가할 고객 정보를 찾지 못했습니다");
     }
