@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 27;
+const APP_VERSION = 31;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -183,6 +183,51 @@ function syncCustomerAddressNotes(ordersToScan, existingCustomers) {
 //   (한 전화번호를 여러 사람/여러 업체가 쓰는 경우가 있어, 이름이 다르면 잘못 합쳐지는
 //   사고를 막기 위함 - 예: 같은 담당자 번호로 여러 업체가 주문하는 경우)
 // - 전화번호가 없으면 이름으로 판단하되, 주소까지 다르면 별도로 취급 (동명이인/동명업체 방지)
+// 최근 1년(365일) 동안 이 고객의 주문이 몇 건인지 계산 (업체 주문은 제외, 순수 개인 고객 주문만)
+function countRecentOrdersForCustomer(customerId, orders) {
+  const oneYearAgo = new Date();
+  oneYearAgo.setDate(oneYearAgo.getDate() - 365);
+  return orders.filter((o) => {
+    if (o.customerId !== customerId) return false;
+    if (o.isBusiness) return false;
+    const d = new Date(o.createdAt || o.orderDate || 0);
+    return !isNaN(d.getTime()) && d >= oneYearAgo;
+  }).length;
+}
+
+// 최근 N일 동안 이 고객의 주문이 몇 건인지 계산 (업체 주문 제외) - "한 달에 4회(주 1회 페이스)"
+// 처럼 최근 짧은 기간 안의 주문 빈도를 확인할 때 씀
+function countOrdersInLastNDays(customerId, orders, days) {
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - days);
+  return orders.filter((o) => {
+    if (o.customerId !== customerId) return false;
+    if (o.isBusiness) return false;
+    const d = new Date(o.createdAt || o.orderDate || 0);
+    return !isNaN(d.getTime()) && d >= cutoff;
+  }).length;
+}
+
+// 단골 고객인지 판단: 사장님이 직접 "단골로 지정"/"단골 해제"를 눌렀으면 그걸 우선 따르고,
+// 따로 지정한 적이 없으면 아래 둘 중 하나라도 만족하면 자동으로 단골로 판단함
+// ① 최근 1년간 주문 횟수가 기준(기본 10회) 이상 ② 최근 한 달(30일) 안에 4회 이상(주 1회 페이스) 주문
+function isRegularCustomer(customer, orders, threshold) {
+  if (customer.regularOverride === true) return true;
+  if (customer.regularOverride === false) return false;
+  if (countRecentOrdersForCustomer(customer.id, orders) >= (threshold || 10)) return true;
+  if (countOrdersInLastNDays(customer.id, orders, 30) >= 4) return true;
+  return false;
+}
+
+// "최근 한 달 안에 4회 이상(주 1회 페이스)" 조건으로만 새로 단골 후보가 된 고객 목록
+// (연간 10회 기준과는 별개로, 이번 달 들어 갑자기 자주 주문하기 시작한 사람을 따로 찾아서 알려주기 위함)
+function findNewMonthlyRegularCandidates(customers, orders) {
+  return customers.filter((c) => {
+    if (c.regularOverride === false) return false; // 수동으로 단골 아니라고 해둔 사람은 제외
+    return countOrdersInLastNDays(c.id, orders, 30) >= 4;
+  });
+}
+
 function findMatchingParty(name, phone, address, list) {
   const normPhone = (p) => String(p || "").replace(/[^0-9]/g, "");
   const ph = normPhone(phone);
@@ -3486,14 +3531,15 @@ function App() {
     }
   }
 
-  function exportCustomersExcel() {
-    if (customers.length === 0) {
+  function exportCustomersExcel(customerList, labelForToast) {
+    const list = customerList || customers;
+    if (list.length === 0) {
       fireToast("다운로드할 고객이 없습니다");
       return;
     }
     // 주문목록과 동일한 서식(orderTemplate)으로 내보낸다.
     // 각 고객의 가장 최근 주문을 기준으로, 주문이 없으면 고객 정보로 채운다.
-    const rows = customers.map((c) => {
+    const rows = list.map((c) => {
       const custOrders = orders
         .filter((o) => o.customerId === c.id)
         .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
@@ -3513,10 +3559,15 @@ function App() {
         courier: "",
         paymentAmount: "",
       };
-      return Object.fromEntries(orderTemplate.map((label) => [label, resolveOrderField(label, pseudo)]));
+      const row = Object.fromEntries(orderTemplate.map((label) => [label, resolveOrderField(label, pseudo)]));
+      // 누구한테 보낼지 직접 고르실 수 있도록, 주문 횟수와 단골 여부를 추가로 표시함
+      row["최근1년 주문횟수"] = countRecentOrdersForCustomer(c.id, orders);
+      row["최근한달 주문횟수"] = countOrdersInLastNDays(c.id, orders, 30);
+      row["단골여부"] = isRegularCustomer(c, orders) ? "단골" : "";
+      return row;
     });
-    downloadWorkbook(rows, "Customers", nextFilename("고객목록"), orderTemplate);
-    fireToast("고객목록을 주문목록 서식으로 다운로드했습니다");
+    downloadWorkbook(rows, "Customers", nextFilename(labelForToast ? "단골고객목록" : "고객목록"), [...orderTemplate, "최근1년 주문횟수", "최근한달 주문횟수", "단골여부"]);
+    fireToast(labelForToast || "고객목록을 주문목록 서식으로 다운로드했습니다 (주문 횟수·단골여부 포함)");
   }
 
   function exportProductsExcel() {
@@ -3879,7 +3930,7 @@ function App() {
 
         <div style={{ padding: "16px 16px 16px", maxWidth: "none", flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
           {tab === "home" && (
-            <HomeTab appName={appName} orders={orders} counts={counts} customerMap={customerMap} productMap={productMap} orderTotal={orderTotal} exportBackup={exportBackup} importBackup={importBackup} backupInputRef={backupInputRef} fireToast={fireToast} setTab={setTab} members={members} nickname={nickname} onSelectOrder={(id) => { setTab("orders"); setSelectedOrderId(id); }} couriers={couriers} customerCount={customers.length} vendorCount={vendors.length} overdueCount={overdueDeliveries.length} pendingApprovalCount={isCurrentUserAdmin ? Object.values(accounts).filter((a) => a && a.pending).length : 0} isAdmin={isCurrentUserAdmin} accounts={accounts} />
+            <HomeTab appName={appName} orders={orders} counts={counts} customerMap={customerMap} productMap={productMap} orderTotal={orderTotal} exportBackup={exportBackup} importBackup={importBackup} backupInputRef={backupInputRef} fireToast={fireToast} setTab={setTab} members={members} nickname={nickname} onSelectOrder={(id) => { setTab("orders"); setSelectedOrderId(id); }} couriers={couriers} customerCount={customers.length} vendorCount={vendors.length} overdueCount={overdueDeliveries.length} pendingApprovalCount={isCurrentUserAdmin ? Object.values(accounts).filter((a) => a && a.pending).length : 0} isAdmin={isCurrentUserAdmin} accounts={accounts} newRegularCount={findNewMonthlyRegularCandidates(customers, orders).length} />
           )}
 
           {tab === "orders" && !selectedOrder && !invoicePreview && (
@@ -5216,7 +5267,7 @@ function DeliveryCheckTab({ orders, recentlyConfirmed, customerMap, onConfirm, o
   );
 }
 
-function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal, exportBackup, importBackup, backupInputRef, fireToast, setTab, members, nickname, onSelectOrder, couriers, customerCount, vendorCount, overdueCount, pendingApprovalCount, isAdmin, accounts }) {
+function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal, exportBackup, importBackup, backupInputRef, fireToast, setTab, members, nickname, onSelectOrder, couriers, customerCount, vendorCount, overdueCount, pendingApprovalCount, isAdmin, accounts, newRegularCount }) {
   const recentOrders = [...orders]
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
     .slice(0, 5);
@@ -5247,6 +5298,28 @@ function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal,
             </span>
           </span>
           <span style={{ color: "#993C1D", fontSize: 16 }}>›</span>
+        </button>
+      )}
+
+      {newRegularCount > 0 && (
+        <button
+          onClick={() => setTab("customers")}
+          style={{
+            width: "100%", display: "flex", alignItems: "center", gap: 10, textAlign: "left",
+            background: "#FAEEDA", border: "1px solid #E9CE9E", borderRadius: 10, padding: "12px 14px",
+            marginBottom: 16, cursor: "pointer",
+          }}
+        >
+          <span style={{ fontSize: 20 }}>🌟</span>
+          <span style={{ flex: 1 }}>
+            <span style={{ display: "block", fontSize: 13, fontWeight: 700, color: "#854F0B" }}>
+              이번 달 자주 주문한 단골 후보가 {newRegularCount}명 있어요
+            </span>
+            <span style={{ display: "block", fontSize: 11, color: "#888780", marginTop: 2 }}>
+              최근 한 달 안에 4회 이상(주 1회 페이스) 주문했어요. 눌러서 이벤트 대상으로 확인해보세요
+            </span>
+          </span>
+          <span style={{ color: "#854F0B", fontSize: 16 }}>›</span>
         </button>
       )}
 
@@ -9082,23 +9155,29 @@ function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, rem
     });
   }
 
+  const [regularOnly, setRegularOnly] = useState(false);
   const filteredCustomers = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return customers;
-    return customers.filter((c) =>
-      (c.name || "").toLowerCase().includes(q) ||
-      (c.phone || "").replace(/-/g, "").includes(q.replace(/-/g, "")) ||
-      (c.address || "").toLowerCase().includes(q) ||
-      (c.memo || "").toLowerCase().includes(q)
-    );
-  }, [customers, searchQuery]);
+    let list = customers;
+    if (q) {
+      list = list.filter((c) =>
+        (c.name || "").toLowerCase().includes(q) ||
+        (c.phone || "").replace(/-/g, "").includes(q.replace(/-/g, "")) ||
+        (c.address || "").toLowerCase().includes(q) ||
+        (c.memo || "").toLowerCase().includes(q)
+      );
+    }
+    if (regularOnly) list = list.filter((c) => isRegularCustomer(c, orders));
+    return list;
+  }, [customers, searchQuery, regularOnly, orders]);
+  const regularCount = useMemo(() => customers.filter((c) => isRegularCustomer(c, orders)).length, [customers, orders]);
 
   return (
     <div>
       <h1 style={{ fontSize: 19, fontWeight: 700, margin: "2px 0 14px", letterSpacing: "-0.02em" }}>고객</h1>
 
       <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
-        <button onClick={exportCustomersExcel} style={toolBtnStyle("#2F6F4E")}>전체 다운로드</button>
+        <button onClick={() => exportCustomersExcel()} style={toolBtnStyle("#2F6F4E")}>전체 다운로드</button>
         <button onClick={() => customerInputRef.current?.click()} style={toolBtnStyle("#185FA5")}>업로드</button>
         <input ref={customerInputRef} type="file" accept=".xlsx,.xls,.csv" multiple onChange={handleCustomerUpload} style={{ display: "none" }} />
       </div>
@@ -9119,6 +9198,28 @@ function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, rem
         <input placeholder="메모" value={newCustomer.memo} onChange={(e) => setNewCustomer({ ...newCustomer, memo: e.target.value })} style={inputStyle()} />
         <button onClick={addCustomer} style={addBtnStyle}>고객 추가</button>
       </div>
+
+      <button
+        onClick={() => setRegularOnly((v) => !v)}
+        style={{
+          width: "100%", marginBottom: 8, padding: "10px 0", borderRadius: 10, cursor: "pointer",
+          border: regularOnly ? "1px solid #854F0B" : "1px solid #E2E4DD",
+          background: regularOnly ? "#FAEEDA" : "#fff", color: regularOnly ? "#854F0B" : "#5F5E5A",
+          fontWeight: 700, fontSize: 12.5,
+        }}
+      >
+        ⭐ 단골 고객만 보기 ({regularCount}명) {regularOnly ? "· 켜짐" : ""}
+      </button>
+
+      <button
+        onClick={() => {
+          const regulars = customers.filter((c) => isRegularCustomer(c, orders));
+          exportCustomersExcel(regulars, `단골 고객 ${regulars.length}명을 다운로드했습니다`);
+        }}
+        style={{ width: "100%", marginBottom: 12, padding: "10px 0", borderRadius: 10, border: "1px solid #854F0B", background: "#fff", color: "#854F0B", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}
+      >
+        ⭐ 단골 고객만 다운로드 ({regularCount}명)
+      </button>
 
       <div style={{ display: "flex", alignItems: "center", gap: 8, background: "#fff", border: "1px solid #E2E4DD", borderRadius: 10, padding: "8px 12px", marginBottom: 12 }}>
         <span style={{ color: "#888780" }}>🔍</span>
@@ -9172,8 +9273,14 @@ function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, rem
           {filteredCustomers.map((c) => {
             const orderCount = orders.filter((o) => o.customerId === c.id).length;
             const sub = subscriptions.find((s) => s.customerId === c.id && s.active);
+            const isRegular = isRegularCustomer(c, orders);
             return (
-              <CustomerRow key={c.id} customer={c} orderCount={orderCount} subscription={sub} updateCustomer={updateCustomer} removeCustomer={removeCustomer} askConfirm={askConfirm} checked={checkedIds.has(c.id)} onToggleChecked={() => toggleChecked(c.id)} />
+              <CustomerRow
+                key={c.id} customer={c} orderCount={orderCount} subscription={sub} updateCustomer={updateCustomer}
+                removeCustomer={removeCustomer} askConfirm={askConfirm} checked={checkedIds.has(c.id)}
+                onToggleChecked={() => toggleChecked(c.id)} isRegular={isRegular}
+                recentOrderCount={countRecentOrdersForCustomer(c.id, orders)}
+              />
             );
           })}
         </div>
@@ -9182,7 +9289,7 @@ function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, rem
   );
 }
 
-function CustomerRow({ customer, orderCount, subscription, updateCustomer, removeCustomer, askConfirm, checked, onToggleChecked }) {
+function CustomerRow({ customer, orderCount, subscription, updateCustomer, removeCustomer, askConfirm, checked, onToggleChecked, isRegular, recentOrderCount }) {
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState({ name: customer.name, phone: customer.phone, address: customer.address, memo: customer.memo });
 
@@ -9211,6 +9318,11 @@ function CustomerRow({ customer, orderCount, subscription, updateCustomer, remov
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontWeight: 700, fontSize: 13, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
             {customer.name} <span style={{ fontWeight: 400, color: "#888780", fontSize: 11 }}>· 주문 {orderCount}건</span>
+            {isRegular && (
+              <span style={{ fontSize: 10.5, fontWeight: 700, color: "#854F0B", background: "#FAEEDA", padding: "1px 7px", borderRadius: 20 }}>
+                ⭐ 단골 (최근 1년 {recentOrderCount}회)
+              </span>
+            )}
             {subscription && (
               <span style={{ fontSize: 10.5, fontWeight: 700, color: "#185FA5", background: "#E6F1FB", padding: "1px 7px", borderRadius: 20 }}>
                 정기배송 {(subscription.occurrenceCount || 0) + 1}회차
@@ -9222,9 +9334,17 @@ function CustomerRow({ customer, orderCount, subscription, updateCustomer, remov
             {customer.phone}{customer.address ? ` · [${customer.postalCode}] ${customer.address}` : ""}{customer.memo ? ` · ${customer.memo}` : ""}
           </div>
         </div>
-        <div style={{ display: "flex", gap: 10, flexShrink: 0 }}>
-          <button onClick={startEdit} style={{ border: "none", background: "none", color: "#185FA5", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>수정</button>
-          <button onClick={handleDelete} style={removeBtnStyle}>삭제</button>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, flexShrink: 0, alignItems: "flex-end" }}>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button onClick={startEdit} style={{ border: "none", background: "none", color: "#185FA5", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>수정</button>
+            <button onClick={handleDelete} style={removeBtnStyle}>삭제</button>
+          </div>
+          <button
+            onClick={() => updateCustomer(customer.id, { regularOverride: isRegular ? false : true })}
+            style={{ border: "none", background: "none", color: isRegular ? "#A32D2D" : "#854F0B", fontSize: 11, fontWeight: 700, cursor: "pointer", padding: 0 }}
+          >
+            {isRegular ? "단골 해제" : "단골로 지정"}
+          </button>
         </div>
       </div>
     );
