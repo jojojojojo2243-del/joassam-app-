@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 24;
+const APP_VERSION = 25;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -1766,10 +1766,22 @@ function App() {
     return true;
   }
 
+  const isOrderSearching = searchQuery.trim() !== "";
+  const threeDaysAgo = new Date();
+  threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+  const threeDaysAgoStr = `${threeDaysAgo.getFullYear()}-${String(threeDaysAgo.getMonth() + 1).padStart(2, "0")}-${String(threeDaysAgo.getDate()).padStart(2, "0")}`;
   const filteredOrders = orders
     .filter((o) => statusFilter === "all" || o.status === statusFilter)
     .filter((o) => methodFilter === "all" || (methodFilter === "message" ? !!o.message : !o.message))
     .filter((o) => inDateRange(o, dateFilter))
+    .filter((o) => {
+      // 발송완료된 지 3일 지난 주문은 화면 목록을 복잡하게 만들지 않도록 기본 화면에서는
+      // 숨김 (데이터는 그대로 있고, 고객 이름/연락처/상품명으로 검색하면 다시 찾을 수 있음)
+      if (isOrderSearching) return true;
+      if (o.status !== "shipped") return true;
+      const shippedDateStr = (o.shippedAt || o.createdAt || "").slice(0, 10);
+      return !shippedDateStr || shippedDateStr >= threeDaysAgoStr;
+    })
     .filter((o) => {
       if (!searchQuery.trim()) return true;
       const q = searchQuery.trim().toLowerCase();
@@ -3270,7 +3282,11 @@ function App() {
       const missingCustomers = findMissingCustomersFromOrders(newOrders, customers);
       const ambiguousCustomers = scanAmbiguousNewEntries(missingCustomers, customers).map((x) => ({ ...x, type: "customer" }));
       registerNewCustomersFromOrders(newOrders); // 업체 주문은 이 함수 내부에서 자동 제외됨
-      fireToast(`엑셀에서 주문 ${newOrders.length}건을 등록했습니다${newVendors.length ? ` (신규 업체 ${newVendors.length}곳 자동 등록)` : ""}`);
+      // 엑셀에 업체 주문이 섞여 있으면, 새 주문 입력할 때와 똑같이 거래명세서를 자동 생성함
+      // (박스로 여러 줄 나뉜 업체 주문은 업체+받는분별로 하나로 합쳐서 명세서 1장씩 생성)
+      const bizOrders = newOrders.filter((o) => o.isBusiness);
+      if (bizOrders.length > 0) saveInvoicesGrouped(bizOrders);
+      fireToast(`엑셀에서 주문 ${newOrders.length}건을 등록했습니다${newVendors.length ? ` (신규 업체 ${newVendors.length}곳 자동 등록)` : ""}${bizOrders.length ? ` · 업체 거래명세서 자동 생성` : ""}`);
       const allAmbiguous = [...ambiguousVendors, ...ambiguousCustomers];
       if (allAmbiguous.length > 0) setAmbiguousReview(allAmbiguous);
       setBulkOrderModal(null);
@@ -6201,10 +6217,17 @@ function VendorHubTab({ vendors, invoices, products, onManageVendors, onEditSupp
   }
 
   const invSorted = [...invoices].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  const isInvoiceSearching = q.trim() !== "" || dateQ.trim() !== "";
+  // 2일 지난 거래명세서는 화면에서만 안 보이게 함 (데이터는 그대로 있고, 검색하면 다시 나옴)
+  const twoDaysAgo = new Date();
+  twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
+  const twoDaysAgoStr = `${twoDaysAgo.getFullYear()}-${String(twoDaysAgo.getMonth() + 1).padStart(2, "0")}-${String(twoDaysAgo.getDate()).padStart(2, "0")}`;
+  const hiddenOldCount = isInvoiceSearching ? 0 : invSorted.filter((inv) => (inv.date || "") < twoDaysAgoStr).length;
   const filtered = invSorted.filter((inv) => {
     const s = q.trim().toLowerCase();
     const nameOk = !s || (inv.vendorName || "").toLowerCase().includes(s);
     const dateOk = !dateQ || (inv.date || "").includes(dateQ);
+    if (!isInvoiceSearching && (inv.date || "") < twoDaysAgoStr) return false; // 검색 중이 아니면 오래된 건 숨김
     return nameOk && dateOk;
   });
 
@@ -6287,6 +6310,11 @@ function VendorHubTab({ vendors, invoices, products, onManageVendors, onEditSupp
       )}
 
       <div style={{ fontSize: 12, fontWeight: 700, color: "#854F0B", margin: "6px 0 8px" }}>거래명세서 {filtered.length}건</div>
+      {hiddenOldCount > 0 && (
+        <div style={{ fontSize: 10.5, color: "#888780", marginBottom: 8 }}>
+          (2일 지난 {hiddenOldCount}건은 화면에서 숨겨져 있어요. 업체명이나 날짜로 검색하면 찾을 수 있어요)
+        </div>
+      )}
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {filtered.length === 0 && <div style={{ padding: "36px 0", textAlign: "center", color: "#888780", fontSize: 13 }}>거래명세서가 없습니다. "거래명세서 작성"으로 만들거나, 업체 주문을 등록하면 자동 생성돼요.</div>}
@@ -7085,6 +7113,18 @@ function OrdersTab({
         <div style={{ flex: 1, textAlign: "center", padding: "7px 0", borderRadius: 8, background: "#EAF3DE", color: "#27500A", fontWeight: 700 }}>일반 {orders.filter((o) => !o.isBusiness).length}</div>
         <div style={{ flex: 1, textAlign: "center", padding: "7px 0", borderRadius: 8, background: "#FAEEDA", color: "#854F0B", fontWeight: 700 }}>🏢 업체 {orders.filter((o) => o.isBusiness).length}</div>
       </div>
+      {!isOrderSearching && (() => {
+        const hiddenShippedCount = orders.filter((o) => {
+          if (o.status !== "shipped") return false;
+          const shippedDateStr = (o.shippedAt || o.createdAt || "").slice(0, 10);
+          return shippedDateStr && shippedDateStr < threeDaysAgoStr;
+        }).length;
+        return hiddenShippedCount > 0 ? (
+          <div style={{ fontSize: 10.5, color: "#888780", marginBottom: 8 }}>
+            (발송완료 후 3일 지난 {hiddenShippedCount}건은 화면에서 숨겨져 있어요. 고객 이름·연락처로 검색하면 찾을 수 있어요)
+          </div>
+        ) : null;
+      })()}
 
       <div style={{ display: "flex", gap: 6, marginBottom: 8 }}>
         <button onClick={() => invoiceInputRef.current?.click()} style={toolBtnStyle("#185FA5")}>송장번호 업로드</button>
