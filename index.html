@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 33;
+const APP_VERSION = 34;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -3303,12 +3303,13 @@ function App() {
       // 새로 등록되는 업체 중, 기존 업체와 애매하게 겹치는 경우가 있으면 확인 목록에 담아둠
       const ambiguousVendors = scanAmbiguousNewEntries(newVendors, vendors).map((x) => ({ ...x, type: "vendor" }));
 
-      const newOrders = toAdd.map((r) => {
+      const newOrders = toAdd.map((r, idx) => {
         const matched = customers.find((c) => r.recipPhone && (c.phone || "").replace(/-/g, "") === r.recipPhone.replace(/-/g, ""));
         const total = r.items.reduce((s, it) => s + ((productMap[it.productId]?.price ?? it.price ?? 0) * (it.qty || 0)), 0);
         return applyFridayNoteIfNeeded({
           id: uid("o"),
           batchId,
+          importSeq: idx, // 엑셀 파일에서 원래 몇 번째 줄이었는지 기록 (다운로드시 순서를 그대로 지키기 위함)
           customerId: matched ? matched.id : null,
           isBusiness: !!r.isBusiness,
           vendorId: r.isBusiness ? (vendorIdByRow[r.tempId] || "") : "",
@@ -3355,8 +3356,17 @@ function App() {
       fireToast("체크박스로 다운로드할 주문을 선택해주세요");
       return;
     }
+    // 같은 엑셀 파일(같은 batchId)로 한번에 등록된 주문들은, 업로드했던 파일에 있던
+    // 원래 순서(importSeq) 그대로 정렬해서 다운로드함. 순서가 뒤바뀌면 나중에 확인
+    // 작업할 때 헷갈리기 때문에, 추측하지 않고 명시적으로 순서를 고정함.
+    const sortedTargets = [...targets].sort((a, b) => {
+      if (a.batchId && a.batchId === b.batchId && a.importSeq != null && b.importSeq != null) {
+        return a.importSeq - b.importSeq;
+      }
+      return 0; // 서로 다른 배치끼리는 원래(안정정렬) 순서를 그대로 둠
+    });
     // 각 주문을 박스 규칙으로 펼쳐 박스마다 한 행(송장 한 개)으로 만든다
-    const expanded = targets.flatMap((o) => expandOrderToBoxes(o));
+    const expanded = sortedTargets.flatMap((o) => expandOrderToBoxes(o));
     const rows = expanded.map(orderToRow);
     downloadWorkbook(rows, "Orders", nextFilename("주문목록"), orderTemplate, (row, i) => (expanded[i]?.isBusiness ? "FAEEDA" : null));
 
