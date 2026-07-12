@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 56;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
+const APP_VERSION = 60;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -1505,7 +1505,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // ===== JARVIS AI ASSISTANT =====
-const APP_BUILD = "v56 (07-12 배송완료10일)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const APP_BUILD = "v60 (07-12 단일상품묶음)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
 const JARVIS_TAB_MAP = {
   goHome:'home', goOrders:'orders', goNew:'new',
   goCustomers:'customers', goProducts:'products',
@@ -1600,6 +1600,7 @@ function normalizeVoiceCommand(obj, rawText){ const fail={action:"UNKNOWN",raw:r
   if(action==="EDIT_ORDER"){ return { action, name:str(obj.name), raw:rawText }; }
   if(action==="REMOVE_FROM_ORDER"){ return { action, name:str(obj.name), raw:rawText }; }
   if(action==="UNDO_LAST"){ return { action }; }
+  if(action==="CONFIRM_DELIVERY"){ return { action, raw:rawText }; }
   return fail; }
 
 /* ===== 로컬(규칙 기반) 음성 명령 분석 — Gemini 키가 없거나 호출 실패 시 폴백 =====
@@ -1637,6 +1638,11 @@ function localParseVoiceCommand(rawText, ctx = {}) {
     else if (/(자동묶음|따로따로|따로보내|개별발송|개별로|낱개로|박스나눠|나눠서보)/.test(t)) mode = "auto";
     const nameHit = tryMatch(raw, personNames) || "";
     return { action: "REBUNDLE_ONE", mode, name: nameHit, raw };
+  }
+
+  // #2.55 배송 도착 확인 — "대솔본점 7월 2일 도착 확인 해줘", "하레하레 배송완료 처리"
+  if (/(도착확인|도착했|도착처리|배송완료처리|배송완료로|받은걸로|받았다고)/.test(t) || (/도착/.test(t) && /확인/.test(t))) {
+    return { action: "CONFIRM_DELIVERY", raw };
   }
 
   // #2.6 기존 주문 열어 수정 — "배솔수곡점 주문 수정", "하레하레 주문 고쳐줘/열어줘/바꿔줘"
@@ -1817,6 +1823,48 @@ function runSelfTests() {
       && composeNameWeight("채소", "2kg") === "채소 2kg"
       && composeNameWeight("깻잎", "") === "깻잎";
   }, (g) => g === true);
+  T("배송조회: 고객 배송 현황 요약", () => {
+    const ords = [
+      { status: "shipped", recipient: { name: "대솔본점" }, shippedAt: "2026-07-12", deliveryConfirmed: false },
+      { status: "shipped", recipient: { name: "대솔본점" }, shippedAt: "2026-07-02", deliveryConfirmed: true, deliveryConfirmedAt: "2026-07-05T09:00" },
+      { status: "pending", recipient: { name: "대솔본점" } },
+    ];
+    const ans = deliveryStatusAnswer("대솔본점 배송 목록 보여줘", { orders: ords, customers: [{ id: "c1", name: "대솔본점" }], vendors: [] });
+    return typeof ans === "string" && ans.includes("배송완료") && ans.includes("배송중") && ans.includes("2건");
+  }, (g) => g === true);
+  T("배송조회: 이름 없으면 null", () => deliveryStatusAnswer("배송 목록 보여줘", { orders: [], customers: [], vendors: [] }), (g) => g === null);
+  T("도착확인: 이름+날짜로 대상 1건 선택", () => {
+    const O = [
+      { id: "o1", status: "shipped", recipient: { name: "대솔본점" }, shippedAt: "2026-07-02", deliveryConfirmed: false },
+      { id: "o2", status: "shipped", recipient: { name: "대솔본점" }, shippedAt: "2026-07-05", deliveryConfirmed: false },
+      { id: "o3", status: "shipped", recipient: { name: "대솔본점" }, shippedAt: "2026-07-02", deliveryConfirmed: true },
+    ];
+    const r = findDeliveryToConfirm("대솔본점 7월 2일 도착 확인", O, [{ id: "c1", name: "대솔본점" }], [], "2026-07-02");
+    return r.name === "대솔본점" && r.matches.length === 1 && r.matches[0].id === "o1"; // 이미 확인된 o3 제외
+  }, (g) => g === true);
+  T("도착확인: 날짜 없고 여러건 → 모두 반환(상위에서 되물음)", () => {
+    const O = [
+      { id: "a", status: "shipped", recipient: { name: "대솔본점" }, shippedAt: "2026-07-02", deliveryConfirmed: false },
+      { id: "b", status: "shipped", recipient: { name: "대솔본점" }, shippedAt: "2026-07-05", deliveryConfirmed: false },
+    ];
+    return findDeliveryToConfirm("대솔본점 도착 확인", O, [{ id: "c1", name: "대솔본점" }], [], null).matches.length === 2;
+  }, (g) => g === true);
+  T("날짜해석: 이번주 월요일(2026-07-12 일 기준)", () => resolveQueryDate("이번주 월요일", new Date(2026, 6, 12)), "2026-07-06");
+  T("날짜해석: 어제/7월 2일", () => resolveQueryDate("어제", new Date(2026, 6, 12)) === "2026-07-11" && resolveQueryDate("7월 2일", new Date(2026, 6, 12)) === "2026-07-02", (g) => g === true);
+  T("날짜배송조회: 그날 배송 내역 목록", () => {
+    const today = new Date(2026, 6, 12);
+    const O = [
+      { status: "shipped", recipient: { name: "가게" }, shippedAt: "2026-07-06", deliveryConfirmed: true, deliveryConfirmedAt: "2026-07-08T09:00" },
+      { status: "shipped", recipient: { name: "나상회" }, shippedAt: "2026-07-07", deliveryConfirmed: false },
+    ];
+    const ans = deliveryByDateAnswer("이번주 월요일 배송 도착 목록 보여줘", { orders: O, customers: [], vendors: [] }, today);
+    return typeof ans === "string" && ans.includes("7월 6일") && ans.includes("가게") && !ans.includes("나상회");
+  }, (g) => g === true);
+  T("배송조회: 약어로 업체 매칭", () => {
+    const O = [{ status: "shipped", recipient: { name: "하레하레베이커리카페" }, shippedAt: "2026-07-10", deliveryConfirmed: true, deliveryConfirmedAt: "2026-07-11T09:00" }];
+    const ans = deliveryStatusAnswer("하레하레 배송 목록 보여줘", { orders: O, customers: [{ id: "c1", name: "하레하레베이커리카페" }], vendors: [] });
+    return typeof ans === "string" && ans.includes("하레하레베이커리카페") && ans.includes("배송완료");
+  }, (g) => g === true);
   T("중량필드: 합친 이름이 등록품과 매칭", () => {
     const nm = composeNameWeight("채소", "2kg");
     const prods = [{ id: "px", name: nm }];
@@ -1990,6 +2038,108 @@ function repriceItemsForBusiness(items, productMap) {
   });
 }
 
+// ★ v57: 배송 상태 대화 조회 (읽기 전용) — "하레하레 배송 목록/현황", "대솔 본점 배송 어때"
+//  특정 고객·업체의 발송 주문을 날짜별 배송중/배송완료로 알려줌. 이름을 못 찾으면 null(다른 핸들러로).
+function _fmtMD(s) {
+  const d = String(s || "").slice(0, 10).match(/(\d{4})-(\d{2})-(\d{2})/);
+  return d ? `${+d[2]}월 ${+d[3]}일` : "";
+}
+function deliveryStatusAnswer(raw, data) {
+  const t = String(raw || "").replace(/\s/g, "");
+  if (!/(배송|도착|배달)/.test(t)) return null;
+  const { orders = [], customers = [], vendors = [] } = data || {};
+  const names = [...customers.map((c) => c && c.name).filter(Boolean), ...vendors.map((v) => v && v.name).filter(Boolean)];
+  // 이름 찾기: 배송·조회 단어를 뺀 나머지로 부분일치(약어 "하레하레"→"하레하레베이커리카페"도 매칭), 실패 시 유사도
+  const cand = t.replace(/(배송현황|배송상태|배송목록|배송|도착확인|도착|배달|목록|현황|상태|보여줘|보여주세요|보여|알려줘|알려|어때|어떻게|됐어|됐나|완료|리스트|줘|해줘|주세요|님|의|은|는|이|가|좀)/g, "");
+  let name = "";
+  for (const nm of names) { const nns = String(nm).replace(/\s/g, ""); if (nns.length >= 2 && cand.length >= 2 && (nns.includes(cand) || cand.includes(nns))) { name = nm; break; } }
+  if (!name && typeof matchName === "function") name = matchName(raw, names);
+  if (!name) return null; // 이름 없는 일반 배송 질문은 화면 이동 등 다른 핸들러가 처리
+  const q = name.replace(/\s/g, "");
+  const mine = (orders || []).filter((o) => o && o.status === "shipped" && orderRecipientName(o).replace(/\s/g, "").includes(q));
+  if (!mine.length) return `${name} 님은 아직 발송(배송)된 주문이 없어요.`;
+  const wantDone = /(완료|도착했|도착한|받았|받은)/.test(t) && !/(안|미|아직|중)/.test(t);
+  const wantTransit = /(배송중|안왔|안온|미도착|아직|안받)/.test(t);
+  let list = mine;
+  if (wantDone) list = mine.filter((o) => o.deliveryConfirmed);
+  else if (wantTransit) list = mine.filter((o) => !o.deliveryConfirmed);
+  list = [...list].sort((a, b) => String(a.shippedAt || a.orderDate || "").localeCompare(String(b.shippedAt || b.orderDate || "")));
+  if (!list.length) return `${name} 님은 해당하는 배송이 없어요.`;
+  const parts = list.slice(0, 12).map((o) => {
+    const done = o.deliveryConfirmed;
+    const d = _fmtMD(done ? o.deliveryConfirmedAt : (o.shippedAt || o.orderDate));
+    return `${d ? d + " " : ""}${done ? "배송완료" : "배송중"}`;
+  });
+  const doneN = mine.filter((o) => o.deliveryConfirmed).length;
+  return `${name} 배송 현황이에요. ${parts.join(", ")}. (총 ${mine.length}건 중 배송완료 ${doneN}건)`;
+}
+// ★ v58: 음성 도착 확인 대상 찾기 — 이름(부분일치)+선택 날짜로 '발송완료·미도착확인' 주문을 고름. { name, matches }.
+function findDeliveryToConfirm(raw, orders, customers, vendors, dateISO) {
+  const t = String(raw || "").replace(/\s/g, "");
+  const names = [...(customers || []).map((c) => c && c.name).filter(Boolean), ...(vendors || []).map((v) => v && v.name).filter(Boolean)];
+  const cand = t.replace(/(도착확인|도착|확인해줘|확인|배송완료|배송|처리|해줘|해주세요|받은걸로|받았다고|받았어요|월|일|줘|님|의|은|는|이|가|좀|\d+)/g, "");
+  let name = "";
+  for (const nm of names) { const nns = String(nm).replace(/\s/g, ""); if (nns.length >= 2 && cand.length >= 2 && (nns.includes(cand) || cand.includes(nns))) { name = nm; break; } }
+  if (!name && typeof matchName === "function") name = matchName(raw, names);
+  if (!name) return { name: "", matches: [] };
+  const q = name.replace(/\s/g, "");
+  let mine = (orders || []).filter((o) => o && o.status === "shipped" && !o.deliveryConfirmed && orderRecipientName(o).replace(/\s/g, "").includes(q));
+  if (dateISO) mine = mine.filter((o) => String(o.shippedAt || o.orderDate || "").slice(0, 10) === dateISO);
+  return { name, matches: mine };
+}
+
+// ★ v59: 조회용 날짜 해석 — 오늘/어제/그제/N월N일/요일/이번주·지난주 X요일 → YYYY-MM-DD (없으면 null).
+//  배송·도착 조회는 보통 과거라, 그냥 "월요일"은 '가장 가까운 지난 월요일'로 해석.
+function resolveQueryDate(text, today) {
+  const t = String(text || "").replace(/\s/g, "");
+  const p = (n) => String(n).padStart(2, "0");
+  const fmt = (d) => `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  const base = new Date(today.getTime());
+  if (/그제|그저께|그저깨/.test(t)) { base.setDate(base.getDate() - 2); return fmt(base); }
+  if (/어제|어저께/.test(t)) { base.setDate(base.getDate() - 1); return fmt(base); }
+  if (/오늘|당일/.test(t)) return fmt(base);
+  if (/모레|모래/.test(t)) { base.setDate(base.getDate() + 2); return fmt(base); }
+  if (/내일|낼|명일/.test(t)) { base.setDate(base.getDate() + 1); return fmt(base); }
+  let m = t.match(/(\d{1,2})일전/); if (m) { base.setDate(base.getDate() - (+m[1])); return fmt(base); }
+  m = t.match(/(\d{1,2})월(\d{1,2})일/); if (m) { base.setMonth(+m[1] - 1); base.setDate(+m[2]); return fmt(base); }
+  m = t.match(/(\d{1,2})\/(\d{1,2})/); if (m) { base.setMonth(+m[1] - 1); base.setDate(+m[2]); return fmt(base); }
+  const wd = { 일: 0, 월: 1, 화: 2, 수: 3, 목: 4, 금: 5, 토: 6 };
+  m = t.match(/([월화수목금토일])요일/);
+  if (m) {
+    const target = wd[m[1]];
+    const mondayOffset = (base.getDay() + 6) % 7; // 오늘→이번주 월요일까지 뒤로
+    const monday = new Date(base.getTime()); monday.setDate(monday.getDate() - mondayOffset);
+    const targetMonIdx = (target + 6) % 7; // 월=0..일=6
+    const dt = new Date(monday.getTime()); dt.setDate(dt.getDate() + targetMonIdx);
+    if (/지난주|저번주|전주/.test(t)) { dt.setDate(dt.getDate() - 7); return fmt(dt); }
+    if (/다음주|담주|차주/.test(t)) { dt.setDate(dt.getDate() + 7); return fmt(dt); }
+    if (/이번주|금주/.test(t)) return fmt(dt);
+    if (dt.getTime() > base.getTime()) dt.setDate(dt.getDate() - 7); // 아직 안 온 요일이면 지난주
+    return fmt(dt);
+  }
+  return null;
+}
+// ★ v59: 특정 날짜의 배송 내역 조회 — 그날 발송했거나 도착확인한 주문 목록 (읽기 전용).
+function deliveryByDateAnswer(raw, data, today) {
+  const t = String(raw || "").replace(/\s/g, "");
+  if (!/(배송|도착|발송|배달)/.test(t)) return null;
+  if (!/(목록|보여|알려|현황|내역|리스트|뭐있|뭐가|있어|몇건|건있)/.test(t)) return null;
+  const dateISO = resolveQueryDate(raw, today || new Date());
+  if (!dateISO) return null;
+  const { orders = [] } = data || {};
+  const onDate = (orders || []).filter((o) => {
+    if (!o || o.status !== "shipped") return false;
+    const sh = String(o.shippedAt || o.orderDate || "").slice(0, 10) === dateISO;
+    const dc = o.deliveryConfirmed && String(o.deliveryConfirmedAt || "").slice(0, 10) === dateISO;
+    return sh || dc;
+  });
+  const md = _fmtMD(dateISO);
+  if (!onDate.length) return `${md}에는 발송·도착한 배송 내역이 없어요.`;
+  const parts = onDate.slice(0, 15).map((o) => `${orderRecipientName(o) || "고객"} ${o.deliveryConfirmed ? "배송완료" : "배송중"}`);
+  const doneN = onDate.filter((o) => o.deliveryConfirmed).length;
+  return `${md} 배송 내역이에요. ${parts.join(", ")}. (총 ${onDate.length}건 중 배송완료 ${doneN}건)`;
+}
+
 /* ===== 앱 전체 데이터 기반 질문 답변 (상품가격·재고·송장추적·정기배송·연락처·발송상태) =====
  * 조비서가 모든 도메인 질문을 실제 앱 데이터로 답하도록. 답할 수 있으면 문장 반환, 아니면 null. */
 function answerFromAppData(text, data) {
@@ -1998,6 +2148,13 @@ function answerFromAppData(text, data) {
   if (!t) return null;
   const { orders = [], customers = [], products = [], vendors = [], subscriptions = [] } = data || {};
   const won = (n) => (Number(n) || 0).toLocaleString("ko-KR") + "원";
+
+  // ★ v57: 특정 고객·업체 배송 상태 조회 우선 처리
+  const _del = deliveryStatusAnswer(raw, { orders, customers, vendors });
+  if (_del) return _del;
+  // ★ v59: 이름 없이 날짜로 배송 내역 조회 ("이번주 월요일 배송 도착 목록")
+  const _delDate = deliveryByDateAnswer(raw, { orders, customers, vendors }, new Date());
+  if (_delDate) return _delDate;
 
   // 정기배송
   if (/정기배송|구독/.test(t)) {
@@ -3036,15 +3193,17 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       finalizeRegister(); return;
     }
 
-    // ★ v24: 묶음 배송 — 상품이 2개 이상일 때 "묶음/묶어/따로/부분묶음" 말하면 박스로 나눔
-    if ((cur.items || []).length >= 2 && isBundleIntent(t)) {
+    // ★ v60: 묶음 배송 — 낱개 총 2개 이상이면(한 상품 여러 개 포함) "묶음/묶어/따로/부분묶음"으로 박스 나눔
+    const _bundleUnits = (cur.items || []).reduce((s, it) => s + (Number(it.qty) || 0), 0);
+    if (_bundleUnits >= 2 && isBundleIntent(t)) {
       const boxList = applyBundlePlanToDraft(text);
       if (boxList) {
-        if (boxList.length <= 1) { say('네, 한 박스로 보낼게요. 이대로 등록할까요?'); return; }
-        say(`${bundleReadback(boxList)}. 이렇게 ${boxList.length}박스로 나눠 등록할까요?`); return;
+        if (boxList.length <= 1) { say('네, 한 박스로 보낼게요. "등록"이라고 하시면 등록할게요.'); return; }
+        say(`${bundleReadback(boxList)}. 이렇게 ${boxList.length}박스로 나눠 등록할까요? "등록"이라고 하세요.`); return;
       }
-      cur.awaitingBundle = true; orderDraftRef.current = cur;
-      say('어떻게 묶을까요? 예를 들어 "샐러드랑 로메인 한 박스, 루꼴라랑 크리스탈벨 한 박스"처럼 말씀하세요. 전부 한 박스면 "전부 한 박스"라고 하세요.'); return;
+      cur.awaitingBundle = true; cur.bundleAsked = true; orderDraftRef.current = cur;
+      const autoBoxes = autoSplitBoxes(cur.items);
+      say(`어떻게 묶을까요? "자동으로 나눠줘"(규칙대로 ${autoBoxes.length}박스), "전부 한 박스", "따로따로"(낱개 1개씩), 또는 "○○랑 ○○ 한 박스"처럼 말씀하세요.`); return;
     }
 
     // 내용 파싱: AI 우선(문장 전체 이해), 실패 시 로컬 규칙
@@ -3133,6 +3292,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         || /(수정|고쳐|고칠|편집)(해|하|해줘|해주세요)?$/.test(tNS)
         || /(빼|삭제|제외|없애|지워)/.test(tNS)
         || /(되돌려|되돌리|방금전으로|방금거취소|방금꺼취소|방금취소|방금주문취소|방금등록취소|마지막주문취소|마지막취소|실수했어|잘못했어)/.test(tNS)
+        || /(도착확인|도착했|도착처리|배송완료처리|배송완료로|받은걸로|받았다고)/.test(tNS) || (/도착/.test(tNS) && /확인/.test(tNS))
         || /(한박스|한상자|하나로묶|하나로합|자동묶음|따로따로|따로보내|개별발송|낱개로|묶음수정|박스수정|박스편집|묶음편집)/.test(tNS);
       if (editIntent && onAppCommand && onAppCommand(text)) {
         clearInterval(countdownRef.current); setRetryCountdown(0);
@@ -4948,6 +5108,27 @@ function App() {
       case "UNDO_LAST":
         undoLast();   // ★ v42: 직전 주문 변경(등록·수정·삭제)을 1단계 되돌림
         break;
+      case "CONFIRM_DELIVERY": {
+        // ★ v58: 음성 도착 확인 — 이름(+날짜)으로 발송완료 주문을 찾아 배송완료 처리
+        const dateISO = (typeof parseDate === "function") ? parseDate(command.raw || "", new Date()) : null;
+        const { name, matches } = findDeliveryToConfirm(command.raw || "", orders, customers, vendors, dateISO);
+        if (!name) { fireToast("누구 도착 확인인지 이름을 함께 말씀해 주세요 (예: 대솔본점 7월 2일 도착 확인)"); break; }
+        if (!matches.length) {
+          setTab("orders"); setSearchQuery(name);
+          fireToast(`${name} 님의 도착 확인할 배송을 못 찾았어요${dateISO ? ` (${_fmtMD(dateISO)})` : ""}`);
+          break;
+        }
+        if (matches.length > 1 && !dateISO) {
+          setTab("deliverytrack");
+          fireToast(`${name} 님 도착 확인할 배송이 ${matches.length}건이에요 — 날짜도 같이 말씀해 주세요 (예: 7월 2일)`);
+          break;
+        }
+        const ids = matches.map((o) => o.id);
+        confirmDeliveries(ids);
+        setTab("deliverytrack");
+        fireToast(`✅ ${name}${dateISO ? " " + _fmtMD(dateISO) : ""} 배송 ${ids.length}건 도착 확인했어요`);
+        break;
+      }
       case "REMOVE_FROM_ORDER": {
         // 기존 주문에서 상품 제거 — 대상: 말한 고객의 주문, 없으면 현재 열린 주문
         let target = command.name ? findOrderBySpokenName(command.name) : null;
@@ -5159,6 +5340,7 @@ function App() {
 
   // 배송확인 목록에서 체크한 항목들을 한 번에 "도착 확인함" 처리
   function confirmDeliveries(ids) {
+    recordUndo("방금 도착 확인");   // ★ v58: "되돌려"로 도착확인 취소 가능
     const stampIso = new Date().toISOString();
     setOrders((prev) => prev.map((o) => (ids.includes(o.id) ? { ...o, deliveryConfirmed: true, deliveryConfirmedAt: stampIso } : o)));
   }
