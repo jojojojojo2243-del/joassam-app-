@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 60;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
+const APP_VERSION = 61;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -1505,7 +1505,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // ===== JARVIS AI ASSISTANT =====
-const APP_BUILD = "v60 (07-12 단일상품묶음)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const APP_BUILD = "v61 (07-12 업데이트버튼수정)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
 const JARVIS_TAB_MAP = {
   goHome:'home', goOrders:'orders', goNew:'new',
   goCustomers:'customers', goProducts:'products',
@@ -4093,8 +4093,20 @@ function App() {
     };
   }, []);
   function applyAppUpdate() {
-    if (window.__joassamApplyUpdate) window.__joassamApplyUpdate();
-    else window.location.reload();
+    // 새 서비스워커에 적용 신호 전송 (controllerchange가 오면 그쪽에서 새로고침)
+    try { if (window.__joassamApplyUpdate) window.__joassamApplyUpdate(); } catch (e) {}
+    fireToast("최신 버전으로 업데이트하는 중…");
+    // ★ v61: controllerchange가 안 오는 경우(새 SW가 이미 제어 중 등)에도 확실히 반영 —
+    //  캐시를 비우고 강제 새로고침. (그 전에 controllerchange가 오면 그쪽 reload가 먼저 실행됨)
+    setTimeout(async () => {
+      try {
+        if (window.caches && caches.keys) {
+          const keys = await caches.keys();
+          await Promise.all(keys.map((k) => caches.delete(k)));
+        }
+      } catch (e) {}
+      try { window.location.reload(); } catch (e) { window.location.href = window.location.href; }
+    }, 900);
   }
   function checkForAppUpdate() {
     setCheckingUpdate(true);
