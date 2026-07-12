@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 35;
+const APP_VERSION = 54;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -563,6 +563,20 @@ function matchName(text, names, threshold){
 const KO_NUM={한:1,두:2,세:3,네:4,다섯:5,여섯:6,일곱:7,여덟:8,아홉:9,열:10};
 const COUNT_UNIT='박스|박|봉지|봉|팩|세트|개|근|망|단|포|상자|묶음';   // 개수 단위 (무게 제외)
 const WEIGHT_RE='\\d+(?:\\.\\d+)?\\s*(?:kg|킬로그램|킬로그람|킬로|키로그램|키로그람|키로|g|그램|그람)';           // 무게 (상품 스펙) — "키로"(자주 말함)·소수점 포함
+// ★ v53: 상품명 ↔ (기본명 + 중량) 변환 — '화면만 분리' 방식. 저장은 기존처럼 "채소 2kg" 한 이름으로.
+function splitNameWeight(name) {
+  const s = String(name || "");
+  const m = s.match(new RegExp(WEIGHT_RE));
+  if (!m) return { base: s.trim(), weight: "" };
+  const weight = m[0].replace(/\s/g, "");
+  const base = s.replace(new RegExp(WEIGHT_RE, "g"), "").replace(/\s+/g, " ").trim();
+  return { base, weight };
+}
+function composeNameWeight(base, weight) {
+  const b = String(base || "").trim();
+  const w = String(weight || "").replace(/\s/g, "").trim();
+  return w ? (b ? `${b} ${w}` : w) : b;
+}
 // 개수만 추출 (무게는 수량으로 안 봄)
 function parseCount(seg){
   let m=seg.match(new RegExp('(\\d+)\\s*(?:'+COUNT_UNIT+')')); if(m) return parseInt(m[1],10);
@@ -648,7 +662,13 @@ function extractItems(text, products, names){
       const nmForMatch=nm.replace(new RegExp(WEIGHT_RE,'g'),'').replace(/\s+/g,' ').trim();
       const fz=fuzzyProductMatch(nmForMatch||nm, products, 0.62);
       if(fz){
-        if(w){ const base=fz.name.replace(new RegExp(WEIGHT_RE,'g'),'').replace(/\s+/g,' ').trim(); items.push({productId:null, name:(base?base+' ':'')+w, qty:cnt!=null?cnt:1}); continue; }
+        if(w){
+          // ★ v51: 등록 상품의 중량과 말한 중량이 같으면 그 상품으로 연결 (예: "채소 2kg 2개"→등록품 "채소2kg" qty2)
+          const normW=(s)=>String(s||'').replace(/\s/g,'').toLowerCase().replace(/킬로그램|킬로그람|킬로|키로그램|키로그람|키로/g,'kg').replace(/그램|그람/g,'g');
+          const prodW=(fz.name.match(new RegExp(WEIGHT_RE))||[])[0]||'';
+          if(prodW && normW(prodW)===normW(w)){ items.push({productId:fz.id, name:fz.name, qty:cnt!=null?cnt:1}); continue; }
+          const base=fz.name.replace(new RegExp(WEIGHT_RE,'g'),'').replace(/\s+/g,' ').trim(); items.push({productId:null, name:(base?base+' ':'')+w, qty:cnt!=null?cnt:1}); continue;
+        }
         matched=fz;
       }
     }
@@ -1485,7 +1505,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // ===== JARVIS AI ASSISTANT =====
-const APP_BUILD = "v39 (07-11 등록전묶음질문)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const APP_BUILD = "v54 (07-12 조비서관리자전용)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
 const JARVIS_TAB_MAP = {
   goHome:'home', goOrders:'orders', goNew:'new',
   goCustomers:'customers', goProducts:'products',
@@ -1579,6 +1599,7 @@ function normalizeVoiceCommand(obj, rawText){ const fail={action:"UNKNOWN",raw:r
   if(action==="REBUNDLE_ONE"){ const mode=["all","auto","open"].includes(obj.mode)?obj.mode:"open"; return { action, mode, name:str(obj.name) }; }
   if(action==="EDIT_ORDER"){ return { action, name:str(obj.name), raw:rawText }; }
   if(action==="REMOVE_FROM_ORDER"){ return { action, name:str(obj.name), raw:rawText }; }
+  if(action==="UNDO_LAST"){ return { action }; }
   return fail; }
 
 /* ===== 로컬(규칙 기반) 음성 명령 분석 — Gemini 키가 없거나 호출 실패 시 폴백 =====
@@ -1602,6 +1623,11 @@ function localParseVoiceCommand(rawText, ctx = {}) {
   if (/(새주문|주문입력|주문작성|주문쓰|주문넣는화면|주문화면열)/.test(t)) return { action: "NAVIGATE", target: "new" };
   if (/(주문목록|주문내역|주문현황|주문보여|주문리스트|주문확인|주문조회|발송목록|발송현황)/.test(t)) return { action: "NAVIGATE", target: "orders" };
   if (/(고객관리|고객목록|고객명단|고객보여|고객리스트|거래처관리|거래처목록|고객화면)/.test(t)) return { action: "NAVIGATE", target: "customers" };
+
+  // #2.4 실수 복구 — "되돌려 / 방금 거 취소 / 마지막 주문 취소 / 방금 전으로" (주문 취소·삭제보다 먼저 판별)
+  if (/(되돌려|되돌리|되돌릴|방금전으로|방금꺼로|방금거취소|방금꺼취소|방금취소|방금주문취소|방금등록취소|방금한거취소|방금수정취소|방금삭제취소|마지막주문취소|마지막주문삭제|마지막취소|아까한거취소|취소했던걸로|실수했어|실수했다|잘못했어)/.test(t)) {
+    return { action: "UNDO_LAST" };
+  }
 
   // #2.5 단일 주문의 발송 박스(묶음) 재구성 — "이 주문 한 박스로", "자동 묶음으로", "따로따로 보내", "묶음 수정"
   const boxEditIntent = /(묶음수정|묶음편집|묶음바꿔|묶음다시|박스수정|박스편집|박스바꿔|박스다시|박스나눠|한박스|한상자|하나로묶|하나로합|다같이한|자동묶음|따로따로|따로보내|개별발송|개별로보|낱개로)/.test(t);
@@ -1683,13 +1709,135 @@ const PRODUCT_ALIASES = {
   "루꼴라": ["루꼬라", "루콜라", "루꾸라", "루쿨라"],
   "로메인": ["로메인상추", "노메인"],
 };
+
+// ★ v41: 학습된 별칭(장기 기억) — 사용자가 "X를 Y로 기억해"라고 승인한 발음/줄임말을 localStorage에 저장.
+//  { 발음(공백제거) : 상품 핵심명 } 형태. 고정 PRODUCT_ALIASES는 그대로 두고 여기에 '덧붙임'.
+const LEARNED_ALIAS_KEY = "joassam_learned_aliases_v1";
+let _learnedAliasCache = null;
+function getLearnedAliases() {
+  if (_learnedAliasCache) return _learnedAliasCache;
+  try {
+    const raw = (typeof localStorage !== "undefined") ? localStorage.getItem(LEARNED_ALIAS_KEY) : null;
+    _learnedAliasCache = raw ? JSON.parse(raw) : {};
+  } catch (e) { _learnedAliasCache = {}; }
+  if (!_learnedAliasCache || typeof _learnedAliasCache !== "object") _learnedAliasCache = {};
+  return _learnedAliasCache;
+}
+function learnAlias(from, to) {
+  const f = String(from || "").replace(/\s/g, "").trim();
+  const t = String(to || "").replace(/\s/g, "").trim();
+  if (!f || !t || f === t) return false;
+  const map = getLearnedAliases();
+  map[f] = t;
+  _learnedAliasCache = map;
+  try { if (typeof localStorage !== "undefined") localStorage.setItem(LEARNED_ALIAS_KEY, JSON.stringify(map)); } catch (e) {}
+  return true;
+}
+// ★ v48: 학습한 말 1건 삭제 (Memory Manager용). 성공 시 true.
+function removeLearnedAlias(from) {
+  const f = String(from || "").replace(/\s/g, "").trim();
+  const map = getLearnedAliases();
+  if (map[f] === undefined) return false;
+  delete map[f];
+  _learnedAliasCache = map;
+  try { if (typeof localStorage !== "undefined") localStorage.setItem(LEARNED_ALIAS_KEY, JSON.stringify(map)); } catch (e) {}
+  return true;
+}
+// "'청겨'를 '청겨자'로 기억해" / "청겨는 청겨자로 저장해" / "청겨 청겨자로 외워" → { from, to }
+function parseTeachAlias(text) {
+  const t = String(text || "").replace(/\s+/g, " ").trim();
+  if (!/(기억|저장|외워|등록)/.test(t)) return null;
+  let m = t.match(/['"]([^'"]{1,20})['"]\s*(?:을|를|는|은)?\s*(?:->|→)?\s*['"]([^'"]{1,20})['"]\s*(?:으로|로)?\s*(?:기억|저장|외워|등록)/);
+  if (!m) m = t.match(/([가-힣A-Za-z0-9]{1,20})\s*(?:을|를|는|은)\s*(?:앞으로|이제|다음부터)?\s*([가-힣A-Za-z0-9 ]{1,20}?)\s*(?:으로|로)\s*(?:기억|저장|외워|등록)/);
+  if (!m) m = t.match(/([가-힣A-Za-z0-9]{1,20})\s+([가-힣A-Za-z0-9 ]{1,20}?)\s*(?:으로|로)\s*(?:기억|저장|외워|등록)/);
+  if (!m) return null;
+  const from = m[1].replace(/\s/g, "").trim();
+  const to = m[2].replace(/\s+/g, " ").trim();
+  if (!from || !to || from === to) return null;
+  // 수량/개수는 별칭이 아님 (오학습 방지)
+  if (/^\d+$/.test(from) || /^\d+\s*(개|박스|봉|팩|kg|키로|킬로)/.test(to)) return null;
+  return { from, to };
+}
 function canonicalizeSpoken(q) {
   const s = String(q || "").replace(/\s/g, "");
   if (!s) return null;
+  // ★ v41: 학습된 별칭을 먼저 참조 (사용자가 승인 저장한 발음/줄임말)
+  const learned = getLearnedAliases();
+  if (learned[s]) return learned[s];
+  for (const k in learned) {
+    if (k && (s === k || s.includes(k) || ((typeof simJamo === "function") && simJamo(s, k) >= 0.85))) return learned[k];
+  }
   for (const canon in PRODUCT_ALIASES) {
     if (PRODUCT_ALIASES[canon].some((a) => s === a || s.includes(a) || ((typeof simJamo === "function") && simJamo(s, a) >= 0.82))) return canon;
   }
   return null;
+}
+// ★ v46: 내장 자가진단 — 핵심 음성/주문 엔진을 합성 입력으로 점검. 실제 데이터는 건드리지 않음(순수 함수만 호출).
+//  기능이 늘어도 서로 깨지지 않았는지 배포 전에 앱 안에서 바로 확인할 수 있게 함.
+function runSelfTests() {
+  const cases = [];
+  const T = (name, fn, expect) => {
+    try {
+      const got = fn();
+      const ok = (typeof expect === "function") ? !!expect(got) : (got === expect);
+      cases.push({ name, ok, got: (got && typeof got === "object") ? JSON.stringify(got).slice(0, 60) : String(got) });
+    } catch (e) { cases.push({ name, ok: false, got: "오류: " + ((e && e.message) || e) }); }
+  };
+  const P = [{ id: "p1", name: "채소2kg" }, { id: "p2", name: "로메인 2kg" }, { id: "p3", name: "카이피라 1kg" }];
+  const C = [{ id: "c1", name: "대솔수곡점" }]; const V = [];
+  const ctx = { products: P, customers: C, vendors: V };
+  const lpv = (s) => (typeof localParseVoiceCommand === "function") ? localParseVoiceCommand(s, ctx).action : "N/A";
+  T("발음보정 산체수→채소", () => { const r = fuzzyProductMatch("산체수", P, 0.55); return r && r.name; }, "채소2kg");
+  T("발음보정 가피라→카이피라", () => { const r = fuzzyProductMatch("가피라", P, 0.55); return r && r.name; }, "카이피라 1kg");
+  T("별칭 canonicalize 산체수→채소", () => canonicalizeSpoken("산체수"), "채소");
+  T("박스분할 채소2kg×4→2박스", () => splitIntoBoxes([{ productId: "p1", name: "채소2kg", qty: 4 }], {}).length, 2);
+  T("따로따로 4낱개→4박스", () => buildBoxItems([{ name: "채소2kg", qty: 4 }], { mode: "each" }).length, 4);
+  T("전부 한 박스→1박스", () => buildBoxItems([{ name: "채소2kg", qty: 4 }], { mode: "all" }).length, 1);
+  T("학습명령 파싱", () => { const r = parseTeachAlias("'청겨'를 '청겨자'로 기억해"); return r && (r.from + ">" + r.to); }, "청겨>청겨자");
+  T("학습 오탐방지(일반주문)", () => parseTeachAlias("채소 2개 주문해줘"), (g) => g === null);
+  T("지난주문 찾기", () => lastOrderForName("대솔수곡점", [{ customerId: "c1", recipient: { name: "대솔수곡점" }, items: [{ name: "채소2kg", qty: 1 }], createdAt: "2026-07-05" }], C).items.length, 1);
+  T("상품추출 로메인2개", () => { const it = extractItems("로메인 2개", P, []); return it.length === 1 && it[0].productId; }, "p2");
+  T("중량일치 채소 2kg 2개→등록품 연결", () => { const it = extractItems("채소 2kg 2개", P, []); return it.length === 1 && it[0].productId === "p1" && it[0].qty === 2; }, (g) => g === true);
+  T("중량불일치 채소 5kg→커스텀 유지", () => { const it = extractItems("채소 5kg 1개", P, []); return it.length === 1 && it[0].productId === null; }, (g) => g === true);
+  T("업체전환: 공용상품 업체단가 적용", () => {
+    const pm = { p1: { id: "p1", name: "채소2kg", price: 5000, wholesalePrice: 4000, channel: "both" }, cst: undefined };
+    const items = [{ productId: "p1", name: "채소2kg", qty: 2, price: 5000 }, { productId: null, name: "직접상품", qty: 1, price: 3000 }];
+    const r = repriceItemsForBusiness(items, pm);
+    return r[0].price === 4000 && r[1].price === 3000;   // 등록품→업체단가, 커스텀→그대로
+  }, (g) => g === true);
+  T("업체전환: 업체단가 없으면 일반가 유지", () => {
+    const pm = { p9: { id: "p9", name: "일반전용", price: 7000, wholesalePrice: "", channel: "retail" } };
+    return repriceItemsForBusiness([{ productId: "p9", qty: 1, price: 7000 }], pm)[0].price === 7000;
+  }, (g) => g === true);
+  T("중량필드: 이름 분리·합치기 왕복", () => {
+    const a = splitNameWeight("채소2kg"); const b = splitNameWeight("로메인 2kg"); const c = splitNameWeight("깻잎");
+    return a.base === "채소" && a.weight === "2kg"
+      && b.base === "로메인" && b.weight === "2kg"
+      && c.base === "깻잎" && c.weight === ""
+      && composeNameWeight("채소", "2kg") === "채소 2kg"
+      && composeNameWeight("깻잎", "") === "깻잎";
+  }, (g) => g === true);
+  T("중량필드: 합친 이름이 등록품과 매칭", () => {
+    const nm = composeNameWeight("채소", "2kg");
+    const prods = [{ id: "px", name: nm }];
+    const it = extractItems("채소 2kg 2개", prods, []);
+    return it.length === 1 && it[0].productId === "px" && it[0].qty === 2;
+  }, (g) => g === true);
+  T("음성: 주문 수정→EDIT_ORDER", () => lpv("대솔수곡점 주문 수정"), "EDIT_ORDER");
+  T("음성: 채소 빼줘→REMOVE", () => lpv("채소 빼줘"), "REMOVE_FROM_ORDER");
+  T("음성: 되돌려→UNDO", () => lpv("되돌려"), "UNDO_LAST");
+  T("음성: 한 박스로 묶어→REBUNDLE", () => lpv("한 박스로 묶어"), "REBUNDLE_ONE");
+  T("음성: 주문 목록→NAVIGATE", () => lpv("주문 목록 보여줘"), "NAVIGATE");
+  T("Planner: '오늘 뭐부터' 질문감지", () => isDailyPlanQuestion("오늘 뭐부터 하지"), (g) => g === true);
+  T("Planner: 우선순위 브리핑", () => { const p = buildDailyPlan([{ status: "ready", reserveDate: "2026-07-11" }, { status: "waiting" }], [], "2026-07-11"); return p.includes("예약 발송") && p.includes("입금 대기"); }, (g) => g === true);
+  T("Memory: 학습→조회→삭제", () => {
+    const k = "__selftest_alias__"; learnAlias(k, "테스트상품");
+    const added = getLearnedAliases()[k] === "테스트상품";
+    const removed = removeLearnedAlias(k) && getLearnedAliases()[k] === undefined;
+    return added && removed;
+  }, (g) => g === true);
+  const passed = cases.filter((c) => c.ok).length;
+  return { passed, failed: cases.length - passed, total: cases.length, cases };
 }
 function fuzzyProductMatch(spoken, products, minScore) {
   const q = String(spoken || "").replace(/\s/g, "").trim();
@@ -1762,6 +1910,24 @@ function findOrdersForBundle(spokenName, orders) {
     return nm === q || nm.includes(q) || q.includes(nm) || ((typeof simJamo === "function") && simJamo(q, nm) >= 0.7);
   });
 }
+// ★ v40: 이름으로 그 고객/업체의 '가장 최근' 주문 1건 (발송완료 포함). 고객 기억용. 없으면 null.
+function lastOrderForName(name, orders, customers) {
+  const q = String(name || "").replace(/\s/g, "").trim();
+  if (!q) return null;
+  const cust = (customers || []).find((c) => c && c.name && c.name.replace(/\s/g, "") === q);
+  const match = (o) => {
+    if (!o) return false;
+    const nm = orderRecipientName(o).replace(/\s/g, "");
+    if (nm && (nm === q || nm.includes(q) || q.includes(nm))) return true;
+    if (cust && o.customerId === cust.id) return true;
+    return false;
+  };
+  const cand = (orders || []).filter(match);
+  if (!cand.length) return null;
+  // createdAt(있으면) → orderDate 순으로 최신 우선
+  cand.sort((a, b) => String(a.createdAt || a.orderDate || "").localeCompare(String(b.createdAt || b.orderDate || "")));
+  return cand[cand.length - 1];
+}
 function orderHasAnyProduct(o, productNames) {
   const items = (o && o.items) || [];
   const wanted = (productNames || []).map((n) => n.replace(/\s/g, "")).filter(Boolean);
@@ -1776,6 +1942,52 @@ function dissolveLoneBundles(list) {
   const cnt = {};
   (list || []).forEach((o) => { if (o && o.bundleId) cnt[o.bundleId] = (cnt[o.bundleId] || 0) + 1; });
   return (list || []).map((o) => (o && o.bundleId && cnt[o.bundleId] < 2) ? { ...o, isBundle: false, bundleId: "" } : o);
+}
+
+// ★ v47: AI Planner — "오늘 뭐부터 하지?" 같은 질문 감지
+function isDailyPlanQuestion(text) {
+  const t = (text || "").replace(/\s/g, "");
+  return /(오늘|지금).*(뭐부터|뭐해|뭐할|뭐하지|할일|할것|우선순위|우선|먼저|급한|정리|브리핑|업무)/.test(t)
+    || /(뭐부터해|뭐부터하지|뭐부터할까|오늘할일|오늘뭐해|오늘뭐하지|할일알려|업무브리핑|오늘업무|오늘일정)/.test(t);
+}
+// ★ v47: 오늘 업무 우선순위 브리핑 생성 (읽기 전용 — 데이터 변경 없음). 항상 문자열 반환.
+function buildDailyPlan(orders, subscriptions, todayISO) {
+  const ords = orders || [];
+  const isShipped = (o) => o.status === "shipped";
+  const unshipped = ords.filter((o) => !isShipped(o));
+  const todayReserve = unshipped.filter((o) => (o.reserveDate || "") === todayISO);
+  const ready = ords.filter((o) => o.status === "ready");
+  const noInvoice = unshipped.filter((o) => !(o.invoiceNo && String(o.invoiceNo).trim()));
+  const waiting = ords.filter((o) => o.status === "waiting");
+  const pending = ords.filter((o) => o.status === "pending");
+  const todayNew = ords.filter((o) => (o.orderDate || o.createdAt || "").startsWith(todayISO)).length;
+  const subsDue = (subscriptions || []).filter((s) => s && (s.nextDate || "") === todayISO).length;
+
+  const tasks = [];
+  if (todayReserve.length) tasks.push(`오늘 예약 발송이 ${todayReserve.length}건 있어요`);
+  if (subsDue) tasks.push(`오늘 나갈 정기배송이 ${subsDue}건이에요`);
+  if (ready.length) tasks.push(`발송 준비된 주문이 ${ready.length}건이라 송장 넣고 보내시면 돼요`);
+  if (noInvoice.length) tasks.push(`송장 아직 안 넣은 주문이 ${noInvoice.length}건이에요`);
+  if (waiting.length) tasks.push(`입금 대기 ${waiting.length}건 확인이 필요해요`);
+  if (pending.length) tasks.push(`결제완료됐지만 아직 발송 안 한 주문이 ${pending.length}건이에요`);
+
+  if (!tasks.length) {
+    return todayNew ? `오늘 급한 발송·송장 일은 없어요. 오늘 새로 들어온 주문은 ${todayNew}건이에요.`
+                    : "오늘은 발송·송장·입금 관련 급한 일이 없어요. 여유 있게 보셔도 되겠어요.";
+  }
+  const ordinals = ["첫째", "둘째", "셋째", "넷째", "다섯째", "여섯째"];
+  const body = tasks.map((tk, i) => `${ordinals[i] || (i + 1) + "번째"}, ${tk}`).join(". ");
+  const tail = todayNew ? ` 참고로 오늘 새 주문은 ${todayNew}건이에요.` : "";
+  return `오늘 우선순위를 정리해 드릴게요. ${body}.${tail}`;
+}
+
+// ★ v52: 업체 주문용 단가 재계산 — 등록 상품은 업체단가(없으면 일반가격), 커스텀 상품은 그대로.
+//  '공용 상품이 거래명세서에서 일반가격으로 새는' 문제를 막기 위해 업체 전환 시 사용.
+function repriceItemsForBusiness(items, productMap) {
+  return (items || []).map((it) => {
+    const p = productMap && productMap[it.productId];
+    return p ? { ...it, price: (p.wholesalePrice || p.price || 0) } : it;
+  });
 }
 
 /* ===== 앱 전체 데이터 기반 질문 답변 (상품가격·재고·송장추적·정기배송·연락처·발송상태) =====
@@ -2081,6 +2293,1520 @@ null       : 이동 불필요한 일반 대화
   return { text: stripped || '다시 말씀해 주세요.', action: null };
 }
 
+// ── 조비서: 플로팅 버튼 + 논모달 바텀시트 대화창 ────────────────────────────
+// Gemini 설계 기준: 하단 슬라이드업 / 논모달 / 핸즈프리 / 앱 방해 안 함
+
+// ── Gemini Live 스타일 음성 대화 UI (핸즈프리, 버튼 없음) ────────────────────
+function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onClose, onAppCommand, subscriptions }) {
+  // 단일 phase 상태: idle | listening | thinking | speaking
+  const [phase, setPhase]           = React.useState('idle');
+  const [interim, setInterim]       = React.useState('');
+  const [lastUser, setLastUser]     = React.useState('');
+  const [lastAI,   setLastAI]       = React.useState('안녕하세요! 저는 조비서예요. 궁금한 것을 말씀해 보세요.');
+  const [history,  setHistory]      = React.useState([]);
+  const [retryCountdown, setRetryCountdown] = React.useState(0);
+  const [sheetH, setSheetH]         = React.useState('42vh');
+  const [textMode, setTextMode]     = React.useState(false);
+  const [inp, setInp]               = React.useState('');
+  const [minimized, setMinimized]   = React.useState(true);   // ★ 기본: 미니 바 모드
+  const [autoListen, setAutoListen] = React.useState(false);  // ★ v26: 기본 '눌러서 말하기'(상시 대기 끔) — 배경 마이크 소음 방지
+
+  const phaseRef        = React.useRef('idle');   // 동기 phase 추적
+  const recRef          = React.useRef(null);
+  const ttsTimerRef     = React.useRef(null);
+  const silenceTimerRef = React.useRef(null);
+  const countdownRef    = React.useRef(null);
+  const historyRef      = React.useRef([]);       // stale closure 방지
+  const activeRef       = React.useRef(false);    // 시트 열림 여부
+  const dragStartY      = React.useRef(null);
+  const dragStartH      = React.useRef(null);
+  const processingRef   = React.useRef(false);  // ★ BUG2 Fix: 훅 규칙 준수 - 최상단
+  const recIdRef        = React.useRef(0);       // ★ v6 Fix: stale rec 콜백 차단용 ID
+  const orderModeRef    = React.useRef(false);   // ★ v14: 음성 주문 대화 진행 중 여부
+  const orderDraftRef   = React.useRef(null);    // ★ v14: 작성 중인 주문 초안
+  const audioStreamRef  = React.useRef(null);    // ★ v19: 소음억제 오디오 스트림
+  const nsDisabledRef   = React.useRef(false);   // ★ v19: 충돌 시 소음억제 비활성
+  const autoListenRef   = React.useRef(false);   // ★ v26: 자동 듣기 여부(동기) — 기본 끔
+  const silenceCountRef = React.useRef(0);       // ★ v25: 연속 무음 횟수(시끄러운 곳 삐릭 방지)
+  const accumBufRef     = React.useRef('');      // ★ v23: 발화 누적 버퍼(끝까지 듣기)
+  const accumTimerRef   = React.useRef(null);    // ★ v23: 누적 종료(침묵) 타이머
+  const speakTextRef    = React.useRef('');      // ★ v23: TTS로 말하는 중인 문장(에코 판별용)
+  const bargeRecRef     = React.useRef(null);    // ★ v23: 말하는 중 끼어들기 감지 인식기
+
+  // 동기적으로 phase 변경 (렌더 지연 없음)
+  function setPhaseSync(p) {
+    phaseRef.current = p;
+    setPhase(p);
+  }
+
+  // ★ v25: 자동듣기 상태를 ref에 동기화 (비동기 렌더 지연 없이 즉시 반영)
+  React.useEffect(() => { autoListenRef.current = autoListen; }, [autoListen]);
+  // 자동듣기 켜기/끄기 토글
+  function toggleAutoListen() {
+    const next = !autoListenRef.current;
+    autoListenRef.current = next;
+    setAutoListen(next);
+    silenceCountRef.current = 0;
+    if (next) {
+      // 다시 자동으로: 지금 대기 중이면 듣기 시작
+      if (activeRef.current && phaseRef.current === 'idle') setTimeout(() => beginListening(), 150);
+    } else {
+      // 눌러 말하기: 지금 듣던 것 멈추고 대기
+      stopRec(); stopBargeIn();
+      clearTimeout(accumTimerRef.current);
+      setPhaseSync('idle');
+    }
+  }
+
+  // ★ v20: 소음 억제 — 권한·오디오모드만 확보하고 마이크는 즉시 놓아줌
+  //  (v19에서 마이크를 붙잡아 인식이 안 되던 문제 수정. 이제 인식과 충돌 없음)
+  async function primeNoiseSuppression() {
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+      const s = await navigator.mediaDevices.getUserMedia({
+        audio: { noiseSuppression: true, echoCancellation: true, autoGainControl: true },
+      });
+      // 즉시 트랙 정지 → SpeechRecognition가 마이크를 온전히 쓸 수 있음
+      s.getTracks().forEach(t => t.stop());
+    } catch (e) { /* 권한 거부·미지원 — 무시, 인식 정상 동작 */ }
+  }
+  function stopNoiseSuppression() {
+    try { if (audioStreamRef.current) audioStreamRef.current.getTracks().forEach(t => t.stop()); } catch (e) {}
+    audioStreamRef.current = null;
+  }
+
+  // 마운트 시 자동 시작
+  React.useEffect(() => {
+    activeRef.current = true;
+    // ★ v28: 조비서 팝업이 열리는 순간(마운트) 자동으로 음성 인식 시작 — 마이크를 다시 누를 필요 없음.
+    //  (배경 상시대기 웨이크워드는 꺼둔 상태라 팝업 닫혀 있을 땐 마이크가 켜지지 않음 → '디릭디릭' 재발 없음)
+    let t;
+    primeNoiseSuppression().finally(() => {
+      t = setTimeout(() => { if (activeRef.current) beginListening(); }, 400);
+    });
+    return () => {
+      activeRef.current = false;
+      clearTimeout(t);
+      stopRec();
+      stopBargeIn();                       // ★ v23: 끼어들기 감지기 정리
+      clearTimeout(accumTimerRef.current);  // ★ v23: 누적 타이머 정리
+      accumBufRef.current = '';
+      stopNoiseSuppression();
+      window.speechSynthesis && window.speechSynthesis.cancel();
+      clearTimeout(ttsTimerRef.current);
+      clearTimeout(silenceTimerRef.current);
+      clearInterval(countdownRef.current);
+    };
+  }, []);
+
+  // ★ v8: 삼성 prefix-cascade 반복 제거 (node 9케이스 검증 완료)
+  //  "주문 주문 창 주문 창 열어 주문 창 열어 줘" → "주문 창 열어 줘"
+  function dedupCascade(s) {
+    if (!s) return '';
+    let t = s.replace(/\s+/g, ' ').trim();
+    // 1) 연속 중복 단어 제거: "오늘 오늘 오늘" → "오늘"
+    t = t.replace(/(\S+)(?:\s+\1)+/g, '$1');
+    const toks = t.split(' ');
+    if (toks.length < 2) return t;
+    // 2) prefix-cascade 제거: 첫 단어 반복 시 가장 긴(완전한) 구간 선택
+    const first = toks[0];
+    const idxs = [];
+    for (let i = 0; i < toks.length; i++) if (toks[i] === first) idxs.push(i);
+    if (idxs.length >= 2) {
+      let best = '';
+      for (let k = 0; k < idxs.length; k++) {
+        const end = (k+1 < idxs.length) ? idxs[k+1] : toks.length;
+        const seg = toks.slice(idxs[k], end).join(' ');
+        if (seg.length > best.length) best = seg;
+      }
+      return best;
+    }
+    return t;
+  }
+
+  // ★ v17: 인식 후보 점수 — 등록된 이름·상품·명령어에 잘 맞을수록 높음
+  function scoreTranscript(txt) {
+    const t = (txt || '').replace(/\s/g, '');
+    if (!t) return -1;
+    let score = 0;
+    const names = [];
+    (customers || []).forEach(c => { if (c && c.name) names.push(String(c.name).trim()); });
+    (vendors || []).forEach(v => { if (v && v.name) names.push(String(v.name).trim()); });
+    // 정확히 포함된 이름(+4)을 유사매칭(+3)보다 우선 → 깨끗한 후보 선택
+    const hasExactName = names.some(n => n.length >= 2 && t.includes(n.replace(/\s/g, '')));
+    if (hasExactName) score += 4;
+    else if (matchName(txt, names)) score += 3;
+    (products || []).forEach(p => { if (p && p.name && t.includes(p.name.replace(/\s/g, ''))) score += 2; });
+    if (/주문|발송|고객|업체|배송|상품|등록|보여|알려|오늘|미발송|목록|정보|접수|취소|검색/.test(t)) score += 1;
+    return score;
+  }
+  // ★ v17: 여러 인식 후보 중 앱 데이터에 가장 잘 맞는 것 선택 (오인식 보정)
+  function pickBestTranscript(primary, alts) {
+    if (!alts || alts.length <= 1) return primary;
+    let best = primary, bestScore = scoreTranscript(primary);
+    for (const a of alts) {
+      const s = scoreTranscript(a);
+      if (s > bestScore) { bestScore = s; best = dedupCascade(a); }
+    }
+    return best;
+  }
+
+  // ★ v23: 끝까지 듣기 — 한 번에 다 못 말해도 끊지 않고 잠깐 더 기다렸다가 합쳐서 처리
+  //  (주문 대화 중에만 적용 — 조회·이동은 바로 반응)
+  const ACCUM_MS = 1600;  // 이 시간(ms)만큼 침묵하면 그때 말 끝난 것으로 보고 처리
+  function isTerminalUtterance(s) {
+    const t = (s || '').replace(/\s/g, '');
+    if (/등록|저장|확정|취소|그만|관둬|관두|됐어|됐다|처음부터|다시주문|리셋/.test(t)) return true;
+    if (/^(응|네|예|그래|맞아|맞아요|맞습니다|좋아|오케이|오케|아니|아니요|아니야)$/.test(t)) return true;
+    return false;
+  }
+  function collectSpeech(text) {
+    accumBufRef.current = (accumBufRef.current ? accumBufRef.current + ' ' : '') + text;
+    const buf = accumBufRef.current.trim();
+    setInterim(buf);
+    // 확실한 종료 명령(등록/취소/응/아니 등)은 기다리지 않고 즉시 처리
+    if (isTerminalUtterance(text)) { flushCollected(); return; }
+    // 더 말할 수 있게 잠깐 더 듣기 — 침묵이 이어지면 타이머가 마무리
+    clearTimeout(accumTimerRef.current);
+    accumTimerRef.current = setTimeout(() => { flushCollected(); }, ACCUM_MS);
+    setPhaseSync('listening');
+    setTimeout(() => { if (activeRef.current && phaseRef.current === 'listening') beginListening(); }, 100);
+  }
+  function flushCollected() {
+    clearTimeout(accumTimerRef.current);
+    const full = (accumBufRef.current || '').trim();
+    accumBufRef.current = '';
+    stopRec();   // 마무리 — 열려있던 듣기 세션 정리
+    if (full) processUserSpeech(full);
+    else if (activeRef.current && phaseRef.current === 'listening') beginListening();
+  }
+  // 인식된 발화 라우팅 — 주문 대화 중이면 끝까지 듣기(누적), 그 외엔 즉시 처리
+  function routeCapturedSpeech(text) {
+    if (orderModeRef.current) collectSpeech(text);
+    else processUserSpeech(text);
+  }
+
+  // ★ v23: 끼어들기(barge-in) — AI가 말하는 도중 사용자가 말하면 TTS를 멈추고 바로 듣기
+  function isEchoOfSpoken(heard, spoken) {
+    const h = (heard || '').replace(/\s/g, '');
+    const s = (spoken || '').replace(/\s/g, '');
+    if (!h) return true;
+    if (!s) return false;
+    if (s.includes(h)) return true;         // 방금 말한 문장에 그대로 들어있으면 에코
+    let hit = 0; for (const ch of h) if (s.includes(ch)) hit++;
+    return hit / h.length > 0.7;            // 대부분 겹치면 에코로 간주
+  }
+  function startBargeIn() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR || !activeRef.current) return;
+    if (!autoListenRef.current) return;   // ★ v25: 눌러 말하기 모드에선 말하는 중 마이크 안 켬(소음 방지)
+    stopBargeIn();
+    try {
+      const rec = new SR();
+      rec.lang = 'ko-KR'; rec.continuous = false; rec.interimResults = true; rec.maxAlternatives = 1;
+      let fired = false;
+      rec.onresult = (e) => {
+        if (fired || bargeRecRef.current !== rec) return;
+        let txt = '';
+        for (let i = 0; i < e.results.length; i++) txt += e.results[i][0].transcript;
+        txt = txt.trim();
+        if ((txt.match(/[가-힣A-Za-z]/g) || []).length < 2) return;   // 잡음 무시
+        if (isEchoOfSpoken(txt, speakTextRef.current)) return;          // 내 TTS 에코 무시
+        fired = true;
+        // 사용자가 끼어듦 → TTS 즉시 중단하고 정식 듣기로 전환(이어 말하면 누적됨)
+        try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (_) {}
+        stopBargeIn();
+        clearTimeout(ttsTimerRef.current);
+        setPhaseSync('idle');
+        setTimeout(() => { if (activeRef.current) beginListening(); }, 60);
+      };
+      rec.onerror = () => {};
+      rec.onend = () => {};
+      bargeRecRef.current = rec;
+      rec.start();
+    } catch (e) { bargeRecRef.current = null; }
+  }
+  function stopBargeIn() {
+    const r = bargeRecRef.current; bargeRecRef.current = null;
+    if (r) { try { r.abort(); } catch (e) {} try { r.stop(); } catch (e) {} }
+  }
+
+  // ★ v8: continuous=false — 한 발화당 한 세션 (삼성 브라우저 안정)
+  //  삼성은 continuous=true에서 중간결과를 각각 final로 발생 → 반복 원인
+  //  false로 하면 한 발화 끝에 깨끗한 결과 1개만 나옴
+  function beginListening() {
+    if (!activeRef.current) return;
+    if (phaseRef.current === 'thinking' || phaseRef.current === 'speaking') return;
+    clearInterval(countdownRef.current);
+    setRetryCountdown(0);
+    stopBargeIn();     // ★ v23: 정식 듣기 시작 전 끼어들기 감지기 정리(중복 마이크 방지)
+    stopRec();
+    setPhaseSync('listening');
+    setInterim('');
+
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      setLastAI('Chrome/삼성인터넷 브라우저에서 사용해주세요.');
+      return;
+    }
+    const rec = new SR();
+    rec.lang = 'ko-KR';
+    rec.continuous = false;      // ★ v8: 삼성 안정 — 반복 원천 차단
+    rec.interimResults = true;   // 실시간 표시용
+    rec.maxAlternatives = 5;     // ★ v17: 후보 여러 개 → 앱 데이터에 맞는 것 선택
+
+    const myId = ++recIdRef.current;
+    const isStale = () => recIdRef.current !== myId;
+
+    let finalText = '';
+    let finalAlts = [];   // ★ v17: 마지막 확정 결과의 인식 후보들
+
+    rec.onresult = (e) => {
+      if (isStale()) return;
+      // ★ v8: 매번 e.results 전체를 새로 조립 (누적 금지 = 반복 차단)
+      let finals = '';
+      let interim = '';
+      for (let i = 0; i < e.results.length; i++) {
+        if (e.results[i].isFinal) {
+          finals += e.results[i][0].transcript + ' ';
+          // ★ v17: 이 확정 결과의 후보들 수집
+          const alts = [];
+          for (let j = 0; j < e.results[i].length; j++) alts.push(e.results[i][j].transcript);
+          finalAlts = alts;
+        } else {
+          interim += e.results[i][0].transcript;
+        }
+      }
+      finalText = dedupCascade(finals.trim());
+      const disp = dedupCascade((finals + interim).trim());
+      setInterim(disp);
+    };
+
+    rec.onerror = (e) => {
+      if (isStale() || !activeRef.current) return;
+      if (e.error === 'aborted' || e.error === 'not-allowed') return;
+      if (e.error === 'no-speech') return;  // onend가 처리
+      // ★ v19: 마이크 점유 충돌(audio-capture)이면 소음억제 스트림을 풀어 마이크 양보 후 재시작
+      if (e.error === 'audio-capture' && audioStreamRef.current) {
+        nsDisabledRef.current = true;
+        stopNoiseSuppression();
+        setTimeout(() => { if (!isStale() && activeRef.current && phaseRef.current === 'listening') beginListening(); }, 400);
+        return;
+      }
+      // network 등 — 조용히 대기 (자동 연속 재시작 안 함 = 피링 방지)
+    };
+
+    rec.onend = () => {
+      if (isStale() || !activeRef.current) return;
+      // 삼성: onend가 onresult보다 먼저 올 수 있어 120ms 대기
+      setTimeout(() => {
+        if (isStale() || !activeRef.current) return;
+        // ★ v17: 후보 중 앱 데이터에 가장 잘 맞는 것 선택 (오인식 보정)
+        const text = pickBestTranscript(dedupCascade(finalText.trim()), finalAlts);
+        finalText = ''; finalAlts = [];
+        if (text && phaseRef.current === 'listening') {
+          silenceCountRef.current = 0;   // ★ v25: 말이 들어오면 무음 카운터 초기화
+          routeCapturedSpeech(text);  // ★ v23: 주문 대화면 누적(끝까지 듣기), 아니면 즉시 처리
+        } else if (phaseRef.current === 'listening') {
+          // ★ v23: 주문 중 누적 버퍼에 내용이 있으면 아직 이어 말할 수 있으니 계속 듣기
+          //  (마무리는 collectSpeech가 건 침묵 타이머가 담당 — 사용자 말을 중간에 끊지 않음)
+          if (orderModeRef.current && (accumBufRef.current || '').trim()) {
+            setTimeout(() => {
+              if (!isStale() && activeRef.current && phaseRef.current === 'listening') beginListening();
+            }, 300);
+          } else {
+            // ★ v25: 시끄러운 곳 "디릭디릭" 방지 — 연속 무음이 쌓이면(또는 자동듣기 꺼짐)
+            //  자동 재시작을 멈추고 대기(idle)로. 사용자가 "다시 듣기"를 누르면 재개.
+            silenceCountRef.current += 1;
+            // ★ v33: 농장 소음 환경에서 대화가 조기에 끊기지 않도록 무음 제한치 완화
+            //  (주문 대화 중엔 더 오래 기다림). 자동대화 ON일 때만 재시작.
+            const limit = orderModeRef.current ? 12 : 7;
+            if (!autoListenRef.current || silenceCountRef.current >= limit) {
+              setPhaseSync('idle');
+            } else {
+              setTimeout(() => {
+                if (!isStale() && activeRef.current && phaseRef.current === 'listening') beginListening();
+              }, 800);
+            }
+          }
+        }
+      }, 120);
+    };
+
+    recRef.current = rec;
+    try {
+      rec.start();
+    } catch(e) {
+      recIdRef.current++;
+      setPhaseSync('idle');
+      // ★ v26: 시작 실패 시 자동 듣기일 때만 재시도. 눌러 말하기면 대기.
+      setTimeout(() => { if (activeRef.current && autoListenRef.current) beginListening(); }, 1000);
+    }
+  }
+
+  function stopRec() {
+    clearTimeout(silenceTimerRef.current);
+    recIdRef.current++;  // 현재 rec ID 무효화 → stale 콜백 즉시 차단
+    try { recRef.current && recRef.current.abort(); } catch(e) {}
+    try { recRef.current && recRef.current.stop(); } catch(e) {}
+    recRef.current = null;
+  }
+
+  // ★ v9: 화면 이동 의도 감지 확장 (node 23케이스 검증 완료)
+  //  정기배송을 배송보다 먼저 검사 — "정기배송관리"가 "배송관리"에 오분류 방지
+  function detectNavIntent(text) {
+    const t = (text||'').replace(/\s/g,'');
+    if (/새주문|주문입력|주문추가|주문등록|주문작성|주문넣|주문창|주문열|주문받|주문쓰/.test(t)) return 'goNew';
+    if (/주문목록|주문리스트|주문현황|주문보여|주문내역|주문확인|주문조회/.test(t)) return 'goOrders';
+    if (/고객관리|고객목록|고객리스트|고객보여|고객명단|고객조회|거래처/.test(t)) return 'goCustomers';
+    if (/상품관리|상품목록|상품보여|상품리스트|상품조회|상품등록/.test(t)) return 'goProducts';
+    if (/정기배송|구독관리|정기주문/.test(t)) return 'goSubscriptions';
+    if (/배송관리|배송현황|배송보여|배송추적|배송조회|택배/.test(t)) return 'goDelivery';
+    if (/홈화면|홈으로|대시보드|처음화면|메인화면|첫화면/.test(t)) return 'goHome';
+    return null;
+  }
+
+  // ★ v9: 이동 명령의 안내 문구 (AI 없이 직접 응답)
+  function navReply(action) {
+    const map = { goHome:'홈 화면', goOrders:'주문 목록', goNew:'주문 입력 화면',
+      goCustomers:'고객 관리', goProducts:'상품 관리', goDelivery:'배송 관리',
+      goSubscriptions:'정기배송 관리' };
+    return (map[action] || '해당 화면') + '으로 이동할게요';
+  }
+
+  // ★ v10: API 없이 로컬 데이터로 즉답 (할당량 초과에도 작동, node 20케이스 검증)
+  //  이름·복합조건 질문은 null 반환 → Gemini로 넘김
+  function quickStatAnswer(text, ctx) {
+    const t = (text||'').replace(/\s/g,'');
+    const asksCount = /몇|개수|건수|얼마나|얼만|수는|몇개|몇건|몇명/.test(t);
+    if (!asksCount) return null;
+    if (/누구|누가|언제|어디|무엇|뭐|중에|중에서|별로|이름/.test(t)) return null;
+    if (/입금대기/.test(t)) return `입금 대기는 ${ctx.pending}건이에요`;
+    if (/결제완료/.test(t)) return `결제 완료는 ${ctx.pendingPay}건이에요`;
+    if (/발송준비/.test(t)) return `발송 준비는 ${ctx.ready}건이에요`;
+    if (/발송완료|발송한/.test(t)) return `발송 완료는 ${ctx.shipped}건이에요`;
+    if (/(전체|총|모든)주문|주문(총|전체)/.test(t)) return `전체 주문은 ${ctx.total}건이에요`;
+    if (/오늘주문|오늘신규|오늘들어온|오늘받은|오늘.*주문.*몇/.test(t)) return `오늘 신규 주문은 ${ctx.today}건이에요`;
+    if (/고객수|고객몇|고객이몇|고객은몇|등록고객|총고객|전체고객|고객얼마|고객명수/.test(t)) return `등록된 고객은 ${ctx.customers}명이에요`;
+    if (/상품종류|상품몇|상품개수|상품수|취급상품|상품얼마/.test(t)) return `취급 상품은 ${ctx.products}개예요`;
+    return null;
+  }
+
+  // ★ v13: 자연어 데이터 조회 엔진 ─────────────────────────────
+  //  "조용택 주문 보여줘" / "오늘 발송건 리스트" / "오늘 미발송 있나요" 등을
+  //  실제 데이터에서 찾아 요약 설명 + 해당 화면(필터 적용)으로 이동
+  function statusKo(s) {
+    return { waiting:'입금대기', pending:'결제완료', ready:'발송준비', shipped:'발송완료' }[s] || s || '';
+  }
+  // 실제 데이터에 있는 이름만 매칭 (엉뚱한 이름 추측 방지). 긴 이름 우선.
+  //  ★ v15: 고객 + 업체(거래처) + 주문 받는분/주문자 모두 검색
+  function findKnownName(text) {
+    const names = new Set();
+    (customers || []).forEach(c => { if (c && c.name) names.add(String(c.name).trim()); });
+    (vendors || []).forEach(v => { if (v && v.name) names.add(String(v.name).trim()); });
+    (orders || []).forEach(o => {
+      if (o.recipient && o.recipient.name) names.add(String(o.recipient.name).trim());
+      if (o.sender && o.sender.name) names.add(String(o.sender.name).trim());
+    });
+    // ★ v16: 명령어 제거 + 유사발음 매칭 (STT 오인식·"주문하려고" 속 오매칭 방지)
+    return matchName(text, [...names]);
+  }
+  // ★ v15: 이름으로 고객/업체 연락처·주소 조회
+  function contactFor(name) {
+    const c = (customers || []).find(x => x && x.name === name);
+    if (c) return { phone: c.phone || '', address: c.address || '', kind: '고객' };
+    const v = (vendors || []).find(x => x && x.name === name);
+    if (v) return { phone: v.phone || '', address: v.address || '', kind: '업체' };
+    return null;
+  }
+  function jarvisToday() {
+    const d = new Date(), p = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  }
+  // 화면 필터 설정 도우미 (setter 없을 때도 안전)
+  function applyOrderView({ search = '', status = 'all', date = 'all' }) {
+    if (setSearchQuery)  setSearchQuery(search);
+    if (setStatusFilter) setStatusFilter(status);
+    if (setDateFilter)   setDateFilter(date);
+    setTab('orders');
+    setMinimized(true);
+  }
+  // 데이터 조회 실행 → 말할 요약 문자열 반환, 해당 없으면 null
+  function runDataQuery(text) {
+    const t = (text || '').replace(/\s/g, '');
+    const ords = orders || [];
+    const today = jarvisToday();
+
+    // A) 고객/업체/이름 조회: "조용택 주문 보여줘", "하레하레 정보", "대솔 연락처"
+    const name = findKnownName(text);
+    if (name && /주문|정보|내역|보여|알려|조회|현황|건|어때|얼마|샀|시켰|배송|어디|연락처|전화|번호|주소/.test(t)) {
+      const matched = ords.filter(o =>
+        (o.recipient && o.recipient.name === name) || (o.sender && o.sender.name === name));
+      const contact = contactFor(name);
+      applyOrderView({ search: name, status: 'all', date: 'all' });
+      if (matched.length === 0) {
+        if (contact) {
+          const bits = [];
+          if (contact.phone) bits.push(`연락처는 ${contact.phone}`);
+          if (contact.address) bits.push(`주소는 ${String(contact.address).slice(0, 25)}`);
+          const who = contact.kind === '업체' ? `${name} 업체` : `${name} 님`;
+          return `${who} 정보예요. ${bits.length ? bits.join(', ') + '. ' : '등록된 연락처가 없어요. '}아직 주문 내역은 없어요.`;
+        }
+        return `${name} 님 이름으로 된 주문은 아직 없어요.`;
+      }
+      const byStatus = {};
+      matched.forEach(o => { byStatus[o.status] = (byStatus[o.status] || 0) + 1; });
+      const parts = Object.keys(byStatus).map(s => `${statusKo(s)} ${byStatus[s]}건`).join(', ');
+      const recent = matched.slice().sort((a, b) => String(b.orderDate || '').localeCompare(String(a.orderDate || '')))[0];
+      const addr = (recent.recipient && recent.recipient.address) ? `, 주소는 ${String(recent.recipient.address).slice(0, 20)}` : '';
+      return `${name} 님 주문은 모두 ${matched.length}건이에요. ${parts}. 가장 최근 주문은 ${recent.orderDate || ''}, ${statusKo(recent.status)} 상태${addr}예요. 화면에 목록을 띄웠어요.`;
+    }
+
+    // 미발송(부정) 여부 먼저 판정 — "발송 안 한/못 한/미발송" 등
+    const isUnshippedAsk = /미발송|안발송/.test(t)
+      || (/발송|보내/.test(t) && /안한|안했|못한|못했|안보|못보|아직/.test(t));
+
+    // B) 오늘 발송건: "오늘 발송건 리스트 보여줘", "오늘 발송한 거"
+    if (!isUnshippedAsk
+        && (/(오늘|금일).*발송|오늘발송/.test(t) || /발송.*(리스트|목록|현황|보여|내역)/.test(t))) {
+      const shippedToday = ords.filter(o => o.status === 'shipped' && String(o.shippedAt || '').slice(0, 10) === today);
+      applyOrderView({ search: '', status: 'shipped', date: 'all' });
+      if (shippedToday.length === 0) return `오늘 발송한 주문은 아직 없어요. 발송완료 목록을 화면에 띄웠어요.`;
+      const nm = shippedToday.slice(0, 5).map(o => (o.recipient && o.recipient.name) || '').filter(Boolean).join(', ');
+      return `오늘 발송한 주문은 ${shippedToday.length}건이에요.${nm ? ' ' + nm + ' 님 것을 보냈어요.' : ''} 발송완료 목록을 화면에 띄웠어요.`;
+    }
+
+    // C) 미발송건: "오늘 미발송건 있나요", "아직 안 보낸 거", "발송 안 한 거"
+    if (isUnshippedAsk) {
+      const unshipped = ords.filter(o => o.status !== 'shipped');
+      const c = { waiting: 0, pending: 0, ready: 0 };
+      unshipped.forEach(o => { if (c[o.status] !== undefined) c[o.status]++; });
+      applyOrderView({ search: '', status: c.ready > 0 ? 'ready' : 'all', date: 'all' });
+      if (unshipped.length === 0) return `아직 발송 안 한 주문은 없어요. 다 보내셨네요.`;
+      return `아직 발송 안 한 주문은 모두 ${unshipped.length}건이에요. 입금대기 ${c.waiting}건, 결제완료 ${c.pending}건, 발송준비 ${c.ready}건이에요. 화면에 띄웠어요.`;
+    }
+
+    return null;
+  }
+
+  // ★ v14/v15: 음성 주문 시작 의도 감지
+  //  (1) 등록/접수/받아 등 명시 동사, 또는
+  //  (2) 알려진 고객·업체 이름 + "주문" + 조회동사 없음 → "하레하레 베이커리 주문" 등
+  function detectVoiceOrderIntent(text) {
+    const t = (text || '').replace(/\s/g, '');
+    // ★ v18: 명시 동사(주문하려/할게/해줘 포함) → 이름 매칭 없어도 주문 시작 (AI가 이름 해석)
+    if (/주문(을|를)?(등록|접수|받아|받을|받자|작성|넣어|만들|하려|할게|하자|해줘|하겠|넣을)|음성주문|음성으로주문|주문받아줘|주문접수/.test(t)) return true;
+    // "주문"이 있고 조회/목록/화면/수정 요청이 아니면 주문 시작 (AI가 이름·상품 해석)
+    // ★ v38: 수정·편집·삭제·묶음 요청은 새 주문이 아니라 '기존 주문 편집'이므로 여기서 제외
+    if (/주문/.test(t)
+        && !/보여|알려|정보|조회|내역|현황|몇|건|어디|얼마|상태|목록|리스트|검색|취소|화면|열어|폼|입력창|수정|고쳐|고칠|고치|바꿔|바꾸|변경|편집|삭제|빼|묶음|박스/.test(t)) return true;
+    // ★ v40: "저번처럼/지난번처럼"에 등록된 고객·업체 이름이 함께 있으면 주문 시작 (고객 기억 주문)
+    if (/저번처럼|지난번처럼|늘하던|평소처럼|하던대로/.test(t) && findKnownNameIn(text, customers, vendors, products)) return true;
+    return false;
+  }
+
+  // ★ v18: 이름→고객/업체, 상품명→상품ID 연결 (무게 붙은 이름도 처리)
+  function resolveOrderLinks(d) {
+    const draft = { ...d, items: (d.items || []).map(it => ({ ...it })) };
+    if (draft.name) {
+      const vNames = (vendors || []).map(v => v.name).filter(Boolean);
+      const cNames = (customers || []).map(c => c.name).filter(Boolean);
+      const vHit = matchName(draft.name, vNames);
+      const cHit = vHit ? null : matchName(draft.name, cNames);
+      if (vHit) { const v = (vendors || []).find(x => x.name === vHit); if (v) { draft.name = v.name; draft.vendorId = v.id; draft.customerId = null; if (v.phone) draft.phone = v.phone; if (v.address) draft.address = v.address; } }
+      else if (cHit) { const c = (customers || []).find(x => x.name === cHit); if (c) { draft.name = c.name; draft.customerId = c.id; if (c.phone) draft.phone = c.phone; if (c.address) draft.address = c.address; } }
+    }
+    for (const it of draft.items) {
+      if (it.productId) continue;
+      const base = String(it.name || '').replace(/\s+/g, '').trim();
+      // 1) 정확 포함: 등록 상품명(공백무시)이 이 항목에 들어있으면 연결 (예: "채소 2kg"→등록품 "채소2kg")
+      let prod = (products || []).find(pp => pp.name && base && base.includes(pp.name.replace(/\s/g, '')));
+      // 2) 퍼지·별칭: 그래도 없으면 가장 비슷한 등록 상품 (예: "채소 2키로"→"채소2kg", "가피라"→"카이피라")
+      if (!prod && typeof fuzzyProductMatch === 'function') prod = fuzzyProductMatch(it.name || '', products, 0.62);
+      // ★ #3: 대화 상품명을 '상품 창에 등록된 상품'으로 통일 (무게가 있어도 등록품이면 연결).
+      //  등록에 없는 상품(예: 미등록 특판)만 말한 그대로 커스텀 유지.
+      if (prod) { it.productId = prod.id; it.name = prod.name; }
+    }
+    return draft;
+  }
+  function orderReadback(d) {
+    const parts = [];
+    if (d.name) parts.push(`${d.name} 님`);
+    if (d.items && d.items.length) parts.push(d.items.map(i => `${i.name} ${i.qty}개`).join(', '));
+    if (d.reserveDate) parts.push(`발송 ${d.reserveDate}`);
+    if (d.deliveryMessage) parts.push(`메시지 ${d.deliveryMessage}`);
+    return parts.join(', ');
+  }
+  function orderNextPrompt(d) {
+    if (!d.name) return '누구 주문인가요?';
+    if (!d.items || !d.items.length) {
+      // ★ v40: 고객 기억 — 지난 주문이 있으면 알려주고 "저번처럼"으로 그대로 담을 수 있게 안내
+      const last = lastOrderForName(d.name, orders, customers);
+      if (last && (last.items || []).length) {
+        const sm = (last.items || []).map((i) => `${i.name} ${i.qty}개`).join(', ');
+        return `${d.name} 님, 어떤 상품 몇 개 드릴까요? 지난 주문은 ${sm}였어요. "저번처럼"이라고 하시면 그대로 담을게요.`;
+      }
+      return `${d.name} 님, 어떤 상품 몇 개 드릴까요?`;
+    }
+    return `${orderReadback(d)}. 맞으면 등록, 고칠 건 말씀하세요.`;
+  }
+
+  // ★ v24: 묶음 계획을 초안에 반영하고 박스 목록 반환 (못 알아들으면 null)
+  function applyBundlePlanToDraft(planText) {
+    const cur = orderDraftRef.current || { items: [] };
+    const plan = parseBundleUtterance(planText, cur.items || []);
+    if (!plan) return null;
+    cur.awaitingBundle = false; cur.boxPlan = plan; cur.boxMode = plan.mode;
+    orderDraftRef.current = cur;
+    if (plan.mode === 'auto') {
+      const pm = {}; (products || []).forEach(p => { if (p && p.id) pm[p.id] = p; });
+      const b = splitIntoBoxes((cur.items || []).map(it => ({ productId: it.productId || null, name: it.name, qty: Number(it.qty) || 1 })), pm);
+      return b.length ? b : [{ items: cur.items }];
+    }
+    return buildBoxItems(cur.items || [], plan);
+  }
+
+  // ★ v18: 하이브리드 음성 주문 — 확인/취소/재시작은 로컬 즉시, 내용은 AI 이해(실패 시 로컬)
+  async function handleOrderTurn(text) {
+    const t = (text || '').replace(/\s/g, '');
+    const cur = orderDraftRef.current || { items: [] };
+    const hasProd = (products || []).some(p => p && p.name && t.includes(p.name.replace(/\s/g, '')));
+    const say = (r) => { setLastAI(r); pushExchange(text, r); processingRef.current = false; speakThenListen(r); };
+
+    // ★ v39: 낱개 자동 분할 결과(박스 규칙: 카테고리별 최대 2개) — '나눌 수 있는지' 판단·안내용
+    const autoSplitBoxes = (items) => {
+      const pm = {}; (products || []).forEach(p => { if (p && p.id) pm[p.id] = p; });
+      return splitIntoBoxes((items || []).map(it => ({ productId: it.productId || null, name: it.name, qty: Number(it.qty) || 1 })), pm);
+    };
+    // ★ v39: 현재 초안을 실제 주문으로 등록 (묶음 계획 boxPlan/boxMode 반영)
+    const finalizeRegister = () => {
+      const cur2 = orderDraftRef.current || cur;
+      const linked = resolveOrderLinks(cur2);
+      linked.boxPlan = cur2.boxPlan || null;
+      linked.boxMode = cur2.boxMode || null;
+      const createdArr = createVoiceOrder ? createVoiceOrder(linked) : null;
+      const created = Array.isArray(createdArr) ? createdArr[0] : createdArr;
+      const boxN = Array.isArray(createdArr) ? createdArr.length : 1;
+      orderModeRef.current = false; orderDraftRef.current = null;
+      if (created) {
+        if (setSearchQuery) setSearchQuery(linked.name || '');
+        if (setStatusFilter) setStatusFilter('all');
+        if (setDateFilter) setDateFilter('all');
+        setTab('orders'); setMinimized(true);
+        say(`${orderReadback(linked)}${boxN > 1 ? ` ${boxN}박스로 나눠서` : ''} 주문을 등록했어요.`);
+      } else { say('정보가 부족해 등록을 못 했어요. 고객과 상품을 다시 말씀해 주세요.'); }
+    };
+
+    if (/그만|관둬|중단|하지마|안할래|주문취소|취소할|다취소|취소해/.test(t) || (/취소/.test(t) && !hasProd)) {
+      orderModeRef.current = false; orderDraftRef.current = null; say('주문 등록을 취소했어요.'); return;
+    }
+    if (/처음부터|다시주문|새로주문|리셋|다시시작|새로시작/.test(t)) {
+      orderDraftRef.current = { items: [] }; say('네, 처음부터 다시 할게요. 누구 주문인가요?'); return;
+    }
+
+    // ★ v43: Working Memory — 직전 상품 수량 조절 ("두 개 더", "하나 더", "조금 줄여", "하나 빼")
+    //  상품명 없이 증감 의도만 있을 때, 방금 다룬 상품(cur.lastItemKey)에 적용. "채소 빼"처럼 상품명이 있으면 아래 삭제 로직으로.
+    if ((cur.items || []).length) {
+      // 상품명(정식명 또는 무게 뗀 핵심명)이 문장에 있으면 WM 조절 대상이 아님 → 아래 삭제/신규 파싱으로
+      const coreNm = (s) => String(s || "").replace(new RegExp(WEIGHT_RE, "g"), "").replace(/\s/g, "");
+      const nameInText = (nm) => { if (!nm) return false; const full = nm.replace(/\s/g, ""); const c = coreNm(nm); return t.includes(full) || (c.length >= 2 && t.includes(c)); };
+      const hasProdName = (products || []).some((p) => p && nameInText(p.name))
+        || (cur.items || []).some((it) => nameInText(it.name));
+      const incIntent = /(더넣|더줘|더담|더주문|하나더|한개더|두개더|세개더|조금더|더시켜|늘려|늘리|추가)/.test(t) && !/빼|줄|삭제|덜|없애/.test(t);
+      const decIntent = /(빼|줄여|줄이|덜어|덜|내려|적게)/.test(t);
+      const numMap = { 한: 1, 하나: 1, 한개: 1, 두: 2, 둘: 2, 두개: 2, 세: 3, 셋: 3, 세개: 3, 네: 4, 넷: 4, 네개: 4, 다섯: 5, 다섯개: 5 };
+      const numFrom = (s) => { const m = s.match(/(\d+)/); if (m) return parseInt(m[1], 10); for (const k in numMap) { if (s.includes(k)) return numMap[k]; } return null; };
+      if (!hasProdName && (incIntent || decIntent)) {
+        let idx = -1;
+        if (cur.lastItemKey) idx = cur.items.findIndex((it) => (it.productId || it.name) === cur.lastItemKey);
+        if (idx < 0) idx = cur.items.length - 1;
+        if (idx >= 0) {
+          let n = numFrom(t); if (n == null) n = 1;   // "조금 더 / 조금 줄여" = 1
+          const delta = incIntent ? n : -n;
+          const nm = cur.items[idx].name;
+          cur.items[idx].qty = (Number(cur.items[idx].qty) || 0) + delta;
+          if (cur.items[idx].qty <= 0) { cur.items.splice(idx, 1); cur.lastItemKey = null; }
+          else cur.lastItemKey = cur.items[idx].productId || cur.items[idx].name;
+          cur.boxPlan = null; cur.boxMode = null; cur.awaitingBundle = false; cur.bundleAsked = false;
+          orderDraftRef.current = cur;
+          if (!cur.items.length) { say(`${nm} 뺐어요. 이제 상품이 없어요 — 어떤 상품 몇 개 드릴까요?`); return; }
+          say(`${nm} ${incIntent ? '늘렸' : '줄였'}어요. ${orderReadback(cur)}. 맞으면 등록, 고칠 건 말씀하세요.`);
+          return;
+        }
+      }
+    }
+
+    // ★ v38: 주문 확인 중 '빼기/삭제' 지시는 로컬에서 확정 처리 (AI 불확실성 제거, 키/인터넷 없이도 동작)
+    //  "모든 채소 빼줘"→이름에 '채소' 든 항목 전부 삭제, "전부 빼줘"→모두 삭제
+    if (/(빼|삭제|제외|없애|지워|빼고|빼줘|빼주)/.test(t) && (cur.items || []).length) {
+      const clearAll = /(전부|전체|모두|모조리|싹다|다빼|다삭제|전부삭제|모두삭제|전부빼|모두빼|다지워|전체삭제|전체빼)/.test(t);
+      const stripRm = (s) => s
+        .replace(/(빼주세요|빼줘|빼주|빼고|빼기|빼|삭제해줘|삭제해|삭제|제외해줘|제외해|제외|없애줘|없애|지워줘|지워)/g, '')
+        .replace(/(모든|모두|전부|전체|모조리|싹|좀|주문|상품|그거|이거|저거|그것|이것|저것|것|거)/g, '')
+        .replace(new RegExp('(\\d+|한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\\s*(?:' + COUNT_UNIT + ')', 'g'), '')
+        .replace(/\d+개/g, '');
+      const coreOf = (s) => String(s || '').replace(new RegExp(WEIGHT_RE, 'g'), '').replace(/[\s\d]/g, '').trim();
+      const spokenCore = coreOf(stripRm(t));
+      let kept, removed = [];
+      if (clearAll && !spokenCore) {
+        removed = cur.items.slice(); kept = [];
+      } else if (spokenCore) {
+        kept = cur.items.filter((it) => {
+          const c = coreOf(it.name);
+          const hit = !!c && (c.includes(spokenCore) || spokenCore.includes(c));
+          if (hit) removed.push(it);
+          return !hit;
+        });
+      } else {
+        say(`무엇을 뺄까요? 현재 ${cur.items.map((i) => i.name).join(', ')} 있어요. 예: "채소 빼줘" 또는 "전부 빼줘".`);
+        return;
+      }
+      if (!removed.length) {
+        say(`"${spokenCore}"에 해당하는 상품이 없어요. 현재 ${cur.items.map((i) => i.name).join(', ')} 있어요.`);
+        return;
+      }
+      cur.items = kept; cur.boxPlan = null; cur.boxMode = null; cur.awaitingBundle = false; cur.bundleAsked = false;
+      orderDraftRef.current = cur;
+      if (!kept.length) {
+        say(`${removed.map((i) => i.name).join(', ')} 뺐어요. 이제 상품이 없어요 — 어떤 상품 몇 개 드릴까요? (그만하려면 "취소")`);
+      } else {
+        say(`${removed.map((i) => i.name).join(', ')} 뺐어요. ${orderNextPrompt(cur)}`);
+      }
+      return;
+    }
+
+    // ★ v40: 고객 기억 — "저번처럼 / 지난번처럼 / 똑같이 / 늘 하던대로" → 그 고객의 지난 주문 그대로 불러오기
+    if (/저번처럼|저번거|저번이랑|지난번처럼|지난번거|지난주문|지난거|똑같이|똑같은거|똑같은걸|평소처럼|늘하던|하던대로|전이랑같|이전과같|같은걸로|같은거로/.test(t)) {
+      // 이름이 아직 없으면 이번 말에서 찾아봄
+      if (!cur.name) {
+        const nm = findKnownNameIn(text, customers, vendors, products);
+        if (nm) { const mp = matchPerson(nm, customers, vendors); cur.name = mp.name; if (mp.phone) cur.phone = mp.phone; if (mp.address) cur.address = mp.address; cur.customerId = mp.customerId || null; if (mp.vendorId) cur.vendorId = mp.vendorId; }
+      }
+      if (!cur.name) { say('누구 주문인지 먼저 말씀해 주세요. 그다음 "저번처럼"이라고 하시면 지난 주문 그대로 담을게요.'); return; }
+      const last = lastOrderForName(cur.name, orders, customers);
+      if (!last || !(last.items || []).length) { say(`${cur.name} 님의 지난 주문을 못 찾았어요. 어떤 상품 몇 개 드릴까요?`); return; }
+      cur.items = (last.items || []).map((it) => ({ productId: it.productId || null, name: it.name, qty: Number(it.qty) || 1 }));
+      if (cur.items.length) { const li = cur.items[cur.items.length - 1]; cur.lastItemKey = li.productId || li.name; }
+      if (last.recipient && last.recipient.address && !cur.address) cur.address = last.recipient.address;
+      if (last.recipient && last.recipient.phone && !cur.phone) cur.phone = last.recipient.phone;
+      if (last.deliveryMessage && !cur.deliveryMessage) cur.deliveryMessage = last.deliveryMessage;
+      cur.boxPlan = null; cur.boxMode = null; cur.awaitingBundle = false; cur.bundleAsked = false;
+      orderDraftRef.current = cur;
+      say(`지난 주문 그대로 담았어요. ${orderReadback(cur)}. 맞으면 등록, 고칠 건 말씀하세요.`);
+      return;
+    }
+
+    // ★ v39: 묶음 방식을 물어본 직후면 — 이번 발화를 묶음 방법으로 해석하고, 정해지면 확인/등록
+    if (cur.awaitingBundle && (cur.items || []).length >= 1
+        && !/^(응|네|예|그래|맞아|맞아요|맞습니다|좋아|오케이|오케|등록)$/.test(t)
+        && !/등록해|등록할|저장해|확정/.test(t)) {
+      // 방법 파싱: 자동/따로따로/전부 한 박스/"A랑 B 한 박스" 모두 처리 (묶음 계획을 cur에 저장)
+      let boxList = applyBundlePlanToDraft(text);
+      // 바 단어(자동/알아서/그냥/기본)만 말했으면 자동 분할로 간주
+      if (!boxList && /자동|알아서|그냥|기본|적당히|맡길|나눠/.test(t)) {
+        cur.awaitingBundle = false; cur.boxPlan = null; cur.boxMode = 'auto'; orderDraftRef.current = cur;
+        boxList = autoSplitBoxes(cur.items);
+      }
+      if (boxList) {
+        // 확인 단계: 결과 박스를 읽어주고 "등록" 대기 (계획은 이미 cur에 저장됨)
+        if (boxList.length <= 1) { say('네, 한 박스로 보낼게요. "등록"이라고 하시면 등록할게요.'); return; }
+        say(`${bundleReadback(boxList)}. 이렇게 ${boxList.length}박스로 나눠 등록할까요? "등록"이라고 하세요.`); return;
+      }
+      say('묶는 방법을 말씀해 주세요. "자동으로 나눠줘", "전부 한 박스", "따로따로", 또는 "샐러드랑 로메인 한 박스"처럼요.'); return;
+    }
+    const wantsRegister = /등록해|등록할|등록하자|등록부탁|저장해|확정|이대로등록|그대로등록|응등록|네등록/.test(t) || /^(응|네|예|그래|맞아|맞아요|맞습니다|좋아|오케이|오케|등록)$/.test(t);
+    if (wantsRegister && !hasProd) {
+      if (!cur.name) { say('누구 주문인지 먼저 말씀해 주세요.'); return; }
+      if (!cur.items || !cur.items.length) { say('상품을 먼저 말씀해 주세요.'); return; }
+      // ★ v39: 묶음을 물어본 뒤 "응/등록"만 답하면 → 자동 분할로 등록
+      if (cur.awaitingBundle && !cur.boxPlan && !cur.boxMode) {
+        cur.awaitingBundle = false; cur.boxMode = 'auto'; orderDraftRef.current = cur;
+        finalizeRegister(); return;
+      }
+      // ★ v39: 아직 묶음 방식을 안 정했고, 낱개가 2박스 이상으로 나뉘면 → 등록 전에 먼저 물어봄
+      if (!cur.boxPlan && !cur.boxMode && !cur.bundleAsked) {
+        const autoBoxes = autoSplitBoxes(cur.items);
+        if (autoBoxes.length >= 2) {
+          cur.awaitingBundle = true; cur.bundleAsked = true; orderDraftRef.current = cur;
+          const units = (cur.items || []).reduce((s, it) => s + (Number(it.qty) || 0), 0);
+          say(`${orderReadback(cur)}. 낱개 ${units}개라 자동으로 ${autoBoxes.length}박스로 나눌 수 있어요. 묶음 배송으로 등록할까요? "자동으로 나눠줘", "전부 한 박스", "따로따로", 또는 "○○랑 ○○ 한 박스"처럼 말씀하세요. 안 나누려면 "한 박스로".`);
+          return;
+        }
+      }
+      finalizeRegister(); return;
+    }
+
+    // ★ v24: 묶음 배송 — 상품이 2개 이상일 때 "묶음/묶어/따로/부분묶음" 말하면 박스로 나눔
+    if ((cur.items || []).length >= 2 && isBundleIntent(t)) {
+      const boxList = applyBundlePlanToDraft(text);
+      if (boxList) {
+        if (boxList.length <= 1) { say('네, 한 박스로 보낼게요. 이대로 등록할까요?'); return; }
+        say(`${bundleReadback(boxList)}. 이렇게 ${boxList.length}박스로 나눠 등록할까요?`); return;
+      }
+      cur.awaitingBundle = true; orderDraftRef.current = cur;
+      say('어떻게 묶을까요? 예를 들어 "샐러드랑 로메인 한 박스, 루꼴라랑 크리스탈벨 한 박스"처럼 말씀하세요. 전부 한 박스면 "전부 한 박스"라고 하세요.'); return;
+    }
+
+    // 내용 파싱: AI 우선(문장 전체 이해), 실패 시 로컬 규칙
+    setPhaseSync('thinking');
+    let draft = null;
+    if (geminiKey) {
+      try {
+        const aiIn = { name: cur.name || '', items: (cur.items || []).map(i => ({ name: i.name, qty: i.qty })), reserveDate: cur.reserveDate || '', deliveryMessage: cur.deliveryMessage || '' };
+        const ai = await callGeminiOrderParse(text, aiIn, { vendors, customers, products }, geminiKey);
+        if (ai && (ai.name || (ai.items && ai.items.length))) {
+          draft = { name: ai.name, items: ai.items, reserveDate: ai.reserveDate, deliveryMessage: ai.deliveryMessage };
+        }
+      } catch (e) { /* 로컬 폴백 */ }
+    }
+    if (!draft) {
+      const res = applyOrderUtterance(cur, text, { products, customers, vendors, today: new Date() });
+      if (res.cancelled) { orderModeRef.current = false; orderDraftRef.current = null; say(res.reply); return; }
+      draft = res.draft;
+    }
+    const linked = resolveOrderLinks(draft);
+    // ★ v43: Working Memory — 방금 다룬 상품을 기억 (다음 "두 개 더/하나 빼"의 대상)
+    if (linked.items && linked.items.length) {
+      const li = linked.items[linked.items.length - 1];
+      linked.lastItemKey = li.productId || li.name;
+    }
+    orderDraftRef.current = linked;
+    say(orderNextPrompt(linked));
+  }
+
+  // ★ v11: 대화 기록에 한 쌍(사용자+AI) 추가 → 대화창 표시 + 다음 대화 맥락 유지
+  //  (로컬 즉답 경로도 Gemini 경로와 동일하게 history를 갱신해야 화면에 답이 보임)
+  function pushExchange(userText, aiText) {
+    const updated = [
+      ...historyRef.current,
+      { role: 'user',  parts: [{ text: userText }] },
+      { role: 'model', parts: [{ text: aiText }] },
+    ];
+    const trimmed = updated.slice(-20);  // 최대 10쌍 유지 (토큰 한도 방지)
+    historyRef.current = trimmed;
+    setHistory(trimmed);
+  }
+
+  // ★ A2 Fix: 동시 실행 방지 (processingRef는 위 ref 선언부에서 정의)
+  async function processUserSpeech(text) {
+    if (!activeRef.current) return;
+    if (processingRef.current) return;  // ★ lock
+    processingRef.current = true;
+    setInterim('');
+    // ★ v8: dedupCascade로 반복 완전 제거 (prefix-cascade 포함)
+    text = dedupCascade(text).slice(0, 200);
+    setLastUser(text);
+
+    // ★ v41: 학습 명령(승인 기반 장기 기억) — "'청겨'를 '청겨자'로 기억해" → 별칭 저장. 어느 상황에서든 최우선.
+    {
+      const teach = parseTeachAlias(text);
+      if (teach) {
+        const prod = (typeof fuzzyProductMatch === 'function') ? fuzzyProductMatch(teach.to, products, 0.55) : null;
+        const stored = prod ? prod.name.replace(new RegExp(WEIGHT_RE, 'g'), '').replace(/\s/g, '') : teach.to.replace(/\s/g, '');
+        learnAlias(teach.from, stored);
+        clearInterval(countdownRef.current); setRetryCountdown(0);
+        const shown = prod ? prod.name : teach.to;
+        const msg = `네, 앞으로 "${teach.from}"는 "${shown}"로 알아들을게요.`;
+        setLastAI(msg); pushExchange(text, msg);
+        processingRef.current = false;
+        speakThenListen(msg);
+        return;
+      }
+    }
+
+    // ★ v14: 음성 주문 대화 — 진행 중이거나 시작 명령이면 주문 흐름으로 (AI 없이)
+    if (orderModeRef.current) {
+      clearInterval(countdownRef.current); setRetryCountdown(0);
+      handleOrderTurn(text); return;
+    }
+    if (detectVoiceOrderIntent(text)) {
+      orderModeRef.current = true; orderDraftRef.current = { items: [] };
+      clearInterval(countdownRef.current); setRetryCountdown(0);
+      handleOrderTurn(text); return;
+    }
+
+    // ★ v38: 기존 주문 편집(수정/삭제/묶음) 의도는 앱 명령으로 먼저 처리 → 조회로 새지 않게
+    {
+      const tNS = (text || '').replace(/\s/g, '');
+      const editIntent =
+        /주문.*(수정|고쳐|고칠|고치|바꿔|바꾸|변경|편집|열어|불러)/.test(tNS)
+        || /(수정|고쳐|고칠|편집)(해|하|해줘|해주세요)?$/.test(tNS)
+        || /(빼|삭제|제외|없애|지워)/.test(tNS)
+        || /(되돌려|되돌리|방금전으로|방금거취소|방금꺼취소|방금취소|방금주문취소|방금등록취소|마지막주문취소|마지막취소|실수했어|잘못했어)/.test(tNS)
+        || /(한박스|한상자|하나로묶|하나로합|자동묶음|따로따로|따로보내|개별발송|낱개로|묶음수정|박스수정|박스편집|묶음편집)/.test(tNS);
+      if (editIntent && onAppCommand && onAppCommand(text)) {
+        clearInterval(countdownRef.current); setRetryCountdown(0);
+        const msg = '네, 처리했어요.';
+        setLastAI(msg); pushExchange(text, msg);
+        processingRef.current = false;
+        speakThenListen(msg);
+        return;
+      }
+    }
+
+    // ★ v47: AI Planner — "오늘 뭐부터 하지?" → 발송·예약·송장·입금 우선순위 브리핑 (읽기 전용)
+    if (isDailyPlanQuestion(text)) {
+      const _t = new Date();
+      const todayISO = `${_t.getFullYear()}-${String(_t.getMonth() + 1).padStart(2, '0')}-${String(_t.getDate()).padStart(2, '0')}`;
+      const plan = buildDailyPlan(orders, subscriptions, todayISO);
+      clearInterval(countdownRef.current); setRetryCountdown(0);
+      setLastAI(plan); pushExchange(text, plan);
+      processingRef.current = false;
+      speakThenListen(plan);
+      return;
+    }
+
+    // ★ v13: 자연어 데이터 조회 (고객 조회·오늘 발송/미발송 등) — AI 없이 실제 데이터로 즉시 답+화면표시
+    //  네비게이션보다 먼저 실행 ("조용택 주문 보여줘"가 일반 주문목록으로 새지 않도록)
+    const dataAns = runDataQuery(text);
+    if (dataAns) {
+      clearInterval(countdownRef.current);
+      setRetryCountdown(0);
+      setLastAI(dataAns);
+      pushExchange(text, dataAns);
+      processingRef.current = false;
+      speakThenListen(dataAns);
+      return;
+    }
+
+    // ★ 앱 전체 데이터 기반 답변 (상품 가격/재고·송장추적·정기배송·연락처/주소·발송상태) — AI 없이 실제 데이터로
+    const appDataAns = answerFromAppData(text, { orders, customers, products, vendors, subscriptions });
+    if (appDataAns) {
+      clearInterval(countdownRef.current);
+      setRetryCountdown(0);
+      setLastAI(appDataAns);
+      pushExchange(text, appDataAns);
+      processingRef.current = false;
+      speakThenListen(appDataAns);
+      return;
+    }
+
+    // ★ v9: 화면 이동 명령은 AI 호출 없이 즉시 처리 (할당량 절약 + 즉시 반응 + 429에도 작동)
+    const quickNav = detectNavIntent(text);
+    if (quickNav && JARVIS_TAB_MAP[quickNav]) {
+      clearInterval(countdownRef.current);   // 재시도 카운트다운 있으면 중단
+      setRetryCountdown(0);
+      const msg = navReply(quickNav);
+      setLastAI(msg);
+      pushExchange(text, msg);                 // ★ v11: 대화창 표시 + 맥락 유지
+      setTab(JARVIS_TAB_MAP[quickNav]);
+      setMinimized(true);                     // 화면 보이게 시트 최소화
+      processingRef.current = false;
+      speakThenListen(msg);
+      return;
+    }
+
+    // ★ v10: 간단한 숫자 질문은 로컬 데이터로 즉답 (할당량 절약 + 429에도 작동)
+    const quickStat = quickStatAnswer(text, getCtx());
+    if (quickStat) {
+      clearInterval(countdownRef.current);
+      setRetryCountdown(0);
+      setLastAI(quickStat);
+      pushExchange(text, quickStat);           // ★ v11: 대화창 표시 + 맥락 유지
+      processingRef.current = false;
+      speakThenListen(quickStat);
+      return;
+    }
+
+    // ★ 통합: 위의 조회·주문·이동으로 처리 안 된 명령을 로컬 규칙(앱 제어)으로 실행.
+    //  조비서 orb로 말해도 명령 마이크와 똑같이 화면이동·검색·설정열기/닫기·주문폼이 실제로 동작한다.
+    if (onAppCommand && onAppCommand(text)) {
+      const msg = '네, 실행했어요.';
+      setLastAI(msg); pushExchange(text, msg);
+      processingRef.current = false;
+      speakThenListen(msg);
+      return;
+    }
+
+    setPhaseSync('thinking');
+
+    if (!geminiKey) {
+      processingRef.current = false;  // ★ BUG1 Fix: 조기 return 전 잠금 해제
+      const t = '못 알아들었어요. "주문목록 보여줘", "고객관리 열어줘", "OO 검색"처럼 말씀해 주세요.';
+      setLastAI(t); speakThenListen(t); return;
+    }
+
+    const newHistory = [...historyRef.current, { role: 'user', parts: [{ text }] }];
+    try {
+      const r = await callGeminiJarvis(newHistory, getCtx(), geminiKey);
+      const aiText = r.text || '죄송해요, 다시 말씀해 주세요.';
+      setLastAI(aiText);
+      // ★ A1 Fix: 모델 답변은 text만 저장 (action JSON 제거 → 자연스러운 대화 맥락)
+      const updated = [...newHistory, { role: 'model', parts: [{ text: aiText }] }];
+      // ★ B5 Fix: 대화 기록 최대 20개(10쌍)로 제한 → Gemini 토큰 한도 방지
+      const trimmed = updated.slice(-20);
+      historyRef.current = trimmed;
+      setHistory(trimmed);
+      // ★ v5 Fix: action 우선, 없으면 텍스트에서 의도 감지
+      const navAction = (r.action && JARVIS_TAB_MAP[r.action])
+        ? r.action
+        : detectNavIntent(text) || detectNavIntent(aiText);
+      if (navAction && JARVIS_TAB_MAP[navAction]) {
+        setTimeout(() => {
+          setTab(JARVIS_TAB_MAP[navAction]);
+          setMinimized(true);  // ★ 화면 이동 후 시트 최소화 → 새 화면 보이게
+        }, 1200);
+      }
+      speakThenListen(aiText);
+    } catch(e) {
+      if (e.message && e.message.startsWith('QUOTA_EXCEEDED:')) {
+        // ★ v15: 자동 재시도 루프 제거 — 같은 질문을 계속 재요청해 한도만 소모하던 문제.
+        //  대신 바로 듣기로 돌아가서, 화면이동·주문·조회 등 AI 없이 되는 기능은 계속 쓰게 함.
+        const t2 = 'AI 사용량이 많아 잠시 뒤에 다시 물어봐 주세요. 화면 이동이나 주문 등록, 고객·업체 조회는 지금도 됩니다.';
+        setLastAI(t2);
+        setPhaseSync('idle');
+        // ★ v26: 자동 듣기일 때만 재개. 눌러 말하기면 대기(마이크 완전 정지).
+        setTimeout(() => { if (activeRef.current && autoListenRef.current) beginListening(); }, 1000);
+      } else {
+        const t = '오류가 발생했어요. 다시 말씀해 주세요.';
+        setLastAI(t);
+        setPhaseSync('idle');
+        setTimeout(() => { if (activeRef.current && autoListenRef.current) beginListening(); }, 800);  // ★ v26: 눌러 말하기면 정지
+      }
+    } finally {
+      processingRef.current = false;  // ★ A2 Fix: 항상 lock 해제
+    }
+  }
+
+  function speakThenListen(text) {
+    if (!activeRef.current) return;
+    setPhaseSync('speaking');
+    clearTimeout(ttsTimerRef.current);
+    window.speechSynthesis && window.speechSynthesis.cancel();
+
+    // ★ v4 Fix: 이모지·마크다운·특수문자 제거 강화
+    const clean = text
+      .replace(/[\u{1F000}-\u{1FFFF}]/gu, '')  // 이모지 전체
+      .replace(/[#*`~_|>{}\[\]]/g, '')          // 마크다운 특수문자
+      .replace(/\s{2,}/g, ' ')                  // 연속 공백 제거
+      .trim();
+    let done = false;
+    speakTextRef.current = clean;   // ★ v23: 에코 판별용 — 지금 말하는 문장
+    const afterSpeak = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(ttsTimerRef.current);
+      stopBargeIn();                 // ★ v23: 말 끝났으니 끼어들기 감지기 정리
+      speakTextRef.current = '';
+      setPhaseSync('idle');
+      // ★ v25: 자동듣기가 켜져 있을 때만 TTS 후 다시 듣기. 꺼져 있으면(눌러 말하기) 대기.
+      if (autoListenRef.current) {
+        setTimeout(() => { if (activeRef.current && autoListenRef.current) beginListening(); }, 600);  // ★ v8: 대기시간 단축
+      }
+    };
+
+    if (!clean) { afterSpeak(); return; }
+
+    // ★ Bug3 fix: cancel() 후 50ms 지연 (Android TTS 무음 버그 방지)
+    setTimeout(() => {
+      if (done) return;
+      const u = new SpeechSynthesisUtterance(clean);
+      u.lang = 'ko-KR';
+      u.rate = 0.93;  // ★ 자연스러운 말하기 속도
+      u.pitch = 1.0;
+      // ★ B2 Fix: 최고 품질 한국어 TTS 음성 자동 선택
+      // Samsung 내장 > Google 한국어 > 기타 ko-KR 순으로 선택
+      try {
+        const applyVoice = () => {
+          const voices = window.speechSynthesis.getVoices();
+          const koVoices = voices.filter(v => v.lang && v.lang.startsWith('ko'));
+          const best = koVoices.find(v => /samsung|구글|google|네이버/i.test(v.name))
+                    || koVoices.find(v => v.localService)
+                    || koVoices[0];
+          if (best) u.voice = best;
+        };
+        // ★ UI8 Fix: 음성 목록 비동기 로딩 대기
+        if (window.speechSynthesis.getVoices().length > 0) {
+          applyVoice();
+        } else {
+          window.speechSynthesis.onvoiceschanged = () => { applyVoice(); window.speechSynthesis.onvoiceschanged = null; };
+        }
+      } catch(e) {}
+      u.onend   = afterSpeak;
+      u.onerror = afterSpeak;
+      // ★ v23: TTS 시작 직후 끼어들기 감지 시작 — 말하는 중 사용자가 말하면 멈추고 듣기
+      u.onstart = () => { if (!done) setTimeout(() => { if (!done && phaseRef.current === 'speaking') startBargeIn(); }, 350); };
+      // ★ Bug4 fix: 폴백 타이머 단축 (한국어 평균 발화 속도 기준)
+      const ms = Math.max(1500, clean.length * 65 + 800);
+      ttsTimerRef.current = setTimeout(afterSpeak, ms);
+      window.speechSynthesis.speak(u);
+      // onstart가 안 오는 브라우저 대비: 500ms 뒤 폴백 시작
+      setTimeout(() => { if (!done && phaseRef.current === 'speaking' && !bargeRecRef.current) startBargeIn(); }, 500);
+    }, 50);
+  }
+
+  async function sendText() {
+    const text = inp.trim();
+    // ★ Bug7 Fix: thinking과 speaking 모두 차단
+    if (!text || phaseRef.current === 'thinking' || phaseRef.current === 'speaking') return;
+    setInp('');
+    stopRec();
+    await processUserSpeech(text);
+  }
+
+  function startCountdown(secs, retryText) {
+    setPhaseSync('idle');
+    setRetryCountdown(secs);
+    clearInterval(countdownRef.current);
+    let remaining = secs;
+    countdownRef.current = setInterval(() => {
+      remaining--;
+      setRetryCountdown(remaining);
+      if (remaining <= 0) {
+        clearInterval(countdownRef.current);
+        setRetryCountdown(0);
+        if (activeRef.current) processUserSpeech(retryText);
+      }
+    }, 1000);
+  }
+
+  // ★ Bug2 Fix: ctx를 객체로 반환 (callGeminiJarvis가 기대하는 형식과 일치)
+  // ★ Bug2b Fix: 실제 status 코드 사용 ('waiting','pending','ready','shipped')
+  function getCtx() {
+    const ords  = orders || [];
+    const custs = customers || [];
+    const prods = products || [];
+    const todayStr = new Date().toLocaleDateString('ko-KR');
+    // ★ v45 타임존 버그 수정: toISOString()은 UTC라 한국 새벽(0~9시)에 하루 전 날짜가 나옴 →
+    //  주문 저장에 쓰는 로컬 날짜(todayStr()·orderDate와 동일 형식)로 계산해야 '오늘 신규'가 정확함.
+    const _t = new Date();
+    const todayISO = `${_t.getFullYear()}-${String(_t.getMonth() + 1).padStart(2, '0')}-${String(_t.getDate()).padStart(2, '0')}`;
+    // 실제 status 코드: waiting=입금대기, pending=결제완료, ready=발송준비, shipped=발송완료
+    const todayNew = ords.filter(o => (o.orderDate||o.createdAt||'').startsWith(todayISO)).length;
+    const pendingWait = ords.filter(o => o.status === 'waiting').length;
+    const pendingPay  = ords.filter(o => o.status === 'pending').length;
+    const readyCount  = ords.filter(o => o.status === 'ready').length;
+    const shippedCount = ords.filter(o => o.status === 'shipped').length;
+    const productNames = prods.map(p => p.name).join(', ') || '없음';
+    // 최근 5개 고객
+    const recentCustomers = custs.slice(-5).map(c => c.name).join(', ') || '없음';
+    // 최근 3개 주문 요약
+    const recentOrders = ords.slice(-3).map(o => {
+      const statusMap = { waiting:'입금대기', pending:'결제완료', ready:'발송준비', shipped:'발송완료' };
+      return `${o.senderName||'?'}(${statusMap[o.status]||o.status})`;
+    }).join(', ');
+    // 최근 주문 10건 상세 포맷 (Gemini에 구체적 정보 제공)
+    const smMap = { waiting:'입금대기', pending:'결제완료', ready:'발송준비', shipped:'발송완료' };
+    const recentOrdersFull = ords.slice(-10).reverse().map((o, i) => {
+      const d  = (o.orderDate||o.createdAt||'').slice(5,10).replace('-','/');
+      const amt= o.amount ? Number(o.amount).toLocaleString()+'원' : '금액미상';
+      const st = smMap[o.status] || o.status || '';
+      const addr = o.address ? ' · '+o.address.slice(0,15) : '';
+      return `${i+1}. ${o.senderName||'?'} ${amt} [${st}]${d?' '+d:''}${addr}`;
+    }).join('\n') || '없음';
+    return {
+      total:            ords.length,
+      today:            todayNew,
+      todayStr:         todayStr,
+      pending:          pendingWait,
+      pendingPay:       pendingPay,
+      ready:            readyCount,
+      shipped:          shippedCount,
+      customers:        custs.length,
+      tab: {home:'홈대시보드',orders:'주문목록',new:'새주문입력',
+             customers:'고객관리',products:'상품관리',subscriptions:'정기배송',
+             deliverytrack:'배송관리',integrations:'연동설정'}[tab] || tab || '홈대시보드',
+      products:         prods.length,
+      productNames:     productNames,
+      recentCustomers:  recentCustomers,
+      recentOrders:     recentOrders,
+      recentOrdersFull: recentOrdersFull,
+      // ★ 데이터 기반 대화 강화: 상품 가격·업체·정기배송
+      productPricing: prods.slice(0, 40).map(p => `${p.name}(일반 ${(Number(p.price)||0).toLocaleString()}원${p.wholesalePrice?`/업체 ${(Number(p.wholesalePrice)||0).toLocaleString()}원`:''}${p.stock!=null&&p.stock!==''?`, 재고 ${p.stock}`:''})`).join(', ') || '없음',
+      vendorNames: (vendors||[]).map(v => v.name).filter(Boolean).join(', ') || '없음',
+      subsCount: (subscriptions||[]).length,
+    };
+  }
+
+  // 드래그 핸들러
+  function onDragStart(e) {
+    dragStartY.current = e.touches ? e.touches[0].clientY : e.clientY;
+    const cur = parseFloat(sheetH) || 55;
+    dragStartH.current = cur;
+  }
+  function onDragMove(e) {
+    if (dragStartY.current === null) return;
+    const y = e.touches ? e.touches[0].clientY : e.clientY;
+    const dy = dragStartY.current - y;
+    const vh = window.innerHeight / 100;
+    const newH = Math.min(70, Math.max(28, dragStartH.current + dy / vh));
+    setSheetH(newH + 'vh');
+  }
+  function onDragEnd() {
+    dragStartY.current = null;
+  }
+
+  // ─── Orb 색상 ───
+  // ★ v4 Fix: idle → 앱 초록(dim), retry → 주황
+  const orbColor = phase === 'listening' ? '#4CAF50'
+                 : phase === 'thinking'  ? '#FF9800'
+                 : phase === 'speaking'  ? '#2196F3'
+                 : retryCountdown > 0    ? '#FF9800'  // 재시도 대기 중: 주황
+                 : '#3d7a54';            // idle: 앱 초록 dim (어두운 배경에서 식별 가능)
+  const orbAnim  = phase === 'listening' ? 'jsOrbListen 0.9s ease-in-out infinite'
+                 : phase === 'thinking'  ? 'jsOrbSpin 1.0s linear infinite'
+                 : phase === 'speaking'  ? 'jsOrbSpeak 0.4s ease-in-out infinite'
+                 : 'jsOrbIdle 2s ease-in-out infinite';  // ★ C5 Fix: idle 맥박
+  const statusText = phase === 'listening' ? '듣는 중...'
+                   : phase === 'thinking'  ? '생각 중...'
+                   : phase === 'speaking'  ? '답변 중...'
+                   : retryCountdown > 0   ? '잠시 후 다시 시도합니다'
+                   : autoListen           ? '대기 중 — 말씀해 보세요'
+                   : '눌러 말하기 — 마이크 버튼을 누르세요';
+
+  return (
+    <div style={{
+      position:'fixed', left:0, right:0, bottom:0, zIndex:2999,
+      pointerEvents:'none'
+    }}>
+      {/* 바텀시트 */}
+      <div
+        style={{
+          position:'absolute', left:0, right:0, bottom:0,
+          height: minimized ? '68px' : sheetH,
+          background:'linear-gradient(160deg,#1a1a2e 0%,#16213e 60%,#0f172a 100%)',  /* ★ C6 Fix */
+          borderRadius:'20px 20px 0 0',
+          boxShadow:'0 -4px 30px rgba(0,0,0,0.5)',
+          borderTop:'2px solid rgba(47,111,78,0.6)',  /* ★ UI6: 앱 초록 포인트 */
+          display:'flex', flexDirection:'column',
+          pointerEvents:'auto',
+          overflow:'hidden',
+          transition:'height 0.28s cubic-bezier(.4,0,.2,1)',
+        }}
+        onMouseMove={onDragMove} onMouseUp={onDragEnd}
+        onTouchMove={onDragMove} onTouchEnd={onDragEnd}
+      >
+        {/* ★ MINI: 미니바 vs 확장 조건부 */}
+        {minimized ? (
+          <div style={{display:'flex',alignItems:'center',height:'100%',padding:'0 16px',gap:10,cursor:'pointer'}}
+               onClick={()=>setMinimized(false)}>
+            {/* 미니 Orb */}
+            <div style={{width:22,height:22,borderRadius:'50%',flexShrink:0,background:orbColor,
+              boxShadow:`0 0 14px ${orbColor}`,animation:orbAnim}}/>
+            {/* 상태 텍스트 */}
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{color:'#fff',fontSize:14,fontWeight:700,lineHeight:1.2}}>🤖 조비서 AI</div>
+              <div style={{color:'#aaa',fontSize:12,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',marginTop:1}}>
+                {statusText}{interim ? ' "'+interim.slice(0,20)+(interim.length>20?'…':'')+'"' : ''}
+              </div>
+            </div>
+            {/* 펼치기 */}
+            <span style={{color:'#88cc88',fontSize:18,flexShrink:0}}>▲</span>
+            {/* 닫기 */}
+            <button onClick={e=>{e.stopPropagation();stopRec();window.speechSynthesis&&window.speechSynthesis.cancel();clearTimeout(ttsTimerRef.current);clearTimeout(silenceTimerRef.current);clearInterval(countdownRef.current);setPhaseSync('idle');onClose&&onClose();}}
+              style={{background:'rgba(255,100,100,0.2)',border:'none',borderRadius:8,color:'#ff8080',padding:'4px 10px',cursor:'pointer',fontSize:13,flexShrink:0}}>✕</button>
+          </div>
+        ) : (<>
+
+        {/* 드래그 핸들 - 여기만 드래그 가능 */}
+        <div
+          style={{display:'flex',justifyContent:'center',padding:'10px 0 4px',cursor:'grab',touchAction:'none'}}
+          onMouseDown={onDragStart} onTouchStart={onDragStart}
+        >
+          <div style={{width:40,height:4,borderRadius:2,background:'rgba(255,255,255,0.4)'}}/>
+        </div>
+
+        {/* 헤더 */}
+        <div style={{display:'flex',alignItems:'center',padding:'2px 14px 4px',gap:8}}>
+          <span style={{fontSize:18,fontWeight:700,color:'#fff',flex:1}}>🤖 조비서 AI <span style={{fontSize:10,fontWeight:600,color:'#7fd1a0',verticalAlign:'middle'}}>{APP_BUILD}</span></span>
+          <button onClick={()=>setMinimized(true)}
+            style={{background:'rgba(255,255,255,0.08)',border:'none',borderRadius:8,
+              color:'#88cc88',padding:'4px 10px',cursor:'pointer',fontSize:13}}
+            title="접기">▼</button>
+          <button onClick={()=>{
+            const goingText = !textMode;
+            if (goingText) {
+              stopRec();
+              setPhaseSync('idle');
+            } else if (phaseRef.current === 'idle') {
+              setTimeout(() => beginListening(), 300);
+            }
+            setTextMode(m=>!m);
+          }} style={{
+            background:'rgba(255,255,255,0.1)',border:'none',borderRadius:8,
+            color:'#ccc',padding:'4px 10px',cursor:'pointer',fontSize:13
+          }}>{textMode ? '🎤' : '⌨️'}</button>
+          {/* ★ v25: 자동듣기 켬/끔 — 시끄러운 곳에서 끄면 '눌러 말하기'로 마이크 소음 방지 */}
+          <button onClick={toggleAutoListen}
+            title={autoListen ? '자동 대화 ON — 말이 끝나면 마이크가 자동으로 다시 켜져 연속 대화 (누르면 버튼식으로)' : '버튼식 — 마이크를 누를 때만 한 번 인식 (누르면 자동 대화로)'}
+            style={{
+              background: autoListen ? 'rgba(76,175,80,0.25)' : 'rgba(255,180,60,0.25)',
+              border:'none',borderRadius:8,
+              color: autoListen ? '#a5d6a7' : '#ffd08a',padding:'4px 10px',cursor:'pointer',fontSize:12.5,fontWeight:700
+            }}>{autoListen ? '🔄 자동대화 ON' : '👆 버튼식'}</button>
+          <button onClick={()=>{
+            stopRec();
+            window.speechSynthesis && window.speechSynthesis.cancel();
+            clearTimeout(ttsTimerRef.current);
+            clearTimeout(silenceTimerRef.current);
+            clearInterval(countdownRef.current);
+            setPhaseSync('idle');
+            onClose && onClose();
+          }}
+            style={{background:'rgba(255,100,100,0.2)',border:'none',borderRadius:8,
+              color:'#ff8080',padding:'4px 10px',cursor:'pointer',fontSize:13}}>✕</button>
+        </div>
+
+        {/* Orb */}
+        <div style={{display:'flex',justifyContent:'center',padding:'4px 0'}}>
+          <div style={{
+            width:80, height:80, borderRadius:'50%',
+            background: orbColor,
+            boxShadow: `0 0 30px ${orbColor}cc, 0 0 60px ${orbColor}66, 0 0 2px #fff4, inset 0 0 20px rgba(255,255,255,0.15)`,  // ★ v4 Fix
+            animation: orbAnim,
+            transition:'background 0.4s, box-shadow 0.4s',
+          }}/>
+        </div>
+
+        {/* 상태 표시 */}
+        <div style={{textAlign:'center',color:'#ddd',fontSize:13,marginBottom:2,fontWeight:500}}>
+          {statusText}
+          {retryCountdown > 0 && <span style={{color:'#FF9800',marginLeft:8}}>{retryCountdown}초 후 재시도</span>}
+        </div>
+
+        {/* 인식 중간 텍스트 */}
+        {interim ? (
+          <div style={{
+            margin:'4px 16px',padding:'8px 12px',
+            background:'rgba(255,255,255,0.06)',borderRadius:10,
+            color:'#ccc',fontSize:14,fontStyle:'italic',minHeight:32,
+          }}>{interim}</div>
+        ) : null}
+
+        {/* ★ C3 Fix: 전체 대화 기록 표시 (기존: 마지막 1쌍만 → 최근 5쌍 스크롤 가능) */}
+        <div style={{flex:1,overflowY:'auto',padding:'8px 16px',display:'flex',flexDirection:'column',gap:8}}>
+          {history.length === 0 && !lastAI ? (
+            <div style={{textAlign:'center',color:'rgba(255,255,255,0.3)',fontSize:13,marginTop:16}}>
+              대화를 시작해보세요 🎤
+            </div>
+          ) : null}
+          {/* history 기반 대화 표시 */}
+          {history.slice(-10).map((msg, i) => (
+            <div key={i} style={{
+              alignSelf: msg.role === 'user' ? 'flex-end' : 'flex-start',
+              background: msg.role === 'user' ? 'rgba(33,150,243,0.25)' : 'rgba(76,175,80,0.18)',
+              borderRadius: msg.role === 'user' ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
+              padding:'8px 12px',
+              color: msg.role === 'user' ? '#e0f2fe' : '#e8f5e9',
+              fontSize:14, maxWidth:'85%',
+            }}>
+              {msg.role === 'user' ? '👤 ' : '🤖 '}{msg.parts[0].text}
+            </div>
+          ))}
+          {/* 현재 진행 중인 메시지 (아직 history에 없는 것) */}
+          {lastUser && (history.length === 0 || history[history.length-1]?.parts[0]?.text !== lastUser) ? (
+            <div style={{
+              alignSelf:'flex-end',background:'rgba(33,150,243,0.25)',
+              borderRadius:'14px 14px 4px 14px',padding:'8px 12px',
+              color:'#e0f2fe',fontSize:14,maxWidth:'80%',
+            }}>👤 {lastUser}</div>
+          ) : null}
+          {phase === 'thinking' ? (
+            <div style={{alignSelf:'flex-start',color:'rgba(255,255,255,0.4)',fontSize:13,padding:'4px 8px'}}>
+              🤖 ⏳ 생각 중...
+            </div>
+          ) : null}
+          <div ref={el => el && el.scrollIntoView({behavior:'smooth', block:'nearest'})} style={{height:1}}/>
+        </div>
+
+        {/* 텍스트 입력 모드 */}
+        {textMode && (
+          <div style={{padding:'8px 16px',display:'flex',gap:8,
+            borderTop:'1px solid rgba(255,255,255,0.08)'}}>
+            <input
+              value={inp}
+              onChange={e=>setInp(e.target.value)}
+              onKeyDown={e=>{ if(e.key==='Enter') sendText(); }}
+              placeholder="메시지 입력..."
+              style={{
+                flex:1,background:'rgba(255,255,255,0.08)',border:'1px solid rgba(255,255,255,0.15)',
+                borderRadius:10,color:'#fff',padding:'8px 12px',fontSize:14,outline:'none',
+              }}
+            />
+            <button onClick={sendText} disabled={phase==='thinking'||phase==='speaking'}
+              style={{
+                background:'#2196F3',border:'none',borderRadius:10,
+                color:'#fff',padding:'8px 16px',cursor:'pointer',fontSize:14,
+                opacity: (phase==='thinking'||phase==='speaking') ? 0.5 : 1,
+              }}>전송</button>
+          </div>
+        )}
+
+        {/* 다시 듣기 버튼 (idle 상태에서만) — v25: 누르면 무음카운터 초기화 후 한 번 듣기 */}
+        {phase === 'idle' && !textMode && (
+          <div style={{padding:'8px 16px',display:'flex',justifyContent:'center'}}>
+            <button onClick={()=>{ silenceCountRef.current = 0; beginListening(); }}
+              style={{
+                background:'rgba(76,175,80,0.3)',border:'1px solid rgba(76,175,80,0.5)',
+                borderRadius:20,color:'#a5d6a7',padding:'8px 24px',
+                cursor:'pointer',fontSize:14,
+              }}>🎤 {autoListen ? '다시 듣기' : '눌러서 말하기'}</button>
+          </div>
+        )}
+        </>)}
+      </div>
+      <style>{`
+        @keyframes jsOrbListen { 0%{transform:scale(1.0)} 50%{transform:scale(1.15)} 100%{transform:scale(1.0)} }
+        @keyframes jsOrbSpeak  { 0%{transform:scale(1.0)} 30%{transform:scale(1.18)} 60%{transform:scale(1.05)} 100%{transform:scale(1.0)} }
+        @keyframes jsOrbSpin   { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+        @keyframes jsOrbIdle   { 0%{opacity:0.7} 50%{opacity:1} 100%{opacity:0.7} }
+      `}</style>
+    </div>
+  );
+}
+
+function JarvisButton({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onAppCommand, subscriptions }) {
+  const [sheetOpen, setSheetOpen] = React.useState(false);
+  const [wakeActive, setWakeActive] = React.useState(false);
+  const [toastMsg, setToastMsg] = React.useState('');
+  const wakeRecRef = React.useRef(null);
+  const wakeRestartRef = React.useRef(null);
+  const toastTimerRef = React.useRef(null);
+  const wakeActiveRef  = React.useRef(false);
+  const sheetOpenRef   = React.useRef(false);
+  wakeActiveRef.current = wakeActive;
+  sheetOpenRef.current  = sheetOpen;
+
+  function showToast(msg) {
+    setToastMsg(msg);
+    clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToastMsg(''), 2500);
+  }
+
+  function startWakeListen() {
+    if (!wakeActiveRef.current) return;  // ★ v7 Fix: wakeActive=false이면 시작 안 함
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return;
+    const rec = new SR();
+    rec.lang = 'ko-KR'; rec.continuous = false; rec.interimResults = false; rec.maxAlternatives = 3;
+    wakeRecRef.current = rec;
+    rec.onresult = (e) => {
+      let said = '';
+      for (let a = 0; a < (e.results[0].length||1); a++) said += (e.results[0][a].transcript||'') + ' ';
+      said = said.toLowerCase().replace(/\s/g,'');
+      const orderWords = ['하이조아쌈','하이조아','조아쌈','조아씸','하이조','주문창','주문열어','조아저씨'];
+      const chatWords  = ['조비서','조비서야','조비서님','비서야','비서님'];
+      if (orderWords.some(w => said.includes(w))) { showToast('📦 주문창!'); setTab('new'); }
+      else if (chatWords.some(w => said.includes(w))) { showToast('조비서 켤게요!'); setSheetOpen(true); }
+    };
+    // ★ A4 Fix: 기존 인스턴스 재사용 대신 새 인스턴스 생성 (Samsung 안정성 향상)
+    rec.onend = () => {
+      if (wakeActiveRef.current && !sheetOpenRef.current)
+        wakeRestartRef.current = setTimeout(() => startWakeListen(), 3000);
+    };
+    rec.onerror = () => {
+      if (wakeActiveRef.current && !sheetOpenRef.current)
+        wakeRestartRef.current = setTimeout(() => startWakeListen(), 5000);
+    };
+    try { rec.start(); } catch(e) {}
+  }
+
+  function toggleWake() {
+    if (wakeActive) {
+      wakeActiveRef.current = false;  // ★ v7 Fix: ref 먼저 false
+      setWakeActive(false);
+      clearTimeout(wakeRestartRef.current);
+      try { wakeRecRef.current?.stop(); } catch(e) {}
+      showToast('음성대기 꺼짐');
+    } else {
+      wakeActiveRef.current = true;   // ★ v7 Fix: ref 먼저 true
+      setWakeActive(true);
+      showToast('"하이조아쌈" 또는 "조비서" 라고 말해보세요');
+      startWakeListen();
+    }
+  }
+
+  React.useEffect(() => {
+    // ★ v26: 상시 대기(웨이크워드) 자동 시작 제거 — 배경에서 마이크가 계속 켜져 비프음 나던 문제 해결.
+    //  이제 마이크는 사용자가 버튼을 눌렀을 때만 켜진다. (원하면 아래 마이크 길게 눌러 수동으로 웨이크 켤 수 있음)
+    return () => {
+      clearTimeout(wakeRestartRef.current);
+      clearTimeout(toastTimerRef.current);
+      try{wakeRecRef.current?.stop();}catch(e){}
+    };
+  }, []);
+
+  return (
+    <>
+      {/* 🤖 플로팅 버튼 */}
+      <div style={{ position:'fixed', bottom:'calc(84px + env(safe-area-inset-bottom, 0px))', left:12, zIndex:1000 }}>
+
+        {/* 토스트 */}
+        {toastMsg && (
+          <div style={{ position:'absolute', bottom:'calc(100% + 8px)', left:0, background:'rgba(20,25,55,0.96)', color:'#fff', fontSize:12, padding:'7px 13px', borderRadius:14, whiteSpace:'pre-line', fontWeight:600, lineHeight:1.5, minWidth:150, border:'1px solid rgba(66,133,244,0.4)', boxShadow:'0 4px 14px rgba(0,0,0,0.5)', pointerEvents:'none' }}>
+            {toastMsg}
+          </div>
+        )}
+
+        {/* 웨이크 링 */}
+        {wakeActive && !sheetOpen && (
+          <div style={{ position:'absolute', inset:-6, borderRadius:'50%', border:'2px solid rgba(66,133,244,0.7)', animation:'jbRing 1.8s infinite', pointerEvents:'none' }}/>
+        )}
+
+        {/* ★ 통합 버튼: AI + 마이크 아이콘 하나로 */}
+        <button onClick={()=>{
+          const opening = !sheetOpen;
+          if (opening) {
+            // ★ v7 Fix: ref 직접 설정 → stop() 이전에 확실히 false (경쟁 조건 제거)
+            clearTimeout(wakeRestartRef.current);
+            wakeActiveRef.current = false;   // 비동기 state보다 먼저 ref 직접 false
+            setWakeActive(false);
+            try { wakeRecRef.current && wakeRecRef.current.stop(); } catch(e) {}
+          } else {
+            // ★ v7 Fix: ref 직접 true 후 startWakeListen (state 비동기 문제 방지)
+            setTimeout(() => {
+              wakeActiveRef.current = true;  // ref 먼저 true
+              setWakeActive(true);
+              startWakeListen();
+            }, 1000);
+          }
+          setSheetOpen(o=>!o);
+        }} title={sheetOpen ? '닫기' : '조비서 AI — 탭하거나 "조비서"라고 말하세요'}
+          style={{
+            width:52, height:52, borderRadius:'50%', border:'none', cursor:'pointer',
+            background: sheetOpen
+              ? 'rgba(219,68,55,0.90)'
+              : 'linear-gradient(135deg,#2F6F4E 0%,#4CAF50 100%)',
+            color:'#fff', fontSize:26,
+            display:'flex', alignItems:'center', justifyContent:'center',
+            boxShadow: sheetOpen
+              ? '0 3px 16px rgba(219,68,55,0.55)'
+              : wakeActive
+                ? '0 0 0 3px rgba(76,175,80,0.45), 0 4px 18px rgba(47,111,78,0.65)'
+                : '0 4px 14px rgba(47,111,78,0.5)',
+            transition:'all 0.25s',
+          }}>
+          {sheetOpen ? '✕' : '🎤'}
+        </button>
+      </div>
+
+      {/* 논모달 바텀시트 */}
+      {sheetOpen && (
+        <JarvisSheet
+          orders={orders} customers={customers} products={products}
+          tab={tab} setTab={setTab} geminiKey={geminiKey}
+          setSearchQuery={setSearchQuery} setStatusFilter={setStatusFilter} setDateFilter={setDateFilter}
+          vendors={vendors} createVoiceOrder={createVoiceOrder}
+          onAppCommand={onAppCommand}
+          subscriptions={subscriptions}
+          onClose={()=>{
+            setSheetOpen(false);
+            // ★ v7 Fix: ref 직접 true 후 startWakeListen
+            setTimeout(() => {
+              wakeActiveRef.current = true;
+              setWakeActive(true);
+              startWakeListen();
+            }, 1000);
+          }}
+        />
+      )}
+
+      <style>{`
+        @keyframes jbRing { 0%{opacity:0.9;transform:scale(1)} 70%{opacity:0;transform:scale(1.65)} 100%{opacity:0;transform:scale(1.65)} }
+      `}</style>
+    </>
+  );
+}
 // ─────────────────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2185,6 +3911,7 @@ function App() {
   const lastGoodDataRef = useRef(null); // 마지막으로 정상 저장/로드된 데이터 (복구·방어 기준)
   const prevOrderCountRef = useRef(null); // 직전 주문 수 (새 주문 감지용)
   const justSubmittedRef = useRef(false); // 내가 방금 주문을 등록했는지 (내 등록은 알림 제외)
+  const lastUndoRef = useRef(null); // ★ v42: 실수 복구용 — 직전 주문 변경 전의 orders 스냅샷 { label, orders }
   const [newOrderAlert, setNewOrderAlert] = useState(0); // 새로 도착한 주문 수 (화면 알림용)
   // 이 탭(세션)을 구분하기 위한 고유번호 + 언제 열렸는지. 데이터 이상 발생시 원인 진단용 기록에 사용.
   const sessionIdRef = useRef("s_" + Math.random().toString(36).slice(2, 10));
@@ -2214,6 +3941,30 @@ function App() {
     fireToast("최신 버전인지 확인하고 있어요...");
     if (window.__joassamCheckForUpdate) window.__joassamCheckForUpdate();
     else { setCheckingUpdate(false); window.location.reload(); }
+  }
+  // ★ v48: Memory Manager — AI가 배운 말(발음·별칭) 확인·삭제
+  const [memoryList, setMemoryList] = useState(null); // null=닫힘, 배열=열림 [{from,to}]
+  function openMemoryManager() {
+    const map = (typeof getLearnedAliases === "function") ? getLearnedAliases() : {};
+    setMemoryList(Object.keys(map).map((k) => ({ from: k, to: map[k] })));
+    setSideMenuOpen(false);
+  }
+  function deleteMemory(from) {
+    if (typeof removeLearnedAlias === "function") removeLearnedAlias(from);
+    setMemoryList((prev) => (prev || []).filter((e) => e.from !== from));
+    fireToast(`"${from}" 학습을 지웠어요`);
+  }
+  // ★ v46: 내장 자가진단 실행 → 결과 모달 표시 (데이터 변경 없음)
+  const [selfTestResult, setSelfTestResult] = useState(null);
+  function runSelfTestAndShow() {
+    try {
+      const res = runSelfTests();
+      setSelfTestResult(res);
+      setSideMenuOpen(false);
+      fireToast(res.failed === 0 ? `✅ 자가진단 통과 (${res.passed}/${res.total})` : `⚠ 자가진단 실패 ${res.failed}건`);
+    } catch (e) {
+      setSelfTestResult({ passed: 0, failed: 1, total: 1, cases: [{ name: "자가진단 실행", ok: false, got: String((e && e.message) || e) }] });
+    }
   }
   async function loadDiagLog() {
     setDiagLog("loading");
@@ -2930,7 +4681,7 @@ function App() {
   const [originalMessageOrderId, setOriginalMessageOrderId] = useState(null);
 
   const [newCustomer, setNewCustomer] = useState({ name: "", phone: "", address: "", memo: "" });
-  const [newProduct, setNewProduct] = useState({ name: "", price: "", wholesalePrice: "", stock: "", channel: "both", unit: "개" });
+  const [newProduct, setNewProduct] = useState({ name: "", weight: "", price: "", wholesalePrice: "", stock: "", channel: "both", unit: "개" });
 
   const blankDraft = {
     customerId: "", message: "",
@@ -3030,6 +4781,20 @@ function App() {
   }
 
   // ★ v38: 말한 이름으로 기존 주문 1건 찾기 (발송완료 포함, 가장 최근 것 우선). 못 찾으면 null.
+  // ★ v42: 실수 복구 — 주문을 바꾸기 직전 상태를 1단계 저장. 이후 "되돌려"로 복원.
+  function recordUndo(label) {
+    lastUndoRef.current = { label: label || "방금 작업", orders: orders };
+  }
+  function undoLast() {
+    const u = lastUndoRef.current;
+    if (!u || !Array.isArray(u.orders)) { fireToast("되돌릴 작업이 없어요"); return false; }
+    justSubmittedRef.current = true;   // 되돌리기로 인한 개수 변화는 '새 주문 알림'에서 제외
+    setOrders(u.orders);
+    lastUndoRef.current = null;
+    fireToast(`↩️ ${u.label}을(를) 되돌렸어요`);
+    return true;
+  }
+
   function findOrderBySpokenName(spokenName) {
     const q = String(spokenName || "").replace(/\s/g, "").trim();
     if (!q) return null;
@@ -3180,6 +4945,9 @@ function App() {
         fireToast(`✏️ ${orderRecipientName(target)} 주문을 열었어요 — 상품 추가·삭제·묶음 수정 가능`);
         break;
       }
+      case "UNDO_LAST":
+        undoLast();   // ★ v42: 직전 주문 변경(등록·수정·삭제)을 1단계 되돌림
+        break;
       case "REMOVE_FROM_ORDER": {
         // 기존 주문에서 상품 제거 — 대상: 말한 고객의 주문, 없으면 현재 열린 주문
         let target = command.name ? findOrderBySpokenName(command.name) : null;
@@ -3556,6 +5324,7 @@ function App() {
   }
 
   function updateOrder(orderId, updates) {
+    recordUndo("방금 수정");   // ★ v42: 수정 전 상태 저장 → "되돌려"로 복원 가능
     setOrders((prev) => prev.map((o) => {
       if (o.id !== orderId) return o;
       const next = { ...o, ...updates };
@@ -3575,6 +5344,7 @@ function App() {
   }
 
   function deleteOrder(orderId) {
+    recordUndo("방금 삭제");   // ★ v42: 삭제 전 상태 저장 → "되돌려"로 복원 가능
     // 삭제 후 재묶음 정리 — 묶음에 1건만 남으면 자동 해제
     setOrders((prev) => dissolveLoneBundles(prev.filter((o) => o.id !== orderId)));
     setCheckedIds((prev) => {
@@ -3653,7 +5423,9 @@ function App() {
     setOrders((prev) => prev.map((o) => {
       if (!checkedIds.has(o.id)) return o;
       if (toBusiness) {
-        const updated = { ...o, isBusiness: true, vendorId: vendorIdByOrderId[o.id] || o.vendorId || "" };
+        // ★ v52: 업체 주문으로 전환 시 등록 상품 단가를 업체단가로 재계산 (공용 상품이 일반가격으로 새는 문제 해결).
+        const repricedItems = repriceItemsForBusiness(o.items, productMap);
+        const updated = { ...o, isBusiness: true, vendorId: vendorIdByOrderId[o.id] || o.vendorId || "", items: repricedItems };
         convertedToBiz.push(updated);
         return updated;
       } else {
@@ -3842,11 +5614,14 @@ function App() {
     const wholesalePrice = Number(newProduct.wholesalePrice) || 0;
     const stock = Number(newProduct.stock);
     if (!newProduct.name.trim() || !price) return;
+    // ★ v53: 기본명 + 중량 → 기존과 동일한 한 이름으로 저장("채소 2kg"). weight도 별도 보관(향후용).
+    const weight = (newProduct.weight || "").replace(/\s/g, "").trim();
+    const fullName = composeNameWeight(newProduct.name, weight);
     setProducts((prev) => [
       ...prev,
-      { id: uid("p"), name: newProduct.name.trim(), price, wholesalePrice, stock: stock || 0, channel: newProduct.channel || "both", unit: newProduct.unit || "개" },
+      { id: uid("p"), name: fullName, weight, price, wholesalePrice, stock: stock || 0, channel: newProduct.channel || "both", unit: newProduct.unit || "개" },
     ]);
-    setNewProduct({ name: "", price: "", wholesalePrice: "", stock: "", channel: "both", unit: "개" });
+    setNewProduct({ name: "", weight: "", price: "", wholesalePrice: "", stock: "", channel: "both", unit: "개" });
   }
 
   function removeProduct(id) {
@@ -4561,6 +6336,7 @@ function App() {
   //  반환: 생성된 주문 배열 (박스 1개면 길이 1). 같은 batchId로 묶여 목록에 한 카드로 표시됨.
   function createVoiceOrder(vo) {
     if (!vo || !vo.name || !vo.items || !vo.items.length) return null;
+    recordUndo("방금 등록한 주문");   // ★ v42: 등록 전 상태 저장 → "되돌려"로 취소 가능
     justSubmittedRef.current = true;
     const baseItems = vo.items.map((it) => ({ productId: it.productId || null, name: it.name || "", qty: Number(it.qty) || 1 }));
     const plan = vo.boxPlan || (vo.boxMode ? { mode: vo.boxMode } : null);
@@ -5717,6 +7493,7 @@ function App() {
               orders={filteredOrders}
               onExportFiltered={exportFilteredOrders}
               customers={customers}
+              vendors={vendors}
               customerMap={customerMap}
               orderTotal={orderTotal}
               onSelect={setSelectedOrderId}
@@ -5760,7 +7537,21 @@ function App() {
                 });
                 setSearchQuery("");
                 setTab("new");
-                fireToast(`${c.name} 고객 정보를 채웠어요. 상품을 선택해 등록하세요`);
+                fireToast(`${c.name} ${c._kind === "vendor" ? "업체" : "고객"} 정보를 채웠어요. 상품을 선택해 등록하세요`);
+              }}
+              onNewNameOrder={(name) => {
+                if (!name) { setTab("new"); return; }
+                // ★ v49: 검색 결과에 없으면 그 이름으로 새 주문 시작 (저장 시 고객/업체 자동 등록·판정)
+                setDraft({
+                  ...blankDraft,
+                  customerId: "", message: "",
+                  sender: { name, phone: "" },
+                  deliveries: [{ id: uid("d"), name, phone: "", address: "", cart: {} }],
+                  reserveDate: "", boxVolume: "", deliveryMessage: "", memo: "", paymentAmount: "",
+                });
+                setSearchQuery("");
+                setTab("new");
+                fireToast(`"${name}"(으)로 새 주문을 시작해요. 저장하면 고객·업체로 자동 등록돼요`);
               }}
             />
           )}
@@ -6028,6 +7819,67 @@ function App() {
           />
         )}
 
+        {memoryList !== null && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 300000, padding: 20 }} onClick={() => setMemoryList(null)}>
+            <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 16, padding: "20px 18px", maxWidth: 380, width: "100%", maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                <div style={{ fontSize: 16, fontWeight: 700 }}>🧠 AI가 배운 말</div>
+                <span style={{ fontSize: 12, fontWeight: 700, color: "#185FA5", background: "#E6F1FB", padding: "3px 10px", borderRadius: 20 }}>{memoryList.length}개</span>
+              </div>
+              <div style={{ fontSize: 11.5, color: "#888780", marginBottom: 10 }}>
+                조비서에게 "○○를 △△로 기억해"라고 하면 배웁니다. 잘못 배운 말은 여기서 지울 수 있어요.
+              </div>
+              <div style={{ overflowY: "auto", flex: 1, borderTop: "1px solid #F1F2EC" }}>
+                {memoryList.length === 0 ? (
+                  <div style={{ textAlign: "center", color: "#888780", fontSize: 13, padding: "26px 0", lineHeight: 1.6 }}>
+                    아직 배운 말이 없어요.<br />예: "청겨를 청겨자로 기억해"
+                  </div>
+                ) : (
+                  memoryList.map((e, i) => (
+                    <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 2px", borderBottom: "1px solid #F5F5F0" }}>
+                      <div style={{ flex: 1, fontSize: 13.5, color: "#1B2430" }}>
+                        <span style={{ fontWeight: 700 }}>{e.from}</span>
+                        <span style={{ color: "#888780" }}> → </span>
+                        <span style={{ color: "#185FA5", fontWeight: 700 }}>{e.to}</span>
+                      </div>
+                      <button onClick={() => deleteMemory(e.from)} style={{ border: "1px solid #E2C4C4", background: "#fff", color: "#A32D2D", fontSize: 11.5, fontWeight: 700, borderRadius: 7, padding: "5px 10px", cursor: "pointer" }}>삭제</button>
+                    </div>
+                  ))
+                )}
+              </div>
+              <button onClick={() => setMemoryList(null)} style={{ marginTop: 12, padding: "11px 0", borderRadius: 10, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>닫기</button>
+            </div>
+          </div>
+        )}
+
+        {selfTestResult && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 300000, padding: 20 }} onClick={() => setSelfTestResult(null)}>
+            <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 16, padding: "20px 18px", maxWidth: 380, width: "100%", maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                <div style={{ fontSize: 16, fontWeight: 700 }}>🧪 자가진단 결과</div>
+                <span style={{ fontSize: 13, fontWeight: 700, color: selfTestResult.failed === 0 ? "#2F6F4E" : "#A32D2D", background: selfTestResult.failed === 0 ? "#EAF3DE" : "#FBEAEA", padding: "3px 10px", borderRadius: 20 }}>
+                  {selfTestResult.passed}/{selfTestResult.total} 통과
+                </span>
+              </div>
+              <div style={{ fontSize: 11.5, color: "#888780", marginBottom: 10 }}>
+                {selfTestResult.failed === 0 ? "핵심 음성·주문 엔진이 모두 정상 동작합니다." : `${selfTestResult.failed}건이 실패했어요. 실패 항목을 확인하세요.`}
+              </div>
+              <div style={{ overflowY: "auto", flex: 1, borderTop: "1px solid #F1F2EC" }}>
+                {selfTestResult.cases.map((c, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "8px 2px", borderBottom: "1px solid #F5F5F0" }}>
+                    <span style={{ fontSize: 14, flexShrink: 0 }}>{c.ok ? "✅" : "❌"}</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 12.5, color: "#1B2430", fontWeight: c.ok ? 400 : 700 }}>{c.name}</div>
+                      {!c.ok && <div style={{ fontSize: 11, color: "#A32D2D", marginTop: 2 }}>결과: {c.got}</div>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <button onClick={() => setSelfTestResult(null)} style={{ marginTop: 12, padding: "11px 0", borderRadius: 10, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>닫기</button>
+            </div>
+          </div>
+        )}
+
         {updateAvailable && !isStaleVersion && (
           <div style={{ position: "fixed", left: 12, right: 12, bottom: "calc(80px + env(safe-area-inset-bottom, 0px))", maxWidth: 360, margin: "0 auto", zIndex: 250000, background: "#185FA5", color: "#fff", borderRadius: 12, padding: "12px 14px", display: "flex", alignItems: "center", gap: 10, boxShadow: "0 6px 20px rgba(0,0,0,0.3)" }}>
             <span style={{ fontSize: 20 }}>🔄</span>
@@ -6278,6 +8130,8 @@ function App() {
             onOpenBackupList={loadBackupList}
             onCheckUpdate={checkForAppUpdate}
             checkingUpdate={checkingUpdate}
+            onSelfTest={runSelfTestAndShow}
+            onMemory={openMemoryManager}
             isAdmin={isCurrentUserAdmin}
             onClose={() => setSideMenuOpen(false)}
             onNavigate={(t) => { setTab(t); setSideMenuOpen(false); setSelectedOrderId(null); }}
@@ -6289,6 +8143,26 @@ function App() {
           />
         )}
 
+        {/* ★ v54: 조비서 AI 대화 모드는 관리자 전용 (공유계정·직원 로그인에는 숨김 → 테스트 중 혼란 방지) */}
+        {isCurrentUserAdmin && (
+          <JarvisButton
+            orders={orders}
+            customers={customers}
+            products={products}
+            tab={tab}
+            setTab={setTab}
+            geminiKey={geminiKey}
+            setSearchQuery={setSearchQuery}
+            setStatusFilter={setStatusFilter}
+            setDateFilter={setDateFilter}
+            vendors={vendors}
+            createVoiceOrder={createVoiceOrder}
+            onAppCommand={runLocalVoiceCommand}
+            subscriptions={subscriptions}
+          />
+        )}
+
+        {/* ★ v28: 하단 중복 '음성 입력' 버튼 제거 — 조비서 팝업(orb)이 모든 음성 명령을 처리하므로 불필요 */}
 
         {/* #4 동명이인/유사업체 확인 오버레이 — 2곳 이상 매칭 시 등록 멈추고 사용자에게 선택 요청 */}
         {nameChoice && (
@@ -8894,24 +10768,26 @@ function LinkFarmTab({ fireToast }) {
 function OrdersTab({
   statusFilter, setStatusFilter, methodFilter, setMethodFilter, dateFilter, setDateFilter,
   bizFilter, setBizFilter,
-  searchQuery, setSearchQuery, counts, orders, customers, customerMap, orderTotal, onSelect,
+  searchQuery, setSearchQuery, counts, orders, customers, vendors, customerMap, orderTotal, onSelect,
   checkedIds, toggleCheck, toggleCheckAll, exportOrdersExcel, invoiceInputRef, handleInvoiceUpload,
-  onOpenActions, onOpenInvoice, onNewOrder, onOpenBulkSms, onBulkOrder, onPickCustomerForOrder,
+  onOpenActions, onOpenInvoice, onNewOrder, onOpenBulkSms, onBulkOrder, onPickCustomerForOrder, onNewNameOrder,
   onDeleteChecked, onSetCheckedStatus, onExportVendorChecked, onSetCheckedBusiness, onExportFiltered,
 }) {
   const allChecked = orders.length > 0 && orders.every((o) => checkedIds.has(o.id));
 
-  // 주문 검색어로 등록된 고객도 통합 검색 (이 고객을 클릭하면 주문 입력으로 이동)
-  const customerMatches = (() => {
+  // ★ v49: 주문창 검색어로 등록된 고객 + 업체를 함께 검색. 클릭하면 그 정보로 새 주문 작성.
+  const contactMatches = (() => {
     const q = (searchQuery || "").trim().toLowerCase();
     if (!q) return [];
     const qNum = q.replace(/-/g, "");
-    return (customers || []).filter((c) =>
-      (c.name || "").toLowerCase().includes(q) ||
-      (c.phone || "").replace(/-/g, "").includes(qNum) ||
-      (c.address || "").toLowerCase().includes(q) ||
-      (c.memo || "").toLowerCase().includes(q)
-    ).slice(0, 6);
+    const hit = (x) =>
+      (x.name || "").toLowerCase().includes(q) ||
+      (x.phone || "").replace(/-/g, "").includes(qNum) ||
+      (x.address || "").toLowerCase().includes(q) ||
+      (x.memo || "").toLowerCase().includes(q);
+    const cs = (customers || []).filter(hit).map((c) => ({ ...c, _kind: "customer" }));
+    const vs = (vendors || []).filter(hit).map((v) => ({ ...v, _kind: "vendor" }));
+    return [...vs, ...cs].slice(0, 8);   // 업체 먼저 노출
   })();
 
   return (
@@ -8949,26 +10825,46 @@ function OrdersTab({
         )}
       </div>
 
-      {customerMatches.length > 0 && (
+      {searchQuery.trim() && (
         <div style={{ background: "#F2F7EE", border: "1px solid #C0DD97", borderRadius: 10, padding: "8px 10px", marginBottom: 10 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: "#27500A", marginBottom: 6 }}>
-            등록된 고객 {customerMatches.length}명 · 눌러서 새 주문 작성
-          </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {customerMatches.map((c) => (
-              <button
-                key={c.id}
-                onClick={() => onPickCustomerForOrder(c)}
-                style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", textAlign: "left", background: "#fff", border: "1px solid #D7E6C4", borderRadius: 8, padding: "8px 10px", cursor: "pointer" }}
-              >
-                <div>
-                  <div style={{ fontSize: 12.5, fontWeight: 700, color: "#1B2430" }}>{c.name} <span style={{ fontWeight: 400, color: "#888780", fontSize: 11 }}>{c.phone}</span></div>
-                  {c.address && <div style={{ fontSize: 10.5, color: "#888780", marginTop: 1 }}>{c.address}</div>}
-                </div>
-                <span style={{ fontSize: 11, fontWeight: 700, color: "#2F6F4E", flexShrink: 0, marginLeft: 8 }}>주문 작성 ›</span>
-              </button>
-            ))}
-          </div>
+          {contactMatches.length > 0 ? (
+            <>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "#27500A", marginBottom: 6 }}>
+                등록된 고객·업체 {contactMatches.length}곳 · 눌러서 새 주문 작성
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {contactMatches.map((c) => (
+                  <button
+                    key={c._kind + c.id}
+                    onClick={() => onPickCustomerForOrder(c)}
+                    style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", textAlign: "left", background: "#fff", border: "1px solid #D7E6C4", borderRadius: 8, padding: "8px 10px", cursor: "pointer" }}
+                  >
+                    <div>
+                      <div style={{ fontSize: 12.5, fontWeight: 700, color: "#1B2430" }}>
+                        <span style={{ fontSize: 9.5, fontWeight: 700, color: c._kind === "vendor" ? "#854F0B" : "#2F6F4E", background: c._kind === "vendor" ? "#FAEEDA" : "#EAF3DE", padding: "1px 5px", borderRadius: 6, marginRight: 5 }}>{c._kind === "vendor" ? "업체" : "고객"}</span>
+                        {c.name} <span style={{ fontWeight: 400, color: "#888780", fontSize: 11 }}>{c.phone}</span>
+                      </div>
+                      {c.address && <div style={{ fontSize: 10.5, color: "#888780", marginTop: 1 }}>{c.address}</div>}
+                    </div>
+                    <span style={{ fontSize: 11, fontWeight: 700, color: "#2F6F4E", flexShrink: 0, marginLeft: 8 }}>주문 작성 ›</span>
+                  </button>
+                ))}
+              </div>
+              <div style={{ fontSize: 10.5, color: "#888780", marginTop: 8, paddingTop: 8, borderTop: "1px dashed #C0DD97" }}>찾는 분이 없나요?</div>
+            </>
+          ) : (
+            <div style={{ fontSize: 11.5, fontWeight: 700, color: "#854F0B", marginBottom: 8 }}>
+              "{searchQuery.trim()}" — 등록된 고객·업체에 없어요. 신규로 볼게요.
+            </div>
+          )}
+          {onNewNameOrder && (
+            <button
+              onClick={() => onNewNameOrder(searchQuery.trim())}
+              style={{ width: "100%", marginTop: contactMatches.length > 0 ? 6 : 0, padding: "9px 0", borderRadius: 8, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}
+            >
+              ＋ "{searchQuery.trim()}"(으)로 새 주문 작성 (신규 고객·업체)
+            </button>
+          )}
         </div>
       )}
 
@@ -9525,7 +11421,7 @@ function sheetBtnStyle(bg, color) {
   };
 }
 
-function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onOpenBackupList, onCheckUpdate, checkingUpdate, isAdmin, onClose, onNavigate, askConfirm, handleLogout, fireToast, geminiKey, setGeminiKey }) {
+function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onOpenBackupList, onCheckUpdate, checkingUpdate, onSelfTest, onMemory, isAdmin, onClose, onNavigate, askConfirm, handleLogout, fireToast, geminiKey, setGeminiKey }) {
   const [editingName, setEditingName] = useState(false);
   const [draftName, setDraftName] = useState(appName);
   const [restoreDate, setRestoreDate] = useState(todayStr());
@@ -9650,6 +11546,22 @@ function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, 
           >
             {checkingUpdate ? "확인하는 중..." : `🔄 업데이트 확인하기 (현재 v${APP_VERSION})`}
           </button>
+          {onSelfTest && (
+            <button
+              onClick={onSelfTest}
+              style={{ width: "100%", marginTop: 8, padding: "9px 0", borderRadius: 8, border: "1px solid #888780", background: "#fff", color: "#5F5E5A", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
+            >
+              🧪 자가진단 실행 (기능 점검)
+            </button>
+          )}
+          {onMemory && (
+            <button
+              onClick={onMemory}
+              style={{ width: "100%", marginTop: 8, padding: "9px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
+            >
+              🧠 AI가 배운 말 관리
+            </button>
+          )}
         </div>
 
         <div style={{ padding: "8px 0", borderBottom: "1px solid #F1F2EC" }}>
@@ -10559,6 +12471,45 @@ function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, ch
     setVendorQuery("");
   }
 
+  // ★ v50: 고객·업체·이전주문자 통합검색 (기존 '업체 불러오기'와 '고객 선택' 두 칸을 하나로 합침)
+  const contactResults = (() => {
+    const q = vendorQuery.trim().toLowerCase();
+    if (!q) return [];
+    const qn = q.replace(/-/g, "");
+    const hit = (x) => (x.name || "").toLowerCase().includes(q)
+      || (x.phone || "").replace(/-/g, "").includes(qn)
+      || (x.address || "").toLowerCase().includes(q)
+      || (x.bizNo || "").replace(/-/g, "").includes(qn)
+      || (x.memo || "").toLowerCase().includes(q);
+    const out = []; const seen = new Set();
+    (vendors || []).forEach((v) => { if (hit(v)) { out.push({ kind: "vendor", id: v.id, name: v.name, phone: v.phone || "", address: v.address || "", _v: v }); const k = (v.phone || "").replace(/-/g, ""); if (k) seen.add(k); } });
+    (customers || []).forEach((c) => { if (hit(c)) { const k = (c.phone || "").replace(/-/g, ""); if (k && seen.has(k)) return; if (k) seen.add(k); out.push({ kind: "customer", id: c.id, name: c.name, phone: c.phone || "", address: c.address || "" }); } });
+    (orders || []).forEach((o) => { [o.sender, o.recipient].forEach((p) => {
+      if (!p || !p.name) return;
+      const k = (p.phone || "").replace(/-/g, "");
+      if (k && seen.has(k)) return;
+      if (!k && !p.address) return;
+      const okhit = (p.name || "").toLowerCase().includes(q) || (p.phone || "").replace(/-/g, "").includes(qn) || (p.address || "").toLowerCase().includes(q);
+      if (!okhit) return;
+      if (k) seen.add(k);
+      out.push({ kind: "order", id: "ord_" + o.id + "_" + p.name, name: p.name, phone: p.phone || "", address: p.address || "" });
+    }); });
+    return out.slice(0, 10);
+  })();
+  function pickContact(item) {
+    if (item.kind === "vendor") { pickVendor(item._v || (vendors || []).find((v) => v.id === item.id)); return; }
+    setDraft((prev) => ({
+      ...prev,
+      customerId: item.kind === "customer" ? item.id : "",
+      sender: { name: item.name, phone: item.phone },
+      deliveries: [
+        { ...(prev.deliveries[0] || { id: uid("d"), cart: {} }), name: item.name, phone: item.phone, address: item.address },
+        ...prev.deliveries.slice(1),
+      ],
+    }));
+    setVendorQuery("");
+  }
+
   return (
     <div>
       <button onClick={onBack} style={{ background: "none", border: "none", color: "#5F5E5A", fontSize: 13, cursor: "pointer", padding: 0, marginBottom: 14 }}>
@@ -10567,26 +12518,29 @@ function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, ch
       <h1 style={{ fontSize: 19, fontWeight: 700, margin: "2px 0 12px", letterSpacing: "-0.02em" }}>주문 입력</h1>
 
       <div style={{ background: "#fff", border: "1px solid #E2E4DD", borderRadius: 10, padding: 12, marginBottom: 14 }}>
-        <label style={{ fontSize: 12, fontWeight: 700, color: "#27500A", display: "block", marginBottom: 6 }}>🏢 등록된 업체에서 불러오기 (선택)</label>
+        <label style={{ fontSize: 12, fontWeight: 700, color: "#27500A", display: "block", marginBottom: 6 }}>🔎 고객·업체 통합검색 (선택)</label>
         <input
-          placeholder="업체명·전화·사업자번호로 검색"
+          placeholder="이름·전화·주소·사업자번호로 검색 (비우면 아래에 직접 입력)"
           value={vendorQuery}
           onChange={(e) => setVendorQuery(e.target.value)}
           style={{ ...inputStyle() }}
         />
         {vendorQuery.trim() && (
           <div style={{ marginTop: 6, border: "1px solid #E2E4DD", borderRadius: 8, overflow: "hidden" }}>
-            {vendorResults.length === 0 ? (
-              <div style={{ padding: "10px 12px", fontSize: 12, color: "#888780" }}>일치하는 업체가 없습니다</div>
+            {contactResults.length === 0 ? (
+              <div style={{ padding: "10px 12px", fontSize: 12, color: "#888780" }}>일치하는 고객·업체가 없어요. 아래에 직접 입력하시면 저장 시 자동 등록돼요.</div>
             ) : (
-              vendorResults.map((v) => (
+              contactResults.map((item) => (
                 <div
-                  key={v.id}
-                  onClick={() => pickVendor(v)}
+                  key={item.kind + item.id}
+                  onClick={() => pickContact(item)}
                   style={{ padding: "10px 12px", fontSize: 12.5, cursor: "pointer", borderTop: "1px solid #F0F1EC", background: "#fff" }}
                 >
-                  <div style={{ fontWeight: 700, color: "#1B2430" }}>{v.name}</div>
-                  <div style={{ fontSize: 11, color: "#5F5E5A" }}>{v.phone || ""}{v.address ? ` · ${v.address}` : ""}</div>
+                  <div style={{ fontWeight: 700, color: "#1B2430" }}>
+                    <span style={{ fontSize: 9.5, fontWeight: 700, color: item.kind === "vendor" ? "#854F0B" : "#2F6F4E", background: item.kind === "vendor" ? "#FAEEDA" : "#EAF3DE", padding: "1px 5px", borderRadius: 6, marginRight: 5 }}>{item.kind === "vendor" ? "업체" : item.kind === "customer" ? "고객" : "이전주문"}</span>
+                    {item.name}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#5F5E5A" }}>{item.phone || ""}{item.address ? ` · ${item.address}` : ""}</div>
                 </div>
               ))
             )}
@@ -10663,26 +12617,7 @@ function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, ch
         <input placeholder="주문자 연락처" value={draft.sender.phone} onChange={(e) => setDraft({ ...draft, sender: { ...draft.sender, phone: e.target.value } })} style={inputStyle()} />
       </div>
 
-      {draft.deliveries.length === 1 && (
-        <>
-          <label style={{ fontSize: 12, color: "#5F5E5A", fontWeight: 500 }}>고객 선택 (선택, 등록된 고객 정보를 그대로 사용)</label>
-          <CustomerSearchPicker
-            customers={customers}
-            orders={orders}
-            value={draft.customerId}
-            onChange={(id) => setDraft({ ...draft, customerId: id })}
-            onPickRaw={(info) => setDraft((prev) => ({
-              ...prev,
-              customerId: "",
-              sender: { name: info.name, phone: info.phone },
-              deliveries: [
-                { ...prev.deliveries[0], name: info.name, phone: info.phone, address: info.address },
-                ...prev.deliveries.slice(1),
-              ],
-            }))}
-          />
-        </>
-      )}
+      {/* ★ v50: 고객 검색은 상단 '고객·업체 통합검색'으로 합쳐졌습니다. (중복 제거) */}
 
       {(!isGuest && draft.deliveries.length === 1) ? (() => {
         const selc = customers.find((c) => c.id === draft.customerId);
@@ -11019,7 +12954,13 @@ function ProductsTab({ products, newProduct, setNewProduct, addProduct, removePr
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16, background: "#fff", border: "1px solid #E2E4DD", borderRadius: 10, padding: 12 }}>
         <div style={{ fontSize: 12, fontWeight: 700, color: "#27500A" }}>상품 등록</div>
-        <input placeholder="상품명" value={newProduct.name} onChange={(e) => setNewProduct({ ...newProduct, name: e.target.value })} style={inputStyle()} />
+        <div style={{ display: "flex", gap: 8 }}>
+          <input placeholder="상품명 (예: 채소)" value={newProduct.name} onChange={(e) => setNewProduct({ ...newProduct, name: e.target.value })} style={{ ...inputStyle(), flex: 2 }} />
+          <input placeholder="중량 (예: 2kg)" value={newProduct.weight} onChange={(e) => setNewProduct({ ...newProduct, weight: e.target.value })} style={{ ...inputStyle(), flex: 1 }} />
+        </div>
+        {(newProduct.name.trim() || newProduct.weight.trim()) && (
+          <div style={{ fontSize: 11, color: "#888780" }}>저장될 상품명: <b style={{ color: "#27500A" }}>{composeNameWeight(newProduct.name, newProduct.weight) || "(상품명 입력)"}</b></div>
+        )}
         <div style={{ display: "flex", gap: 8 }}>
           <input placeholder="일반 가격" type="number" value={newProduct.price} onChange={(e) => setNewProduct({ ...newProduct, price: e.target.value })} style={inputStyle()} />
           <input placeholder="업체 단가" type="number" value={newProduct.wholesalePrice} onChange={(e) => setNewProduct({ ...newProduct, wholesalePrice: e.target.value })} style={inputStyle()} />
@@ -11087,13 +13028,15 @@ function ProductsTab({ products, newProduct, setNewProduct, addProduct, removePr
 
 function ProductRow({ product, updateProduct, removeProduct, askConfirm }) {
   const [editing, setEditing] = useState(false);
-  const [form, setForm] = useState({ name: product.name, price: String(product.price), wholesalePrice: String(product.wholesalePrice || ""), stock: String(product.stock), channel: product.channel || "both", unit: product.unit || "개" });
+  // ★ v53: 저장된 이름("채소 2kg")을 기본명 + 중량 두 칸으로 분리해 편집
+  const _init = () => { const { base, weight } = splitNameWeight(product.name); return { name: base, weight: (product.weight || weight || ""), price: String(product.price), wholesalePrice: String(product.wholesalePrice || ""), stock: String(product.stock), channel: product.channel || "both", unit: product.unit || "개" }; };
+  const [form, setForm] = useState(_init);
 
   const CHANNEL_LABEL = { both: "공용", retail: "일반용", business: "업체용" };
   const CHANNEL_COLOR = { both: { c: "#5F5E5A", bg: "#EFEFE9" }, retail: { c: "#185FA5", bg: "#E6F1FB" }, business: { c: "#854F0B", bg: "#FAEEDA" } };
 
   function startEdit() {
-    setForm({ name: product.name, price: String(product.price), wholesalePrice: String(product.wholesalePrice || ""), stock: String(product.stock), channel: product.channel || "both", unit: product.unit || "개" });
+    setForm(_init());
     setEditing(true);
   }
 
@@ -11102,7 +13045,8 @@ function ProductRow({ product, updateProduct, removeProduct, askConfirm }) {
     const wholesalePrice = Number(form.wholesalePrice) || 0;
     const stock = Number(form.stock);
     if (!form.name.trim() || !price) return;
-    updateProduct(product.id, { name: form.name.trim(), price, wholesalePrice, stock: stock || 0, channel: form.channel, unit: form.unit || "개" });
+    const weight = (form.weight || "").replace(/\s/g, "").trim();
+    updateProduct(product.id, { name: composeNameWeight(form.name, weight), weight, price, wholesalePrice, stock: stock || 0, channel: form.channel, unit: form.unit || "개" });
     setEditing(false);
   }
 
@@ -11138,7 +13082,11 @@ function ProductRow({ product, updateProduct, removeProduct, askConfirm }) {
   return (
     <div style={{ background: "#fff", border: "1px solid #185FA5", borderRadius: 10, padding: "12px 14px" }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
-        <input placeholder="상품명" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} style={inputStyle()} />
+        <div style={{ display: "flex", gap: 8 }}>
+          <input placeholder="상품명 (예: 채소)" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} style={{ ...inputStyle(), flex: 2 }} />
+          <input placeholder="중량 (예: 2kg)" value={form.weight} onChange={(e) => setForm({ ...form, weight: e.target.value })} style={{ ...inputStyle(), flex: 1 }} />
+        </div>
+        <div style={{ fontSize: 11, color: "#888780" }}>저장될 상품명: <b style={{ color: "#27500A" }}>{composeNameWeight(form.name, form.weight) || "(상품명)"}</b></div>
         <div style={{ display: "flex", gap: 8 }}>
           <input placeholder="일반 가격" type="number" value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} style={inputStyle()} />
           <input placeholder="업체 단가" type="number" value={form.wholesalePrice} onChange={(e) => setForm({ ...form, wholesalePrice: e.target.value })} style={inputStyle()} />

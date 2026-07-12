@@ -1,5 +1,5 @@
 // 자동 업데이트 지원 서비스워커
-const VERSION = "v2026-06-28";
+const VERSION = "v54-2026-07-12";   // ★ 배포마다 변경 — 새 버전 감지용
 
 self.addEventListener("install", (e) => {
   // 새 버전 설치 시 바로 대기 상태를 건너뛸 준비
