@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 63;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
+const APP_VERSION = 65;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -1505,7 +1505,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // ===== JARVIS AI ASSISTANT =====
-const APP_BUILD = "v63 (07-12 집계업체포함)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const APP_BUILD = "v65 (07-12 오인식정리)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
 const JARVIS_TAB_MAP = {
   goHome:'home', goOrders:'orders', goNew:'new',
   goCustomers:'customers', goProducts:'products',
@@ -3001,17 +3001,28 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       if (vHit) { const v = (vendors || []).find(x => x.name === vHit); if (v) { draft.name = v.name; draft.vendorId = v.id; draft.customerId = null; if (v.phone) draft.phone = v.phone; if (v.address) draft.address = v.address; } }
       else if (cHit) { const c = (customers || []).find(x => x.name === cHit); if (c) { draft.name = c.name; draft.customerId = c.id; if (c.phone) draft.phone = c.phone; if (c.address) draft.address = c.address; } }
     }
+    const _learns = [];   // ★ v64: 퍼지로 교정한 발음 후보 (주문 등록되면 자동 학습)
     for (const it of draft.items) {
       if (it.productId) continue;
       const base = String(it.name || '').replace(/\s+/g, '').trim();
       // 1) 정확 포함: 등록 상품명(공백무시)이 이 항목에 들어있으면 연결 (예: "채소 2kg"→등록품 "채소2kg")
       let prod = (products || []).find(pp => pp.name && base && base.includes(pp.name.replace(/\s/g, '')));
+      let viaFuzzy = false;
       // 2) 퍼지·별칭: 그래도 없으면 가장 비슷한 등록 상품 (예: "채소 2키로"→"채소2kg", "가피라"→"카이피라")
-      if (!prod && typeof fuzzyProductMatch === 'function') prod = fuzzyProductMatch(it.name || '', products, 0.62);
-      // ★ #3: 대화 상품명을 '상품 창에 등록된 상품'으로 통일 (무게가 있어도 등록품이면 연결).
-      //  등록에 없는 상품(예: 미등록 특판)만 말한 그대로 커스텀 유지.
-      if (prod) { it.productId = prod.id; it.name = prod.name; }
+      if (!prod && typeof fuzzyProductMatch === 'function') { prod = fuzzyProductMatch(it.name || '', products, 0.62); viaFuzzy = !!prod; }
+      if (prod) {
+        // ★ v64: 퍼지로 알아들은(오인식 교정) 경우, 말한 발음→상품 핵심명을 학습 후보로 기록
+        if (viaFuzzy) {
+          const coreOf = (s) => String(s || '').replace(new RegExp(WEIGHT_RE, 'g'), '').replace(/[\s\d]/g, '').trim();
+          const from = coreOf(it.name), to = coreOf(prod.name);
+          if (from.length >= 2 && to.length >= 2 && from !== to && (typeof canonicalizeSpoken !== 'function' || canonicalizeSpoken(from) !== to)) {
+            _learns.push({ from, to });
+          }
+        }
+        it.productId = prod.id; it.name = prod.name;
+      }
     }
+    if (_learns.length) draft._pendingLearns = [...(draft._pendingLearns || []), ..._learns];
     return draft;
   }
   function orderReadback(d) {
@@ -3078,7 +3089,14 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         if (setStatusFilter) setStatusFilter('all');
         if (setDateFilter) setDateFilter('all');
         setTab('orders'); setMinimized(true);
-        say(`${orderReadback(linked)}${boxN > 1 ? ` ${boxN}박스로 나눠서` : ''} 주문을 등록했어요.`);
+        // ★ v64: 자동 학습 — 주문이 잘 등록되면, 알아들으려 교정했던 발음을 기억 (다음에 더 잘 인식). 잘못 배우면 "AI가 배운 말"에서 삭제.
+        let learnNote = '';
+        try {
+          const done = [];
+          (linked._pendingLearns || []).forEach(({ from, to }) => { if (typeof learnAlias === 'function' && learnAlias(from, to)) done.push(`'${from}'는 '${to}'`); });
+          if (done.length) learnNote = ` 그리고 앞으로 ${done.slice(0, 2).join(', ')}로 알아들을게요.`;
+        } catch (e) {}
+        say(`${orderReadback(linked)}${boxN > 1 ? ` ${boxN}박스로 나눠서` : ''} 주문을 등록했어요.${learnNote}`);
       } else { say('정보가 부족해 등록을 못 했어요. 고객과 상품을 다시 말씀해 주세요.'); }
     };
 
@@ -4154,6 +4172,42 @@ function App() {
     setMemoryList((prev) => (prev || []).filter((e) => e.from !== from));
     fireToast(`"${from}" 학습을 지웠어요`);
   }
+  // ★ v65: 오인식·미등록 상품 정리 — 등록 상품과 연결 안 된(커스텀) 항목을 모아 고치고, 고치면 조비서가 학습
+  const [fixItemsOpen, setFixItemsOpen] = useState(false);
+  const customFixGroups = useMemo(() => {
+    const map = {};
+    (orders || []).forEach((o) => (o.items || []).forEach((it) => {
+      if (it && !it.productId && it.name) {
+        if (!map[it.name]) map[it.name] = { name: it.name, count: 0 };
+        map[it.name].count++;
+      }
+    }));
+    return Object.values(map).sort((a, b) => b.count - a.count);
+  }, [orders]);
+  function applyItemFix(customName, product) {
+    if (!product) return;
+    recordUndo("오인식 상품 정리");
+    setOrders((prev) => prev.map((o) => {
+      let changed = false;
+      const items = (o.items || []).map((it) => {
+        if (!it.productId && it.name === customName) {
+          changed = true;
+          const biz = o.isBusiness || product.channel === "business";
+          return { productId: product.id, name: product.name, qty: it.qty, price: biz ? (product.wholesalePrice || product.price) : product.price };
+        }
+        return it;
+      });
+      return changed ? { ...o, items } : o;
+    }));
+    // 자동 학습 (발음 → 상품 핵심명)
+    try {
+      const coreOf = (s) => String(s || "").replace(new RegExp(WEIGHT_RE, "g"), "").replace(/[\s\d]/g, "").trim();
+      const from = coreOf(customName), to = coreOf(product.name);
+      if (from.length >= 2 && to.length >= 2 && from !== to && typeof learnAlias === "function") learnAlias(from, to);
+    } catch (e) {}
+    fireToast(`'${customName}' → '${product.name}'로 정리하고 배웠어요`);
+  }
+
   // ★ v46: 내장 자가진단 실행 → 결과 모달 표시 (데이터 변경 없음)
   const [selfTestResult, setSelfTestResult] = useState(null);
   function runSelfTestAndShow() {
@@ -8054,6 +8108,44 @@ function App() {
           />
         )}
 
+        {fixItemsOpen && (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 300000, padding: 20 }} onClick={() => setFixItemsOpen(false)}>
+            <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 16, padding: "20px 18px", maxWidth: 400, width: "100%", maxHeight: "82vh", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                <div style={{ fontSize: 16, fontWeight: 700 }}>🔧 오인식·미등록 상품 정리</div>
+                <span style={{ fontSize: 12, fontWeight: 700, color: "#854F0B", background: "#FAEEDA", padding: "3px 10px", borderRadius: 20 }}>{customFixGroups.length}개</span>
+              </div>
+              <div style={{ fontSize: 11.5, color: "#888780", marginBottom: 10, lineHeight: 1.5 }}>
+                음성 주문에서 등록 상품과 연결 안 된 항목이에요. 올바른 상품을 고르면 그 이름이 든 주문이 모두 수정되고, 조비서가 그 발음을 배웁니다.
+              </div>
+              <div style={{ overflowY: "auto", flex: 1, borderTop: "1px solid #F1F2EC" }}>
+                {customFixGroups.length === 0 ? (
+                  <div style={{ textAlign: "center", color: "#888780", fontSize: 13, padding: "26px 0", lineHeight: 1.6 }}>
+                    정리할 항목이 없어요.<br />모두 등록 상품과 잘 연결돼 있어요 👍
+                  </div>
+                ) : (
+                  customFixGroups.map((g, i) => (
+                    <div key={i} style={{ padding: "11px 2px", borderBottom: "1px solid #F5F5F0" }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "#1B2430", marginBottom: 6 }}>
+                        말한 이름: "{g.name}" <span style={{ fontSize: 11, fontWeight: 400, color: "#888780" }}>· 주문 {g.count}건</span>
+                      </div>
+                      <select
+                        defaultValue=""
+                        onChange={(e) => { const p = products.find((x) => x.id === e.target.value); if (p) applyItemFix(g.name, p); }}
+                        style={{ ...inputStyle(), fontSize: 12.5 }}
+                      >
+                        <option value="">→ 올바른 등록 상품 선택…</option>
+                        {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                      </select>
+                    </div>
+                  ))
+                )}
+              </div>
+              <button onClick={() => setFixItemsOpen(false)} style={{ marginTop: 12, padding: "11px 0", borderRadius: 10, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" }}>닫기</button>
+            </div>
+          </div>
+        )}
+
         {memoryList !== null && (
           <div style={{ position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 300000, padding: 20 }} onClick={() => setMemoryList(null)}>
             <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 16, padding: "20px 18px", maxWidth: 380, width: "100%", maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" }}>
@@ -8367,6 +8459,8 @@ function App() {
             checkingUpdate={checkingUpdate}
             onSelfTest={runSelfTestAndShow}
             onMemory={openMemoryManager}
+            onFixItems={() => { setFixItemsOpen(true); setSideMenuOpen(false); }}
+            fixItemsCount={customFixGroups.length}
             isAdmin={isCurrentUserAdmin}
             onClose={() => setSideMenuOpen(false)}
             onNavigate={(t) => { setTab(t); setSideMenuOpen(false); setSelectedOrderId(null); }}
@@ -11671,7 +11765,7 @@ function sheetBtnStyle(bg, color) {
   };
 }
 
-function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onOpenBackupList, onCheckUpdate, checkingUpdate, onSelfTest, onMemory, isAdmin, onClose, onNavigate, askConfirm, handleLogout, fireToast, geminiKey, setGeminiKey }) {
+function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onOpenBackupList, onCheckUpdate, checkingUpdate, onSelfTest, onMemory, onFixItems, fixItemsCount, isAdmin, onClose, onNavigate, askConfirm, handleLogout, fireToast, geminiKey, setGeminiKey }) {
   const [editingName, setEditingName] = useState(false);
   const [draftName, setDraftName] = useState(appName);
   const [restoreDate, setRestoreDate] = useState(todayStr());
@@ -11810,6 +11904,14 @@ function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, 
               style={{ width: "100%", marginTop: 8, padding: "9px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
             >
               🧠 AI가 배운 말 관리
+            </button>
+          )}
+          {onFixItems && (
+            <button
+              onClick={onFixItems}
+              style={{ width: "100%", marginTop: 8, padding: "9px 0", borderRadius: 8, border: "1px solid #854F0B", background: (fixItemsCount > 0) ? "#FAEEDA" : "#fff", color: "#854F0B", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
+            >
+              🔧 오인식·미등록 상품 정리{fixItemsCount > 0 ? ` (${fixItemsCount})` : ""}
             </button>
           )}
         </div>
