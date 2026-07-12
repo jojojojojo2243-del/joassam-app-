@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 54;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
+const APP_VERSION = 56;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -1505,7 +1505,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // ===== JARVIS AI ASSISTANT =====
-const APP_BUILD = "v54 (07-12 조비서관리자전용)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const APP_BUILD = "v56 (07-12 배송완료10일)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
 const JARVIS_TAB_MAP = {
   goHome:'home', goOrders:'orders', goNew:'new',
   goCustomers:'customers', goProducts:'products',
@@ -5134,6 +5134,17 @@ function App() {
     });
   }, [orders]);
 
+  // ★ v55/56: 배송완료(도착확인) 목록 — 최근 10일 것만 표시 (화면이 무거워지지 않게).
+  //  ※ 주문 데이터는 삭제하지 않음 — 10일 지난 건 이 목록에서만 빠지고, 주문목록·검색에는 그대로 남음.
+  const deliveredOrders = useMemo(() => {
+    const cutoff = Date.now() - 10 * 24 * 3600 * 1000; // 10일 전
+    return orders.filter((o) => {
+      if (!o.deliveryConfirmed || !o.deliveryConfirmedAt) return false;
+      const t = new Date(o.deliveryConfirmedAt).getTime();
+      return !isNaN(t) && t >= cutoff;
+    }).sort((a, b) => String(b.deliveryConfirmedAt || "").localeCompare(String(a.deliveryConfirmedAt || "")));
+  }, [orders]);
+
   // 확인완료 처리한 건 중 최근 24시간 안에 처리한 것만 "최근 확인완료" 목록으로 잠깐 보여줌
   // (하루 지나면 이 목록에서도 자동으로 빠짐 — 화면이 계속 복잡해지지 않도록)
   const recentlyConfirmedDeliveries = useMemo(() => {
@@ -7757,6 +7768,7 @@ function App() {
           {tab === "deliverytrack" && (
             <DeliveryTrackTab
               orders={allInTransit}
+              deliveredOrders={deliveredOrders}
               customerMap={customerMap}
               onConfirm={(id) => confirmDeliveries([id])}
               onSelectOrder={(id) => { setTab("orders"); setSelectedOrderId(id); }}
@@ -8723,7 +8735,8 @@ function AccountsTab({ accounts, members, currentNickname, onAdd, onChangePasswo
   );
 }
 
-function DeliveryTrackTab({ orders, customerMap, onConfirm, onSelectOrder, onBack, expectedArrivalDeadline }) {
+function DeliveryTrackTab({ orders, deliveredOrders = [], customerMap, onConfirm, onSelectOrder, onBack, expectedArrivalDeadline }) {
+  const [view, setView] = useState("transit"); // ★ v55: 'transit'=배송중, 'done'=배송완료
   function trackingUrl(o) {
     if (!o.invoiceNo) return null;
     // 택배사가 비어있으면(엑셀에 안 채워졌거나 수기 입력 누락 등) 주로 쓰시는 우체국택배로 간주
@@ -8736,32 +8749,43 @@ function DeliveryTrackTab({ orders, customerMap, onConfirm, onSelectOrder, onBac
   }
 
   const sorted = [...orders].sort((a, b) => (a.shippedAt || "") < (b.shippedAt || "") ? 1 : -1); // 최근 발송이 위로
+  const list = view === "done" ? deliveredOrders : sorted;
 
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
         <button onClick={onBack} style={{ border: "none", background: "none", fontSize: 18, cursor: "pointer", padding: 0 }}>‹</button>
-        <h1 style={{ fontSize: 19, fontWeight: 700, margin: 0, letterSpacing: "-0.02em" }}>배송 추적</h1>
+        <h1 style={{ fontSize: 19, fontWeight: 700, margin: 0, letterSpacing: "-0.02em" }}>배송 현황</h1>
       </div>
-      <p style={{ fontSize: 11.5, color: "#888780", margin: "6px 0 16px", lineHeight: 1.6 }}>
-        발송 후 아직 "도착 확인"을 안 누른 주문을 전부 모아 보여줘요. 정상 배송중인 것도 언제든 다시 눌러서 조회하고 확인할 수 있어요.
+
+      {/* ★ v55: 배송중 / 배송완료 전환 */}
+      <div style={{ display: "flex", gap: 6, margin: "10px 0 12px" }}>
+        <button onClick={() => setView("transit")} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: view === "transit" ? "1px solid #2F6F4E" : "1px solid #E2E4DD", background: view === "transit" ? "#EAF3DE" : "#fff", color: view === "transit" ? "#27500A" : "#5F5E5A", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}>🚚 배송중 ({orders.length})</button>
+        <button onClick={() => setView("done")} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: view === "done" ? "1px solid #185FA5" : "1px solid #E2E4DD", background: view === "done" ? "#E6F1FB" : "#fff", color: view === "done" ? "#185FA5" : "#5F5E5A", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }}>✅ 배송완료 · 최근 10일 ({deliveredOrders.length})</button>
+      </div>
+      <p style={{ fontSize: 11.5, color: "#888780", margin: "0 0 14px", lineHeight: 1.6 }}>
+        {view === "done"
+          ? "도착 확인을 누른(배송완료) 주문 중 최근 10일 것만 보여줘요. 10일 지난 건 이 목록에서만 빠지고, 주문 기록은 그대로 남아 있어요. 항목을 누르면 주문 상세로 갑니다."
+          : '발송 후 아직 "도착 확인"을 안 누른 주문이에요. 도착했으면 "도착 확인함"을 눌러 배송완료로 옮기세요.'}
       </p>
 
-      {sorted.length === 0 && (
+      {list.length === 0 && (
         <div style={{ padding: "40px 0", textAlign: "center", color: "#888780", fontSize: 13 }}>
-          지금 배송중인(확인 대기) 주문이 없어요
+          {view === "done" ? "아직 배송완료(도착확인)한 주문이 없어요" : "지금 배송중인(확인 대기) 주문이 없어요"}
         </div>
       )}
 
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-        {sorted.map((o) => {
+        {list.map((o) => {
           const c = customerMap[o.customerId];
           const name = o.recipient?.name || (c ? c.name : "") || "고객";
           const url = trackingUrl(o);
-          const dl = expectedArrivalDeadline(o.shippedAt || o.orderDate);
+          const done = view === "done";
+          const dl = !done && expectedArrivalDeadline(o.shippedAt || o.orderDate);
           const isLate = dl && new Date() > dl;
+          const accent = done ? "#185FA5" : (isLate ? "#A32D2D" : "#2F6F4E");
           return (
-            <div key={o.id} style={{ background: "#fff", border: `1px solid ${isLate ? "#E9B9B9" : "#D7E6DC"}`, borderLeft: `4px solid ${isLate ? "#A32D2D" : "#2F6F4E"}`, borderRadius: 10, padding: "12px 14px" }}>
+            <div key={o.id} style={{ background: "#fff", border: `1px solid ${done ? "#CFE0F2" : (isLate ? "#E9B9B9" : "#D7E6DC")}`, borderLeft: `4px solid ${accent}`, borderRadius: 10, padding: "12px 14px" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
                 <div onClick={() => onSelectOrder(o.id)} style={{ cursor: "pointer", flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 13, fontWeight: 700, color: "#1B2430" }}>
@@ -8773,12 +8797,13 @@ function DeliveryTrackTab({ orders, customerMap, onConfirm, onSelectOrder, onBac
                     </div>
                   )}
                 </div>
-                <span style={{ fontSize: 10, fontWeight: 700, color: isLate ? "#A32D2D" : "#27500A", background: isLate ? "#FCEEEE" : "#EAF3DE", padding: "3px 8px", borderRadius: 10, whiteSpace: "nowrap", marginLeft: 8 }}>
-                  {isLate ? "⏰ 확인 필요" : "🚚 배송중"}
+                <span style={{ fontSize: 10, fontWeight: 700, color: done ? "#185FA5" : (isLate ? "#A32D2D" : "#27500A"), background: done ? "#E6F1FB" : (isLate ? "#FCEEEE" : "#EAF3DE"), padding: "3px 8px", borderRadius: 10, whiteSpace: "nowrap", marginLeft: 8 }}>
+                  {done ? "✅ 배송완료" : (isLate ? "⏰ 확인 필요" : "🚚 배송중")}
                 </span>
               </div>
               <div style={{ fontSize: 11, color: "#5F5E5A", marginBottom: 8 }}>
                 {o.courier || "택배"} · {o.invoiceNo} · 발송일 {o.shippedAt || o.orderDate}
+                {done && o.deliveryConfirmedAt ? ` · 도착확인 ${String(o.deliveryConfirmedAt).slice(0, 10)}` : ""}
               </div>
               <div style={{ display: "flex", gap: 6 }}>
                 {url && (
@@ -8786,9 +8811,11 @@ function DeliveryTrackTab({ orders, customerMap, onConfirm, onSelectOrder, onBac
                     배송조회 열기
                   </a>
                 )}
-                <button onClick={() => onConfirm(o.id)} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
-                  도착 확인함
-                </button>
+                {!done && (
+                  <button onClick={() => onConfirm(o.id)} style={{ flex: 1, padding: "9px 0", borderRadius: 8, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" }}>
+                    도착 확인함
+                  </button>
+                )}
               </div>
             </div>
           );
