@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 61;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
+const APP_VERSION = 63;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -1505,7 +1505,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // ===== JARVIS AI ASSISTANT =====
-const APP_BUILD = "v61 (07-12 업데이트버튼수정)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const APP_BUILD = "v63 (07-12 집계업체포함)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
 const JARVIS_TAB_MAP = {
   goHome:'home', goOrders:'orders', goNew:'new',
   goCustomers:'customers', goProducts:'products',
@@ -2838,6 +2838,12 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     const asksCount = /몇|개수|건수|얼마나|얼만|수는|몇개|몇건|몇명/.test(t);
     if (!asksCount) return null;
     if (/누구|누가|언제|어디|무엇|뭐|중에|중에서|별로|이름/.test(t)) return null;
+    // ★ v62: 미발송(입금대기+결제완료+발송준비) 합산 / 배송중(발송완료)
+    if (/미발송|안보낸|발송안한|안나간/.test(t)) {
+      const n = (ctx.pending || 0) + (ctx.pendingPay || 0) + (ctx.ready || 0);
+      return `미발송건은 입금대기 ${ctx.pending}건, 결제완료 ${ctx.pendingPay}건, 발송준비 ${ctx.ready}건 포함해서 총 ${n}건이에요`;
+    }
+    if (/배송중/.test(t)) return `배송중(발송완료)은 ${ctx.shipped}건이에요`;
     if (/입금대기/.test(t)) return `입금 대기는 ${ctx.pending}건이에요`;
     if (/결제완료/.test(t)) return `결제 완료는 ${ctx.pendingPay}건이에요`;
     if (/발송준비/.test(t)) return `발송 준비는 ${ctx.ready}건이에요`;
@@ -2893,6 +2899,28 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     const t = (text || '').replace(/\s/g, '');
     const ords = orders || [];
     const today = jarvisToday();
+
+    // ★ v62 A0) 이름 + 미발송/발송(배송중) 조회: "대솔본점 미발송건 있나요", "하레하레 배송중인 거 있어"
+    //  미발송 = 입금대기+결제완료+발송준비, 발송 = 배송중(status shipped)
+    const nmStatus = findKnownName(text);
+    if (nmStatus) {
+      const unshippedAsk = /미발송|안발송|안보낸|안보냈|발송안|발송전|아직안보|못보낸|안나간/.test(t);
+      const shippedAsk = !unshippedAsk && /(발송건|발송한거|발송했|배송중|보낸건|나간건|보냈어|보냈나)/.test(t);
+      if (unshippedAsk || shippedAsk) {
+        const mineAll = ords.filter(o => (o.recipient && o.recipient.name === nmStatus) || (o.sender && o.sender.name === nmStatus));
+        if (unshippedAsk) {
+          const un = mineAll.filter(o => o.status !== 'shipped');
+          const c = { waiting: 0, pending: 0, ready: 0 }; un.forEach(o => { if (c[o.status] !== undefined) c[o.status]++; });
+          applyOrderView({ search: nmStatus, status: 'all', date: 'all' });
+          if (!un.length) return `${nmStatus} 님은 미발송건이 없어요. (다 보냈거나 주문이 없어요)`;
+          return `${nmStatus} 님 미발송건이 ${un.length}건 있어요. 입금대기 ${c.waiting}건, 결제완료 ${c.pending}건, 발송준비 ${c.ready}건이에요. 화면에 띄웠어요.`;
+        }
+        const sh = mineAll.filter(o => o.status === 'shipped');
+        applyOrderView({ search: nmStatus, status: 'shipped', date: 'all' });
+        if (!sh.length) return `${nmStatus} 님은 발송(배송중)건이 없어요.`;
+        return `${nmStatus} 님 발송(배송중)건은 ${sh.length}건이에요. 화면에 띄웠어요.`;
+      }
+    }
 
     // A) 고객/업체/이름 조회: "조용택 주문 보여줘", "하레하레 정보", "대솔 연락처"
     const name = findKnownName(text);
@@ -5454,7 +5482,8 @@ function App() {
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
 
   const counts = (() => {
-    const reg = orders.filter((o) => !o.isBusiness);
+    // ★ v63: 상태 집계 타일(입금대기·결제완료·발송준비·발송완료·전체주문)은 고객(일반)+업체 모두 포함
+    const reg = orders;
     return {
       all: reg.length,
       waiting: reg.filter((o) => o.status === "waiting").length,
