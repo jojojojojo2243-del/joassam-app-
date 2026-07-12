@@ -517,8 +517,342 @@ function uid(prefix) {
   return prefix + Math.random().toString(36).slice(2, 8);
 }
 
+// ═══════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════
+// ★ v16: 음성 주문 엔진 (유사발음 매칭 + 무게 + 커스텀상품, node 34케이스 검증)
+// ═══════════════════════════════════════════════════════════════
+// ═══ 유사 발음 매칭 (STT 오인식 보정) ═══
+// ═══ 유사 발음 매칭 (STT 오인식 보정) ═══
+const CHO="ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ";
+const JUNG="ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ";
+const JONG="_ㄱㄲㄳㄴㄵㄶㄷㄹㄺㄻㄼㄽㄾㄿㅀㅁㅂㅄㅅㅆㅇㅈㅊㅋㅌㅍㅎ";
+function decompose(str){
+  let out='';
+  for(const ch of (str||'')){
+    const c=ch.charCodeAt(0)-0xAC00;
+    if(c>=0&&c<11172){ out+=CHO[Math.floor(c/588)]+JUNG[Math.floor((c%588)/28)]; const j=JONG[c%28]; if(j!=='_')out+=j; }
+    else out+=ch;
+  }
+  return out;
+}
+function lcs(a,b){ const m=a.length,n=b.length; if(!m||!n)return 0; const dp=Array(n+1).fill(0);
+  for(let i=1;i<=m;i++){let pr=0;for(let j=1;j<=n;j++){const t=dp[j];dp[j]=a[i-1]===b[j-1]?pr+1:Math.max(dp[j],dp[j-1]);pr=t;}} return dp[n]; }
+function simJamo(a,b){ const da=decompose(a),db=decompose(b); if(!da.length||!db.length)return 0; return lcs(da,db)/Math.max(da.length,db.length); }
+const CMD_WORDS=['주문하려고','주문하려','주문할게요','주문할게','주문하자','주문해줘','주문해','주문받아줘','주문받아','주문접수','주문등록','주문','검색해줘','검색해','검색','알려줘','알려주세요','알려','정보','보여줘','보여주세요','보여','조회','내역','현황','해줘','해주세요','하려고','하니까','하네요','합니다','할게요','좀','에관한','관한','관련','내용','파악','확인'];
+function stripCommands(text){ let s=(text||''); for(const w of CMD_WORDS) s=s.split(w).join(' '); return s.replace(/\s+/g,' ').trim(); }
+function matchName(text, names, threshold){
+  threshold=threshold||0.66;   // ★ v21: 오매칭 줄이려 상향
+  const cleanNS=stripCommands(text).replace(/\s/g,'');
+  const raw=(text||'').replace(/\s/g,'');
+  const cand=[...new Set(names)].filter(n=>n&&n.trim().length>=2).map(n=>n.trim());
+  const byLen=[...cand].sort((a,b)=>b.length-a.length);
+  // 1) 정확 포함 우선
+  for(const n of byLen){ if(cleanNS.includes(n.replace(/\s/g,''))) return n; }
+  for(const n of byLen){ const ns=n.replace(/\s/g,''); if(ns.length>=3&&raw.includes(ns)) return n; }
+  // 2) 유사매칭: 발화 전체가 "이름 길이와 비슷할 때만" (긴 문장은 이름으로 안 봄 → 잡담 오매칭 방지)
+  let best=null,bs=0;
+  for(const n of cand){ const ns=n.replace(/\s/g,''),L=ns.length;
+    if(cleanNS.length > L*1.7 + 3) continue;   // 발화가 이름보다 훨씬 길면 건너뜀
+    const s=simJamo(ns,cleanNS);
+    if(s>bs){bs=s;best=n;}
+  }
+  return (best&&bs>=threshold)?best:null;
+}
+
+// ═══ 수량·무게·상품 파서 ═══
+const KO_NUM={한:1,두:2,세:3,네:4,다섯:5,여섯:6,일곱:7,여덟:8,아홉:9,열:10};
+const COUNT_UNIT='박스|박|봉지|봉|팩|세트|개|근|망|단|포|상자|묶음';   // 개수 단위 (무게 제외)
+const WEIGHT_RE='\\d+(?:\\.\\d+)?\\s*(?:kg|킬로그램|킬로그람|킬로|키로그램|키로그람|키로|g|그램|그람)';           // 무게 (상품 스펙) — "키로"(자주 말함)·소수점 포함
+// 개수만 추출 (무게는 수량으로 안 봄)
+function parseCount(seg){
+  let m=seg.match(new RegExp('(\\d+)\\s*(?:'+COUNT_UNIT+')')); if(m) return parseInt(m[1],10);
+  m=seg.match(new RegExp('(한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\\s*(?:'+COUNT_UNIT+')')); if(m) return KO_NUM[m[1]];
+  if(/하나|한개/.test(seg)) return 1;
+  m=seg.match(/(\d+)\s*개/); if(m) return parseInt(m[1],10);
+  return null;
+}
+function weightIn(text){ const m=(text||'').match(new RegExp(WEIGHT_RE)); return m?m[0].replace(/\s/g,''):''; }
+// 등록 상품 매칭 (공백무시) — 무게가 있으면 이름에 붙임
+function parseItems(text, products){
+  const items=[], used=new Set();
+  const tt=(text||'').replace(/\s/g,'');
+  const w=weightIn(text);
+  const sorted=[...(products||[])].filter(p=>p&&p.name).sort((a,b)=>b.name.replace(/\s/g,'').length-a.name.replace(/\s/g,'').length);
+  for(const p of sorted){
+    if(used.has(p.id))continue;
+    const pn=p.name.replace(/\s/g,'');
+    const idx=tt.indexOf(pn); if(idx===-1)continue;
+    const after=tt.slice(idx+pn.length, idx+pn.length+12);
+    const cnt=parseCount(after);
+    items.push({productId:p.id, name:p.name+(w?' '+w:''), qty:cnt!=null?cnt:1}); used.add(p.id);
+  }
+  return items;
+}
+const VO_STOP=['안녕','안녕하세요','응','네','예','그래','아니','아니요','몰라','뭐','음','어','글쎄','저기','그거','저거','네네','오케이','여보세요','시작','다시','고객','업체'];
+function extractCustomItem(text){
+  const t=(text||'').trim();
+  const cnt=parseCount(t.replace(/\s/g,''));
+  const w=weightIn(t);
+  // 이름 = 텍스트에서 개수·불용어 제거, 무게는 유지
+  let nm=t.replace(new RegExp('(\\d+)\\s*(?:'+COUNT_UNIT+')','g'),' ')
+          .replace(new RegExp('(한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\\s*(?:'+COUNT_UNIT+')','g'),' ')
+          .replace(/하나|한개|두개|세개|주세요|주문|줘|해줘/g,' ')
+          .replace(/\s+/g,' ').trim().replace(/요$/,'').trim();
+  if((nm.match(/[가-힣A-Za-z]/g)||[]).length<1) return null;
+  if(VO_STOP.includes(nm.replace(/\s/g,''))) return null;
+  return { productId:null, name:nm, qty:cnt!=null?cnt:1 };
+}
+// ★ v22: 한 발화에서 여러 상품 추출 — 수량/무게 토큰마다 상품 세그먼트 1개
+//  "샐러드 2키로 로메인 2키로 적상추 5봉지" → 3개 품목으로 분리
+function splitItemSegments(text){
+  const re=new RegExp('('+WEIGHT_RE+')|((?:\\d+|한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\\s*(?:'+COUNT_UNIT+')|\\d+\\s*개)','g');
+  const toks=[]; let m;
+  while((m=re.exec(text))!==null){ toks.push({start:m.index, end:m.index+m[0].length, isWeight:!!m[1]}); }
+  const segs=[]; let last=0;
+  for(let i=0;i<toks.length;i++){
+    const tk=toks[i];
+    let cut=true;
+    // 무게 뒤에 곧바로 개수가 오면(사이에 새 상품명 없음) 같은 품목 → 자르지 않음("모듬쌈 1키로 2박스")
+    if(tk.isWeight){ const next=toks[i+1]; if(next){ const gap=text.slice(tk.end,next.start); if(!/[가-힣A-Za-z]/.test(gap)) cut=false; } }
+    if(cut){ const seg=text.slice(last,tk.end).trim(); if(seg) segs.push(seg); last=tk.end; }
+  }
+  return segs;
+}
+// ★ v22: 세그먼트별로 이름·수량·무게 추출 (등록상품이면 productId 연결, 아니면 커스텀)
+//  names: 알려진 고객/업체 이름 목록 — 세그먼트 앞에 이름이 붙어 나오면 제거(이름이 품목으로 새는 것 방지)
+function extractItems(text, products, names){
+  const segs=splitItemSegments(text);
+  const items=[];
+  const sorted=[...(products||[])].filter(p=>p&&p.name).sort((a,b)=>b.name.replace(/\s/g,'').length-a.name.replace(/\s/g,'').length);
+  const nameNS=(names||[]).map(n=>String(n).replace(/\s/g,'')).filter(n=>n.length>=2).sort((a,b)=>b.length-a.length);
+  for(const seg of segs){
+    const cnt=parseCount(seg.replace(/\s/g,''));
+    const w=weightIn(seg);
+    // 이름 = 개수단위·접속사·불용어 제거, 무게는 유지(상품 스펙)
+    let nm=seg.replace(new RegExp('(\\d+|한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\\s*(?:'+COUNT_UNIT+')','g'),' ')
+             .replace(/\d+\s*개/g,' ')
+             .replace(/하나|한개|주세요|주문해|주문|줘|해줘|그리고|하고|외에|이랑|플러스|그다음에|그다음|다음은|또한|또/g,' ')
+             .replace(/\s+/g,' ').trim().replace(/요$/,'').trim()
+             .replace(/^(에|은|는|이|가|로|과|와|랑|외|하고|그리고|이랑)\s+/,'').trim();
+    // 세그먼트 앞에 알려진 이름이 붙어 있으면 제거
+    let nmNS=nm.replace(/\s/g,'');
+    for(const kn of nameNS){ if(nmNS.startsWith(kn) && nmNS.length>kn.length){ nmNS=nmNS.slice(kn.length); nm=nm.replace(/\s/g,'').slice(kn.length); break; } }
+    if((nm.match(/[가-힣A-Za-z]/g)||[]).length<1) continue;
+    if(VO_STOP.includes(nmNS)) continue;
+    // 무게가 붙은 품목("적상추 5키로")은 커스텀으로 유지 — 말한 그대로 표시, 상품 변형 오연결 방지
+    // 무게 없는 이름만 등록상품에 정확히 일치할 때 연결 (적상추≠상추)
+    let matched=null;
+    if(!w){ const segCore=nmNS; for(const p of sorted){ if(segCore && segCore===p.name.replace(new RegExp(WEIGHT_RE,'g'),'').replace(/\s/g,'')){ matched=p; break; } } }
+    // ★ 퍼지 보정: 정확히 안 맞으면 가장 비슷한 등록상품으로 이름 교정 ("가피라"→"카이피라")
+    if(!matched && typeof fuzzyProductMatch==='function'){
+      const nmForMatch=nm.replace(new RegExp(WEIGHT_RE,'g'),'').replace(/\s+/g,' ').trim();
+      const fz=fuzzyProductMatch(nmForMatch||nm, products, 0.62);
+      if(fz){
+        if(w){ const base=fz.name.replace(new RegExp(WEIGHT_RE,'g'),'').replace(/\s+/g,' ').trim(); items.push({productId:null, name:(base?base+' ':'')+w, qty:cnt!=null?cnt:1}); continue; }
+        matched=fz;
+      }
+    }
+    if(matched) items.push({productId:matched.id, name:matched.name, qty:cnt!=null?cnt:1});
+    else items.push({productId:null, name:nm, qty:cnt!=null?cnt:1});
+  }
+  return items;
+}
+function parseDate(text, todayDate){
+  const t=(text||'').replace(/\s/g,'');
+  const d=new Date(todayDate.getTime()); const p=n=>String(n).padStart(2,'0');
+  const fmt=dt=>`${dt.getFullYear()}-${p(dt.getMonth()+1)}-${p(dt.getDate())}`;
+  let m;
+  if(/(\d{1,2})일(?:후|뒤|있다)/.test(t)){m=t.match(/(\d{1,2})일(?:후|뒤|있다)/);d.setDate(d.getDate()+ +m[1]);return fmt(d);}
+  if(/오늘|당일/.test(t))return fmt(d);
+  if(/내일|낼|명일/.test(t)){d.setDate(d.getDate()+1);return fmt(d);}
+  if(/모레|모래/.test(t)){d.setDate(d.getDate()+2);return fmt(d);}
+  if(/글피/.test(t)){d.setDate(d.getDate()+3);return fmt(d);}
+  m=t.match(/(\d{1,2})월(\d{1,2})일/); if(m){d.setMonth(+m[1]-1);d.setDate(+m[2]);return fmt(d);}
+  m=t.match(/(\d{1,2})\/(\d{1,2})/); if(m){d.setMonth(+m[1]-1);d.setDate(+m[2]);return fmt(d);}
+  const wd={일:0,월:1,화:2,수:3,목:4,금:5,토:6};
+  m=t.match(/([월화수목금토일])요일/); if(m){const tg=wd[m[1]];let a=(tg-d.getDay()+7)%7;if(a===0)a=7;d.setDate(d.getDate()+a);return fmt(d);}
+  return null;
+}
+function matchPerson(name, customers, vendors){
+  const c=(customers||[]).find(x=>x&&x.name===name);
+  if(c)return {name:c.name,phone:c.phone||'',address:c.address||'',customerId:c.id||null};
+  const v=(vendors||[]).find(x=>x&&x.name===name);
+  if(v)return {name:v.name,phone:v.phone||'',address:v.address||'',customerId:null,vendorId:v.id||null};
+  return {name,phone:'',address:'',customerId:null};
+}
+function allNames(customers, vendors){
+  const s=new Set();
+  (customers||[]).forEach(c=>c&&c.name&&s.add(String(c.name).trim()));
+  (vendors||[]).forEach(v=>v&&v.name&&s.add(String(v.name).trim()));
+  return [...s];
+}
+function findKnownNameIn(text, customers, vendors, products){
+  const prodNS=new Set((products||[]).map(p=>p&&p.name&&p.name.replace(/\s/g,'')).filter(Boolean));
+  const names=allNames(customers,vendors).filter(n=>!prodNS.has(n.replace(/\s/g,'')));
+  return matchName(text, names);
+}
+function residualMessage(text, name, items, products){
+  let s=' '+text+' ';
+  if(name) s=s.split(name).join(' ');
+  for(const it of (items||[])){
+    const p=(products||[]).find(x=>x.id===it.productId);
+    if(p) s=s.replace(new RegExp(p.name.replace(/\s/g,'\\s*'),'g'),' ');
+  }
+  s=s.replace(new RegExp(WEIGHT_RE,'g'),' ');
+  s=s.replace(new RegExp('(\\d+|한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\\s*(?:'+COUNT_UNIT+')','g'),' ');
+  s=s.replace(/하나|한개|두개|세개/g,' ');
+  s=s.replace(/오늘|내일|낼|명일|모레|모래|글피|당일|\d{1,2}월\s*\d{1,2}일|\d{1,2}\/\d{1,2}|\d{1,2}일\s*(?:후|뒤|있다)|[월화수목금토일]요일/g,' ');
+  s=s.replace(/발송|보내줘|보내주세요|주문받아줘|주문받아|주문|님/g,' ');
+  s=s.replace(/\s+/g,' ').trim().replace(/^(에|은|는|이|가|로|과|와|하고|그리고)\s*/,'').trim();
+  if((s.match(/[가-힣]/g)||[]).length<2) return '';
+  return s;
+}
+function summarize(d){
+  const parts=[];
+  if(d.name) parts.push(`${d.name} 님`);
+  if(d.items&&d.items.length) parts.push(d.items.map(i=>`${i.name} ${i.qty}개`).join(', '));
+  if(d.reserveDate) parts.push(`발송 ${d.reserveDate}`);
+  if(d.deliveryMessage) parts.push(`메시지 "${d.deliveryMessage}"`);
+  return parts.join(', ');
+}
+function nextPrompt(d){
+  if(!d.name) return '누구 주문인가요?';
+  if(!d.items||!d.items.length) return `${d.name} 님, 어떤 상품 몇 개 드릴까요?`;
+  return `${summarize(d)}. 맞으면 등록, 고칠 건 말씀하세요.`;
+}
+function applyOrderUtterance(draft, text, ctx){
+  const { products, customers, vendors, today } = ctx;
+  const t=(text||'').replace(/\s/g,'');
+  const d={ ...draft, items:[...(draft.items||[])] };
+
+  if(/처음부터|다시주문|새로주문|리셋|다시시작|새로시작/.test(t))
+    return { draft:{items:[]}, reply:'네, 처음부터 다시 할게요. 누구 주문인가요?' };
+  const hasProd=(products||[]).some(p=>p&&p.name&&t.includes(p.name.replace(/\s/g,'')));
+  if(/그만|관둬|중단|하지마|안할래|주문취소|취소할|다취소|취소해|됐어|됐다|관두|그만할/.test(t) || (/취소/.test(t)&&!hasProd))
+    return { cancelled:true, reply:'주문 등록을 취소했어요.' };
+  const wantsRegister=/등록해|등록할|등록하자|등록부탁|저장해|확정|이대로등록|그대로등록|응등록|네등록/.test(t)
+    || (/^(응|네|예|그래|맞아|맞아요|맞습니다|좋아|오케이|오케|등록)$/.test(t));
+  // ★ v21: 거절·불평(짧고 상품/수량 없음)은 이름/상품으로 해석하지 않고 되묻기만
+  if(!wantsRegister && /아니|아냐|틀려|틀렸|그게아니|잘못|왜.*안|안듣|안들|이상한|계속.*말/.test(t)
+     && !hasProd && !weightIn(text) && !/\d/.test(t) && !parseDate(text, today)){
+    return { draft:d, reply:'어느 부분을 고칠까요? 상품·수량·발송일을 말씀하시고, 그만하려면 취소라고 하세요.' };
+  }
+
+  // ★ v21: 보수적 파싱 — 명확한 주문 요소만 반영. 잡담·불평은 주문에 안 넣음.
+  let captured=false; const removedIds=new Set();
+  const nm=findKnownNameIn(text, customers, vendors, products);
+  if(nm){ const mp=matchPerson(nm,customers,vendors); d.name=mp.name; if(mp.phone)d.phone=mp.phone; if(mp.address)d.address=mp.address; d.customerId=mp.customerId||null; if(mp.vendorId)d.vendorId=mp.vendorId; captured=true; }
+
+  if(/빼|삭제|제외|없애/.test(t)){
+    for(const p of (products||[])) if(p&&p.name&&t.includes(p.name.replace(/\s/g,''))){ d.items=d.items.filter(it=>it.productId!==p.id); removedIds.add(p.id); captured=true; }
+    for(let i=d.items.length-1;i>=0;i--){ const it=d.items[i]; if(!it.productId && it.name && t.includes(it.name.replace(/\s/g,''))){ d.items.splice(i,1); captured=true; } }
+  }
+  // ★ v22: 이름을 제거한 텍스트에서 여러 상품을 한 번에 추출 (한 문장에 여러 품목)
+  let itemText=text;
+  if(nm){ itemText=itemText.split(nm).join(' '); }
+  const knownNames=allNames(customers, vendors);
+  const parsed=extractItems(itemText, products, knownNames).filter(it=>!(it.productId && removedIds.has(it.productId)));
+  if(parsed.length){
+    for(const it of parsed){
+      if(it.productId){ const ex=d.items.find(x=>x.productId===it.productId); if(ex){ex.qty=it.qty;ex.name=it.name;} else d.items.push(it); }
+      else { const ex=d.items.find(x=>x.productId==null && x.name===it.name); if(ex)ex.qty=it.qty; else d.items.push(it); }
+    }
+    captured=true;
+  }
+  const dt=parseDate(text, today); if(dt){ d.reserveDate=dt; captured=true; }
+
+  // 배송메시지: (1)"메시지/요청" 키워드, 또는 (2)명확한 배송요청 문구만 (잡담·불평은 제외)
+  const msgM=text.match(/(?:배송\s*메시지|메시지|요청사항|요청)\s*[:은는]?\s*(.+)$/);
+  if(msgM&&msgM[1]&&msgM[1].trim().length>=2){ d.deliveryMessage=msgM[1].trim(); captured=true; }
+  else if(/놔주세요|놓아주|놔줘|문\s?앞|부재|경비실?|택배함|천천히|조심|신선|아이스|얼음|깨지지|살살|빠르게|급해/.test(text)){
+    d.deliveryMessage=text.trim(); captured=true;
+  }
+
+  if(wantsRegister && !captured){
+    if(!d.name) return { draft:d, reply:'누구 주문인지 먼저 말씀해 주세요.' };
+    if(!d.items.length) return { draft:d, reply:'상품을 먼저 말씀해 주세요.' };
+    return { draft:d, done:true, reply:`${summarize(d)}로 주문을 등록했어요.` };
+  }
+
+  // 아무 주문요소도 못 알아들음 → 초안 그대로 두고 다시 요청 (대화를 주문으로 만들지 않음)
+  if(!captured){
+    if(/아니|틀렸|그게아니|잘못|안돼|이상|왜/.test(t))
+      return { draft:d, reply:'어느 부분을 고칠까요? 상품이나 발송일을 다시 말씀해 주세요. 그만하려면 취소라고 하세요.' };
+    return { draft:d, reply: d.name ? '잘 못 들었어요. 상품과 수량을 말씀해 주세요. 그만하려면 취소라고 하세요.' : '누구 주문인가요? 고객이나 업체 이름을 말씀해 주세요.' };
+  }
+  return { draft:d, reply:nextPrompt(d, products) };
+}
+
+// ═══ v24: 음성 "묶음 배송" — 대화로 상품을 박스로 나누기 ═══
+// 무게·숫자 뺀 핵심 이름 (매칭용)
+function bundleCoreName(s){ return (s||'').replace(new RegExp(WEIGHT_RE,'g'),'').replace(/[0-9]/g,'').replace(/\s/g,'').trim(); }
+// "묶음 배송" 의도인지 (개수 단위 '2박스'와 헷갈리지 않게 '묶음/묶어/따로보내' 위주로만)
+function isBundleIntent(text){
+  const t=(text||'').replace(/\s/g,'');
+  return /묶음|묶어|따로보내|따로배송|따로담|따로포장|나눠서보내|나눠서배송|부분묶|전체묶|자동묶|각각따로|각각포장|개별포장|개별배송|박스로나눠|박스나눠|박스를나눠/.test(t);
+}
+// 묶음 방식 명령 (전체/각각/자동)
+function bundleModeFrom(text){
+  const t=(text||'').replace(/\s/g,'');
+  if(/각각따로|각각포장|개별포장|개별배송|따로따로|하나씩따로|상품마다따로|낱개로|각각배송/.test(t)) return 'each';
+  if(/자동묶|자동으로묶|알아서묶|자동배송으로|자동으로나눠/.test(t)) return 'auto';
+  // 전체 = "전부/다/모두/전체/한번에/합쳐" 같은 '전부' 뜻이 함께 있을 때만 (그냥 'A B 한 박스'와 구별)
+  if(/전체묶음|전부한박스|전부한|다한박스|모두한박스|전부같이|다같이|모두같이|한번에보내|한번에담|합쳐서|전부합|모두합|다합쳐/.test(t)) return 'all';
+  return null;
+}
+// 명시적 묶음 파싱: "샐러드랑 로메인 한 박스, 루꼴라 크리스탈벨 한 박스"
+//  items: 초안 상품들 [{productId,name,qty}] → { mode:'explicit', boxes:[[key,...],...] }
+function parseBundleUtterance(text, items){
+  const mode=bundleModeFrom(text);
+  if(mode) return { mode };
+  const keyOf=it=>it.productId||it.name;
+  // 박스 경계로 자름
+  const segs=(text||'').split(/한?\s*박스|한?\s*통|한?\s*상자|묶음|묶어서|묶어|따로/).map(s=>s.trim()).filter(Boolean);
+  const used=new Set(); const boxes=[];
+  for(const seg of segs){
+    const cands=seg.split(/랑|이랑|하고|그리고|과|와|및|또|플러스|,|\//).map(s=>bundleCoreName(s)).filter(s=>s.length>=1);
+    const grp=[];
+    for(const cand of cands){
+      let best=null;
+      for(const it of items){ const k=keyOf(it); if(used.has(k)) continue; const core=bundleCoreName(it.name); if(core && (core.includes(cand)||cand.includes(core))){ best=k; break; } }
+      if(!best){ for(const it of items){ const k=keyOf(it); if(used.has(k)) continue; const core=bundleCoreName(it.name); if(core && simJamo(cand,core)>=0.6){ best=k; break; } } }
+      if(best){ grp.push(best); used.add(best); }
+    }
+    if(grp.length) boxes.push(grp);
+  }
+  if(!boxes.length){
+    // 상품 이름을 못 잡았지만 "한 박스/같이/합쳐" 뜻이면 전체 한 박스
+    if(/한박스|한통|한상자|같이보내|합쳐|다보내/.test((text||'').replace(/\s/g,''))) return { mode:'all' };
+    return null;
+  }
+  return { mode:'explicit', boxes };
+}
+// 묶음 계획 → 박스별 items 배열. 안 묶인 상품은 개별(1박스)로.
+function buildBoxItems(items, plan){
+  const all=(items||[]).map(it=>({...it}));
+  if(!plan) return [{ items: all }];
+  if(plan.mode==='all') return [{ items: all }];
+  // ★ v39: '따로따로/낱개로' = 낱개 1개씩 개별 박스 (단일 상품 다수량도 수량만큼 박스로 분리)
+  if(plan.mode==='each') return all.flatMap(it=>Array.from({length:Math.max(1,Number(it.qty)||1)},()=>({ items:[{ ...it, qty:1 }] })));
+  if(plan.mode==='explicit' && plan.boxes && plan.boxes.length){
+    const keyOf=it=>it.productId||it.name;
+    const boxes=plan.boxes.map(keys=>({ items: all.filter(it=>keys.includes(keyOf(it))) })).filter(b=>b.items.length);
+    const assigned=new Set(plan.boxes.flat());
+    all.forEach(it=>{ if(!assigned.has(keyOf(it))) boxes.push({ items:[it] }); });
+    return boxes.length?boxes:[{ items: all }];
+  }
+  return [{ items: all }];
+}
+// 묶음 계획 읽어주기
+function bundleReadback(boxList){
+  if(!boxList||boxList.length<=1) return '한 박스로 보낼게요';
+  return boxList.map((b,i)=>`${i+1}번 박스: ${b.items.map(it=>it.name).join(', ')}`).join(' / ');
+}
+
+
 function won(n) {
-  return n.toLocaleString("ko-KR") + "원";
+  // ★ 방어: 값이 없거나 숫자가 아니면 0원 (상품 삭제·가격 누락 시 화면 크래시 방지)
+  return (Number(n) || 0).toLocaleString("ko-KR") + "원";
 }
 
 // ── 박스 포장 규칙 ──
@@ -784,6 +1118,973 @@ function parseOrderMessage(text, products) {
 
   return result;
 }
+
+// ─── Gemini AI 주문 분석 (무료, 하루 1,500건) ───────────────────────────────
+// ★ 기본 Gemini 키 (여러 개 = 한도 초과 시 자동 전환). 서로 다른 구글 계정 키일 때 한도 배가됨
+const DEFAULT_GEMINI_KEYS = [
+  "AIzaSyDeHqJVlMkE1AypaO-Ntj7hlgRa1YoUHqM",
+  "AIzaSyDtuLf7ITrCaXXXRapultTfpRI6aZ97MMU",
+];
+const DEFAULT_GEMINI_KEY = DEFAULT_GEMINI_KEYS[0];  // 하위 호환용 (기본 키 1개)
+const GEMINI_AI_KEY = "jai_gemini_key";
+function loadGeminiKey() {
+  try {
+    const saved = localStorage.getItem(GEMINI_AI_KEY);
+    if (saved && saved.trim() && saved !== "undefined") return saved.trim();
+    // 저장된 키가 없으면 기본 키 자동 저장 후 반환
+    localStorage.setItem(GEMINI_AI_KEY, DEFAULT_GEMINI_KEY);
+    return DEFAULT_GEMINI_KEY;
+  } catch { return DEFAULT_GEMINI_KEY; }
+}
+function saveGeminiKey(k) {
+  try { localStorage.setItem(GEMINI_AI_KEY, (k && k.trim()) ? k.trim() : DEFAULT_GEMINI_KEY); } catch {}
+}
+
+// ★ 여러 키 자동 전환 관리 ─────────────────────────────────────────
+// 한도(429) 걸린 키는 재시도 시각까지 건너뛰고, 살아있는 키부터 사용
+const _geminiCooldownUntil = {};  // key -> 쿨다운 해제 시각(ms)
+function buildGeminiKeyPool(primaryKey) {
+  const pool = [];
+  const add = (k) => { const t = (k || "").trim(); if (t && t !== "undefined" && !pool.includes(t)) pool.push(t); };
+  add(primaryKey);                    // 사용자가 설정에 넣은 키 우선
+  DEFAULT_GEMINI_KEYS.forEach(add);   // 그다음 기본 키들
+  return pool;
+}
+function geminiCooldownRemaining(key) {
+  const t = _geminiCooldownUntil[key];
+  if (!t) return 0;
+  const rem = Math.ceil((t - Date.now()) / 1000);
+  return rem > 0 ? rem : 0;
+}
+
+// ★ Bug1 Fix: 모델명 캐시 (매 대화마다 HTTP 호출 방지 → 200-500ms 절약)
+let _geminiModelCache = null;
+let _geminiModelCacheKey = null;
+async function getGeminiModel(apiKey) {
+  if (_geminiModelCache && _geminiModelCacheKey === apiKey) return _geminiModelCache;
+  const preferred = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro"];
+  try {
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+    if (!r.ok) { _geminiModelCache = "gemini-2.0-flash"; _geminiModelCacheKey = apiKey; return _geminiModelCache; }
+    const data = await r.json();
+    const names = (data.models || [])
+      .filter(m => (m.supportedGenerationMethods || []).includes("generateContent"))
+      .map(m => m.name.replace("models/", ""));
+    for (const p of preferred) {
+      const found = names.find(n => n.startsWith(p));
+      if (found) { _geminiModelCache = found; _geminiModelCacheKey = apiKey; return found; }
+    }
+    _geminiModelCache = names[0] || "gemini-2.0-flash";
+    _geminiModelCacheKey = apiKey;
+    return _geminiModelCache;
+  } catch { return "gemini-2.0-flash"; }
+}
+
+async function callGeminiOrder(text, products, apiKey) {
+  if (!apiKey) throw new Error("Gemini API 키가 없습니다.\n왼쪽 위 ☰ 메뉴 → 'AI 설정'에서 입력해주세요.");
+  const model = await getGeminiModel(apiKey);
+  const productStr = products.length ? products.map(p => `- ${p.name}`).join("\n") : "(상품 목록 없음)";
+  const prompt = `당신은 농산물 직거래 판매자의 주문 문자 분석 전문가입니다.
+
+## 주문 문자
+---
+${text}
+---
+
+## 등록된 상품 목록
+${productStr}
+
+## confidence 기준
+- "high": 명확하게 적혀 있음
+- "medium": 문맥상 합리적으로 추론 가능
+- "low": 불확실, 확인 필요 — 모르면 value를 ""으로
+
+## 규칙
+1. 확실하지 않으면 value를 ""으로, confidence를 "low"로
+2. 주문자=받는분이면 같은 값
+3. 상품은 목록에서 유사한 것 매칭, 없으면 원문 그대로
+4. 전화번호 형식: 010-XXXX-XXXX
+5. reserveDate: 예약 없으면 ""
+6. deliveryMessage: 배송 요청사항, 메모, 구성 요청 등 모든 추가 요청 문구를 반드시 추출. 예) "겨자 조금 넣어주세요", "문앞에 놔주세요" 등
+7. 이름/연락처/주소가 명확히 적혀 있으면 confidence는 반드시 "high"
+8. 선택 항목(deliveryMessage, reserveDate)이 없으면 value=""로, confidence="high"로 (확인 불필요)
+
+다음 JSON 형식으로만 응답하세요:
+{
+  "senderName":      { "value": "", "confidence": "high" },
+  "senderPhone":     { "value": "", "confidence": "high" },
+  "recipName":       { "value": "", "confidence": "high" },
+  "recipPhone":      { "value": "", "confidence": "high" },
+  "address":         { "value": "", "confidence": "high" },
+  "deliveryMessage": { "value": "", "confidence": "high" },
+  "reserveDate":     { "value": "", "confidence": "high" },
+  "items": [{ "name": "상품명", "qty": 1, "confidence": "high", "note": "" }],
+  "overallNote": ""
+}`;
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { temperature: 0.1 },
+      }),
+    }
+  );
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({}));
+    const detail = e.error?.message || "";
+    if (res.status === 400) throw new Error("API 키 또는 모델 오류\n상세: " + detail);
+    if (res.status === 429) throw new Error("요청 한도 초과 (HTTP 429)\n모델: " + model + "\n상세: " + detail + "\n→ 잠시 후 다시 시도해주세요.");
+    if (res.status === 403) throw new Error("API 키 권한 없음 (HTTP 403)\n상세: " + detail);
+    throw new Error(`Gemini 오류 (HTTP ${res.status})\n상세: ` + detail);
+  }
+  const data = await res.json();
+  const raw = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  if (!raw) throw new Error("AI 응답이 비어있습니다. 다시 시도해주세요.");
+  try { return JSON.parse(raw); } catch {
+    const m = raw.match(/```(?:json)?\s*([\s\S]*?)```/) || raw.match(/(\{[\s\S]*\})/);
+    if (!m) throw new Error("AI 응답 파싱 실패");
+    return JSON.parse(m[1] || m[0]);
+  }
+}
+
+// AI 분석 결과 확인 모달
+const CONF_STYLE = {
+  high:   { label: "확실",   bg: "#EAF3DE", color: "#27500A", border: "#7DB85A" },
+  medium: { label: "추정",   bg: "#FEF6E4", color: "#7A4C08", border: "#D4A84B" },
+  low:    { label: "불확실", bg: "#FDF0EE", color: "#8A2010", border: "#D97B6C" },
+};
+const AI_FIELDS = [
+  { key: "senderName",      label: "주문자 이름",   required: false },
+  { key: "senderPhone",     label: "주문자 연락처", required: true  },
+  { key: "recipName",       label: "받는분 이름",   required: true  },
+  { key: "recipPhone",      label: "받는분 연락처", required: true  },
+  { key: "address",         label: "받는분 주소",   required: true  },
+  { key: "deliveryMessage", label: "배송 메시지",   required: false },
+  { key: "reserveDate",     label: "예약 발송일",   required: false },
+];
+
+function AiConfBadge({ level }) {
+  const c = CONF_STYLE[level] || CONF_STYLE.medium;
+  return <span style={{ fontSize: 10, fontWeight: 700, padding: "1px 6px", borderRadius: 99, background: c.bg, color: c.color, border: `1px solid ${c.border}`, whiteSpace: "nowrap" }}>
+    {level === "high" ? "✓ " : level === "low" ? "❗ " : "~ "}{c.label}
+  </span>;
+}
+
+function AiFieldRow({ meta, data, confirmed, onConfirm, onEdit }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(data.value || "");
+  const inputRef = useRef();
+  useEffect(() => setDraft(data.value || ""), [data.value]);
+  useEffect(() => { if (editing) inputRef.current?.focus(); }, [editing]);
+  const conf = data.confidence || "low";
+  const val = (data.value || "").trim();
+  const isEmpty = !val;
+  const needsAct = conf !== "high" || (isEmpty && meta.required);
+  const isAlert = isEmpty && meta.required;
+  const borderC = confirmed ? "#7DB85A" : isAlert || conf === "low" ? "#D97B6C" : conf === "medium" ? "#D4A84B" : "#D3D1C7";
+  const bgC = confirmed ? "#F4FAF0" : isAlert || conf === "low" ? "#FDF0EE" : conf === "medium" ? "#FEF9F0" : "#fff";
+  const save = () => { onEdit(draft.trim()); setEditing(false); };
+  return (
+    <div style={{ border: `1.5px solid ${borderC}`, borderRadius: 8, padding: "8px 10px", marginBottom: 6, background: bgC }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 5, marginBottom: editing ? 6 : 0 }}>
+        <span style={{ fontSize: 11, color: "#666", minWidth: 80, flexShrink: 0 }}>{meta.label}</span>
+        <AiConfBadge level={conf} />
+        {confirmed && !editing && <span style={{ fontSize: 13, color: "#27500A", fontWeight: 900 }}>✓</span>}
+        <span style={{ flex: 1 }} />
+        <button onClick={() => { setDraft(data.value || ""); setEditing(!editing); }} style={{ fontSize: 10, padding: "1px 7px", borderRadius: 5, border: "1px solid #ccc", background: "#fff", color: "#555", cursor: "pointer" }}>{editing ? "취소" : "수정"}</button>
+      </div>
+      {editing && (
+        <div style={{ display: "flex", gap: 5 }}>
+          <input ref={inputRef} value={draft} onChange={e => setDraft(e.target.value)} onKeyDown={e => { if (e.key === "Enter") save(); if (e.key === "Escape") { setDraft(data.value || ""); setEditing(false); } }}
+            style={{ flex: 1, padding: "5px 8px", borderRadius: 6, border: "1px solid #aaa", fontSize: 13 }} />
+          <button onClick={save} style={{ padding: "5px 11px", borderRadius: 6, border: "none", background: "#2F6F4E", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>저장</button>
+        </div>
+      )}
+      {!editing && (
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 3 }}>
+          <span style={{ flex: 1, fontSize: 14, color: isEmpty ? "#bbb" : "#111", fontWeight: isEmpty ? 400 : 500 }}>
+            {isEmpty ? (meta.required ? "⚠️ 입력 필요" : "(없음)") : val}
+          </span>
+          {needsAct && !confirmed && (
+            <button onClick={isEmpty ? () => setEditing(true) : onConfirm} style={{ fontSize: 11, padding: "3px 10px", borderRadius: 6, border: "none", fontWeight: 700, background: isAlert || conf === "low" ? "#D97B6C" : "#D4A84B", color: "#fff", cursor: "pointer" }}>
+              {isEmpty ? "입력하기" : "확인 ✓"}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AiItemRow({ item, confirmed, onUpdate, onRemove, onConfirm }) {
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(item.name);
+  const [qty, setQty] = useState(String(item.qty));
+  useEffect(() => { setName(item.name); setQty(String(item.qty)); }, [item]);
+  const conf = item.confidence || "low";
+  const borderC = confirmed ? "#7DB85A" : conf === "low" ? "#D97B6C" : conf === "medium" ? "#D4A84B" : "#D3D1C7";
+  const bgC = confirmed ? "#F4FAF0" : conf === "low" ? "#FDF0EE" : conf === "medium" ? "#FEF9F0" : "#fff";
+  const save = () => { onUpdate({ ...item, name: name.trim(), qty: Math.max(1, parseInt(qty) || 1) }); setEditing(false); };
+  return (
+    <div style={{ border: `1.5px solid ${borderC}`, borderRadius: 7, padding: "7px 9px", marginBottom: 5, background: bgC }}>
+      {editing ? (
+        <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
+          <input value={name} onChange={e => setName(e.target.value)} style={{ flex: 2, padding: "5px 7px", borderRadius: 5, border: "1px solid #ccc", fontSize: 12 }} />
+          <input value={qty} onChange={e => setQty(e.target.value)} type="number" min="1" style={{ width: 50, padding: "5px 6px", borderRadius: 5, border: "1px solid #ccc", fontSize: 12 }} />
+          <button onClick={save} style={{ padding: "5px 9px", borderRadius: 5, border: "none", background: "#2F6F4E", color: "#fff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}>저장</button>
+          <button onClick={() => { setName(item.name); setQty(String(item.qty)); setEditing(false); }} style={{ padding: "5px 7px", borderRadius: 5, border: "1px solid #ccc", background: "#fff", fontSize: 11, cursor: "pointer" }}>취소</button>
+        </div>
+      ) : (
+        <>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ flex: 1, fontSize: 13, fontWeight: 600 }}>{item.name}</span>
+            <span style={{ fontSize: 12, color: "#555" }}>{item.qty}개</span>
+            <AiConfBadge level={conf} />
+            {confirmed ? <span style={{ fontSize: 13, color: "#27500A", fontWeight: 900 }}>✓</span>
+              : conf !== "high" && <button onClick={onConfirm} style={{ fontSize: 10, padding: "2px 7px", borderRadius: 5, border: "none", background: conf === "low" ? "#D97B6C" : "#D4A84B", color: "#fff", fontWeight: 700, cursor: "pointer" }}>확인</button>}
+            <button onClick={() => setEditing(true)} style={{ fontSize: 10, padding: "2px 7px", borderRadius: 5, border: "1px solid #ccc", background: "#fff", color: "#555", cursor: "pointer" }}>수정</button>
+            <button onClick={onRemove} style={{ fontSize: 10, padding: "2px 6px", borderRadius: 5, border: "1px solid #f0b0a0", background: "#fff5f3", color: "#c03020", cursor: "pointer" }}>×</button>
+          </div>
+          {item.note && <div style={{ fontSize: 10, color: "#999", marginTop: 3 }}>💬 {item.note}</div>}
+        </>
+      )}
+    </div>
+  );
+}
+
+function AiConfirmModal({ result, products, onApply, onClose }) {
+  const [fields, setFields] = useState(() => {
+    const f = {};
+    AI_FIELDS.forEach(({ key }) => { f[key] = result[key] || { value: "", confidence: "low" }; });
+    return f;
+  });
+  const [items, setItems] = useState(result.items || []);
+  const [confirmedFields, setConfirmedFields] = useState(() => {
+    const c = {};
+    AI_FIELDS.forEach(({ key }) => { if ((result[key]?.confidence || "low") === "high") c[key] = true; });
+    return c;
+  });
+  const [confirmedItems, setConfirmedItems] = useState(() => {
+    const c = {};
+    (result.items || []).forEach((it, i) => { if ((it.confidence || "low") === "high") c[i] = true; });
+    return c;
+  });
+  const [showAdd, setShowAdd] = useState(false);
+  const [addName, setAddName] = useState("");
+  const [addQty, setAddQty] = useState("1");
+
+  const editField = (key, val) => { setFields(f => ({ ...f, [key]: { ...f[key], value: val } })); setConfirmedFields(c => ({ ...c, [key]: true })); };
+  const confirmField = (key) => setConfirmedFields(c => ({ ...c, [key]: true }));
+  const updateItem = (i, it) => { setItems(p => p.map((x, idx) => idx === i ? it : x)); setConfirmedItems(c => ({ ...c, [i]: true })); };
+  const removeItem = (i) => {
+    setItems(p => p.filter((_, idx) => idx !== i));
+    setConfirmedItems(c => { const n = {}; Object.entries(c).forEach(([k, v]) => { const ki = parseInt(k); if (ki < i) n[ki] = v; else if (ki > i) n[ki - 1] = v; }); return n; });
+  };
+  const confirmItem = (i) => setConfirmedItems(c => ({ ...c, [i]: true }));
+  const addItem = () => {
+    if (!addName.trim()) return;
+    const idx = items.length;
+    setItems(p => [...p, { name: addName.trim(), qty: Math.max(1, parseInt(addQty) || 1), confidence: "high", note: "" }]);
+    setConfirmedItems(c => ({ ...c, [idx]: true }));
+    setAddName(""); setAddQty("1"); setShowAdd(false);
+  };
+
+  const pendingF = AI_FIELDS.filter(({ key, required }) => {
+    const f = fields[key] || { value: "", confidence: "low" };
+    // 필수 항목이고 값이 비어있으면 확인 필요
+    if (required && !(f.value || "").trim()) return true;
+    // 선택 항목이고 값이 비어있으면 확인 불필요 (그냥 빈 값으로 적용)
+    if (!required && !(f.value || "").trim()) return false;
+    // 신뢰도 high면 확인 불필요
+    if ((f.confidence || "low") === "high") return false;
+    // 이미 확인한 항목
+    if (confirmedFields[key]) return false;
+    return true;
+  });
+  const pendingI = items.filter((it, i) => (it.confidence || "low") !== "high" && !confirmedItems[i]);
+  const pendingCount = pendingF.length + pendingI.length;
+  const allOk = pendingCount === 0 && items.length > 0;
+
+  const handleApply = () => {
+    const f = {};
+    AI_FIELDS.forEach(({ key }) => { f[key] = (fields[key]?.value || "").trim(); });
+    onApply({ ...f, items });
+  };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 500, display: "flex", alignItems: "flex-end" }} onClick={e => e.target === e.currentTarget && onClose()}>
+      <div style={{ background: "#fff", borderRadius: "16px 16px 0 0", width: "100%", maxWidth: 640, margin: "0 auto", maxHeight: "90vh", overflowY: "auto", padding: "20px 16px 40px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 16, color: "#2F6F4E" }}>🤖 AI 분석 결과</div>
+            <div style={{ fontSize: 11, color: "#888", marginTop: 2 }}>확인 후 주문서에 적용하세요</div>
+          </div>
+          <button onClick={onClose} style={{ fontSize: 22, background: "none", border: "none", color: "#888", cursor: "pointer", lineHeight: 1 }}>×</button>
+        </div>
+
+        {result.overallNote && (
+          <div style={{ background: "#FEF6E4", border: "1.5px solid #D4A84B", borderRadius: 8, padding: "9px 12px", marginBottom: 12, fontSize: 12, color: "#5C3808" }}>
+            🤖 {result.overallNote}
+          </div>
+        )}
+        {pendingCount > 0 && (
+          <div style={{ background: "#FDF0EE", border: "1.5px solid #D97B6C", borderRadius: 8, padding: "9px 12px", marginBottom: 12, fontSize: 12, color: "#8A2010", fontWeight: 600 }}>
+            ❗ {pendingCount}개 항목 확인 필요 {pendingF.length > 0 && `(${pendingF.map(f => f.label).join(", ")})`}
+          </div>
+        )}
+
+        <div style={{ marginBottom: 14 }}>
+          {AI_FIELDS.map(meta => (
+            <AiFieldRow key={meta.key} meta={meta}
+              data={fields[meta.key] || { value: "", confidence: "low" }}
+              confirmed={!!confirmedFields[meta.key]}
+              onConfirm={() => confirmField(meta.key)}
+              onEdit={val => editField(meta.key, val)}
+            />
+          ))}
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+          <span style={{ fontWeight: 700, fontSize: 13, color: "#333" }}>🛒 주문 상품</span>
+          <button onClick={() => setShowAdd(p => !p)} style={{ fontSize: 11, padding: "3px 9px", borderRadius: 6, border: "1.5px solid #2F6F4E", background: showAdd ? "#2F6F4E" : "#fff", color: showAdd ? "#fff" : "#2F6F4E", fontWeight: 700, cursor: "pointer" }}>+ 추가</button>
+        </div>
+        {items.length === 0 && !showAdd && (
+          <div style={{ padding: 12, textAlign: "center", fontSize: 12, color: "#9A3020", border: "1.5px dashed #D97B6C", borderRadius: 8, background: "#FDF0EE", marginBottom: 8 }}>
+            ❗ 상품을 찾지 못했습니다 — 직접 추가해주세요
+          </div>
+        )}
+        {items.map((item, i) => (
+          <AiItemRow key={i} item={item} confirmed={!!confirmedItems[i]}
+            onUpdate={it => updateItem(i, it)} onRemove={() => removeItem(i)} onConfirm={() => confirmItem(i)} />
+        ))}
+        {showAdd && (
+          <div style={{ display: "flex", gap: 5, padding: "9px 10px", background: "#E6F1E9", borderRadius: 8, marginBottom: 8 }}>
+            <input value={addName} onChange={e => setAddName(e.target.value)} placeholder="상품명" autoFocus
+              style={{ flex: 2, padding: "6px 8px", borderRadius: 6, border: "1px solid #ccc", fontSize: 12 }} />
+            <input value={addQty} onChange={e => setAddQty(e.target.value)} type="number" min="1" placeholder="수량"
+              style={{ width: 52, padding: "6px 6px", borderRadius: 6, border: "1px solid #ccc", fontSize: 12 }} />
+            <button onClick={addItem} style={{ padding: "6px 10px", borderRadius: 6, border: "none", background: "#2F6F4E", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>추가</button>
+            <button onClick={() => setShowAdd(false)} style={{ padding: "6px 7px", borderRadius: 6, border: "1px solid #ccc", background: "#fff", fontSize: 11, cursor: "pointer" }}>취소</button>
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 8, marginTop: 18 }}>
+          <button onClick={onClose} style={{ flex: 1, padding: 12, borderRadius: 10, border: "1px solid #ccc", background: "#fff", fontSize: 14, fontWeight: 600, cursor: "pointer" }}>취소</button>
+          <button onClick={handleApply} disabled={!allOk}
+            style={{ flex: 2, padding: 12, borderRadius: 10, border: "none", background: allOk ? "#2F6F4E" : "#9BB5A8", color: "#fff", fontSize: 14, fontWeight: 700, cursor: allOk ? "pointer" : "not-allowed" }}>
+            {allOk ? "✅ 주문서에 적용" : `⏳ ${pendingCount}개 확인 필요`}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+// ─────────────────────────────────────────────────────────────────────────────
+// ===== JARVIS AI ASSISTANT =====
+const APP_BUILD = "v39 (07-11 등록전묶음질문)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const JARVIS_TAB_MAP = {
+  goHome:'home', goOrders:'orders', goNew:'new',
+  goCustomers:'customers', goProducts:'products',
+  goSubscriptions:'subscriptions', goDelivery:'deliverytrack',
+};
+
+/* ===== 농장 특수 용어 최우선 보정 규칙 (STT 오인식 교정용) — 모든 Gemini 프롬프트 최상단에 주입 ===== */
+const FARM_TERM_RULES = [
+  "[농장 특수 용어 최우선 보정 규칙 — 다른 모든 해석보다 우선]",
+  "- 발음이 뭉개지거나 비슷하게 들려도 아래 농장 품종·거래처 용어로 최우선 해석한다.",
+  "- \"카이피라/카이 피라/가이피라/가이 피라/카이빠라/가이빠라/카피라\" → 유럽상추 품종 \"카이피라\"",
+  "- \"하레하레/할애하래/하래하래/하레 하레\" → 거래처 \"하레하레베이커리카페\"",
+  "- \"루꼴라/루콜라/루꾸라/루쿨라\" → \"루꼴라\",  \"로메인/로메인상추\" → \"로메인\"",
+  "- \"산체수/산채수/산채소/새채소/채수/최소/챗소\" → 등록 상품 \"채소\" (예: 채소 2kg)",
+  "- \"적치마/적치마상추\", \"청치마\", \"이자벨\", \"바타비아\", \"롤라로사\", \"오크리프/오크립\", \"카이피라\" 등은 모두 쌈·유럽 상추 품종명이다.",
+  "- 위와 비슷하게 들리면 반드시 아래 '등록 상품/거래처 목록'의 이름으로 교정한다. 목록에 있는 이름을 절대적으로 최우선한다.",
+].join("\n");
+
+/* ===== 음성 명령 해석기 (3단계) — 순수 함수, 컴포넌트 밖 ===== */
+async function parseVoiceCommand(rawText, currentContext = {}) {
+  const { apiKey, currentTab = "", products = [], customers = [], vendors = [],
+          model = "gemini-2.0-flash", timeoutMs = 8000 } = currentContext || {};
+  const text = String(rawText || "").trim();
+  if (!text) return { action: "UNKNOWN", reason: "empty", raw: "" };
+  if (!apiKey) throw new Error("Gemini API 키가 필요합니다 (currentContext.apiKey).");
+  const toNames = (arr) => (arr || []).map((x) => (typeof x === "string" ? x : x && x.name)).filter(Boolean);
+  const productNames = toNames(products);
+  const personNames = [...toNames(customers), ...toNames(vendors)];
+  const systemPrompt = [
+    FARM_TERM_RULES,
+    "",
+    "너는 농산물 주문관리 앱의 '음성 명령 해석기'다.",
+    "사용자의 한국어 음성 문장을 읽고, 아래 3가지 명령 유형 중 정확히 하나의 JSON으로만 변환한다.",
+    "설명·마크다운·코드펜스 없이 순수 JSON 객체 하나만 출력한다.",
+    "",
+    '1) 화면 이동: {"action":"NAVIGATE","target":"orders"|"new"|"customers"|"settings"}',
+    "   - 주문목록/주문내역/주문현황/발송 → orders,  새주문/주문입력/주문작성/주문넣기 → new",
+    "   - 고객/거래처/고객관리/고객목록 → customers,  설정/환경설정/메뉴/AI설정/설정창 열기 → settings",
+    '2) 검색: {"action":"SEARCH","keyword":"..."} (특정 고객·상품을 찾아/검색/조회/보여달라고 할 때. keyword는 찾을 대상)',
+    '3) 신규 주문 폼 채우기: {"action":"CREATE_ORDER","payload":{"name":"","product":"","qty":"","note":""}}',
+    "   - 문장에서 뽑을 수 있는 값만 채우고 없으면 빈 문자열. 누구 주문인지 모르면 name은 반드시 빈 문자열.",
+    "   - qty는 수량+단위(예:'2박스'). note는 배송메모/특이사항.",
+    '4) 기타 제어: {"action":"CONTROL","command":"close"|"reset"}',
+    "   - 닫기/뒤로/그만/설정 닫기/창 닫기 → close",
+    "   - 초기화/취소/폼 비우기/새로 시작/검색 지워 → reset",
+    '5) 기존 주문 묶음배송: {"action":"BUNDLE_ORDERS","name":"홍길동","products":[]}',
+    "   - \"OO 주문 묶음배송/합배송해줘\" → 그 사람의 미발송 주문을 한 건으로 묶음",
+    '6) 부분 묶음: {"action":"PARTIAL_BUNDLE","name":"김철수","products":["카이피라","소스"]}',
+    "   - \"OO 주문 중에서 A랑 B만 부분묶음\" → 지정 상품이 든 주문만 묶음. products는 상품명 배열.",
+    '7) 기존 주문에 추가: {"action":"ADD_TO_ORDER","payload":{"name":"","product":"","qty":"","note":""}}',
+    "   - \"OO 채소 더 줘 / OO 카이피라 추가해줘\"처럼 기존 고객 주문에 수량·상품을 더할 때.",
+    "",
+    "[오인식 보정] 발음이 뭉개졌으면 아래 등록 목록에서 가장 비슷한 이름으로 교정한다.",
+    "등록 상품: " + (productNames.length ? productNames.join(", ") : "(없음)"),
+    "등록 고객·거래처: " + (personNames.length ? personNames.join(", ") : "(없음)"),
+    "현재 화면(참고): " + (currentTab || "(모름)"),
+    "",
+    '위 4가지 어디에도 해당하지 않으면 {"action":"UNKNOWN"} 를 출력한다. 반드시 JSON 하나만.',
+  ].join("\n");
+  const body = {
+    systemInstruction: { parts: [{ text: systemPrompt }] },
+    contents: [{ role: "user", parts: [{ text: '사용자 음성: "' + text + '"' }] }],
+    generationConfig: { temperature: 0, responseMimeType: "application/json" },
+  };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let data;
+  try {
+    const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + apiKey,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal: controller.signal });
+    if (!res.ok) { const t = await res.text().catch(() => ""); throw new Error("Gemini " + res.status + ": " + t.slice(0, 200)); }
+    data = await res.json();
+  } finally { clearTimeout(timer); }
+  const rawJson = (data && data.candidates && data.candidates[0] && data.candidates[0].content &&
+    data.candidates[0].content.parts && data.candidates[0].content.parts[0] && data.candidates[0].content.parts[0].text) || "";
+  return normalizeVoiceCommand(safeParseVoiceJson(rawJson), text);
+}
+function safeParseVoiceJson(s){ if(!s)return null; let t=String(s).trim().replace(/^\x60{3}(?:json)?/i,"").replace(/\x60{3}$/,"").trim();
+  try{return JSON.parse(t)}catch(e){} const a=t.indexOf("{"),b=t.lastIndexOf("}");
+  if(a!==-1&&b!==-1&&b>a){try{return JSON.parse(t.slice(a,b+1))}catch(e){}} return null; }
+function normalizeVoiceCommand(obj, rawText){ const fail={action:"UNKNOWN",raw:rawText};
+  if(!obj||typeof obj!=="object")return fail; const action=String(obj.action||"").toUpperCase(); const str=(v)=>v==null?"":String(v).trim();
+  if(action==="NAVIGATE"){const target=["orders","new","customers","settings"].includes(obj.target)?obj.target:null; return target?{action:"NAVIGATE",target}:fail;}
+  if(action==="SEARCH"){const keyword=str(obj.keyword); return keyword?{action:"SEARCH",keyword}:fail;}
+  if(action==="CREATE_ORDER"){const p=obj.payload||{}; const payload={name:str(p.name),product:str(p.product),qty:str(p.qty),note:str(p.note)};
+    if(!payload.product&&!payload.name)return fail; return {action:"CREATE_ORDER",payload};}
+  if(action==="ADD_TO_ORDER"){const p=obj.payload||{}; const payload={name:str(p.name),product:str(p.product),qty:str(p.qty),note:str(p.note)};
+    if(!payload.name||!payload.product)return fail; return {action:"ADD_TO_ORDER",payload};}
+  if(action==="CONTROL"){const command=["close","reset"].includes(String(obj.command||"").toLowerCase())?String(obj.command).toLowerCase():null; return command?{action:"CONTROL",command}:fail;}
+  if(action==="BUNDLE_ORDERS"||action==="PARTIAL_BUNDLE"){ return { action, name:str(obj.name), products:Array.isArray(obj.products)?obj.products.map(str).filter(Boolean):[] }; }
+  if(action==="REBUNDLE_ONE"){ const mode=["all","auto","open"].includes(obj.mode)?obj.mode:"open"; return { action, mode, name:str(obj.name) }; }
+  if(action==="EDIT_ORDER"){ return { action, name:str(obj.name), raw:rawText }; }
+  if(action==="REMOVE_FROM_ORDER"){ return { action, name:str(obj.name), raw:rawText }; }
+  return fail; }
+
+/* ===== 로컬(규칙 기반) 음성 명령 분석 — Gemini 키가 없거나 호출 실패 시 폴백 =====
+ * 인터넷/키 없이도 화면이동·검색·주문폼·닫기/초기화가 즉시 동작하게 함. 같은 JSON 규격 반환. */
+function localParseVoiceCommand(rawText, ctx = {}) {
+  const raw = String(rawText || "").trim();
+  const t = raw.replace(/\s/g, "");
+  if (!t) return { action: "UNKNOWN", raw: "" };
+  const { products = [], customers = [], vendors = [] } = ctx;
+  const toNames = (arr) => (arr || []).map((x) => (typeof x === "string" ? x : x && x.name)).filter(Boolean);
+  const productNames = toNames(products);
+  const personNames = [...toNames(customers), ...toNames(vendors)];
+  const tryMatch = (text, list) => { try { return (typeof matchName === "function") ? matchName(text, list) : ""; } catch (e) { return ""; } };
+
+  // 4) 기타 제어
+  if (/(초기화|비워|지워|리셋|새로시작|다시시작|폼비워)/.test(t)) return { action: "CONTROL", command: "reset" };
+  if (/(닫아|닫기|닫아줘|뒤로|나가기|그만|메뉴닫)/.test(t) && !/주문|고객|검색/.test(t)) return { action: "CONTROL", command: "close" };
+
+  // 1) 화면 이동 (구체적인 것부터)
+  if (/(설정|환경설정|메뉴열|에이아이설정|ai설정)/i.test(t)) return { action: "NAVIGATE", target: "settings" };
+  if (/(새주문|주문입력|주문작성|주문쓰|주문넣는화면|주문화면열)/.test(t)) return { action: "NAVIGATE", target: "new" };
+  if (/(주문목록|주문내역|주문현황|주문보여|주문리스트|주문확인|주문조회|발송목록|발송현황)/.test(t)) return { action: "NAVIGATE", target: "orders" };
+  if (/(고객관리|고객목록|고객명단|고객보여|고객리스트|거래처관리|거래처목록|고객화면)/.test(t)) return { action: "NAVIGATE", target: "customers" };
+
+  // #2.5 단일 주문의 발송 박스(묶음) 재구성 — "이 주문 한 박스로", "자동 묶음으로", "따로따로 보내", "묶음 수정"
+  const boxEditIntent = /(묶음수정|묶음편집|묶음바꿔|묶음다시|박스수정|박스편집|박스바꿔|박스다시|박스나눠|한박스|한상자|하나로묶|하나로합|다같이한|자동묶음|따로따로|따로보내|개별발송|개별로보|낱개로)/.test(t);
+  if (boxEditIntent) {
+    let mode = "open";
+    if (/(한박스|한상자|하나로묶|하나로합|다같이한|전부한|모두한|전체한)/.test(t)) mode = "all";
+    else if (/(자동묶음|따로따로|따로보내|개별발송|개별로|낱개로|박스나눠|나눠서보)/.test(t)) mode = "auto";
+    const nameHit = tryMatch(raw, personNames) || "";
+    return { action: "REBUNDLE_ONE", mode, name: nameHit, raw };
+  }
+
+  // #2.6 기존 주문 열어 수정 — "배솔수곡점 주문 수정", "하레하레 주문 고쳐줘/열어줘/바꿔줘"
+  if (/(주문|오더).*(수정|고쳐|고칠|고치|바꿔|바꾸|변경|편집|열어|열자|불러|띄워)/.test(t)
+      || /(수정|고쳐|고칠|편집)(해|하|해줘|해주세요)?$/.test(t)) {
+    const nameHit = tryMatch(raw, personNames) || "";
+    return { action: "EDIT_ORDER", name: nameHit, raw };
+  }
+
+  // #2.7 기존 주문에서 상품 빼기/삭제 — "채소 빼줘", "로메인 삭제", "홍길동 주문에서 소스 빼줘"
+  if (/(빼|빼고|빼줘|빼주|삭제|제외|없애|지워)/.test(t)) {
+    const nameHit = tryMatch(raw, personNames) || "";
+    return { action: "REMOVE_FROM_ORDER", name: nameHit, raw };
+  }
+
+  // #2 기존 주문 묶음/부분묶음 배송 ("홍길동 주문 묶음배송", "카이피라랑 소스만 부분묶음")
+  if (/(묶음|합배송|합쳐서)/.test(t) && /주문/.test(t)) {
+    const isPartial = /(부분|일부|만|일부만)/.test(t);
+    const nameHit = tryMatch(raw, personNames) || "";
+    const coreOf = (s) => String(s).replace(new RegExp(WEIGHT_RE, "g"), "").replace(/\s/g, "");
+    const prods = productNames.filter((n) => { const core = coreOf(n); return core && t.includes(core); });
+    return { action: isPartial ? "PARTIAL_BUNDLE" : "BUNDLE_ORDERS", name: nameHit, products: prods, raw };
+  }
+
+  // 상품/수량 감지
+  let prodHit = productNames.find((n) => n && t.includes(n.replace(/\s/g, "")));
+  // ★ 찰떡 보정: 정확히 없으면 별칭·자모유사도로 등록 상품 추정 ("최소"→"채소", "가이피라"→"카이피라")
+  if (!prodHit && typeof fuzzyProductMatch === "function") {
+    const fz = fuzzyProductMatch(raw, products, 0.62);
+    if (fz) prodHit = fz.name;
+  }
+  const qtyMatch = raw.match(/(\d+|한|두|세|네|다섯)\s*(박스|봉지|봉|팩|세트|개|근|망|단|포|상자|묶음|kg|킬로그램|킬로|키로그램|키로|g|그램)/);
+  const hasOneWord = /(하나|한개|한 개|한개만|하나만)/.test(raw);   // "하나"=수량 1
+
+  // 3) 신규 주문 폼 채우기 — 상품이 있거나 (수량/'하나' + 주문동사)
+  if (prodHit || ((qtyMatch || hasOneWord) && /(주문|담아|넣어|받아|주세요|줘|시켜|추가|더)/.test(t))) {
+    const nameHit = tryMatch(raw, personNames);
+    let product = prodHit || "";
+    if (!product && qtyMatch) {
+      product = raw.replace(qtyMatch[0], " ")
+        .replace(/(추가로|추가해줘|추가해|추가|더줘|더주문|더넣어|더넣|더담아|더담|더시켜|보태줘|보태|더|주문해줘|주문해|주문|담아줘|담아|넣어줘|넣어|받아줘|받아|주세요|줘|시켜줘|시켜)/g, " ")
+        .replace(nameHit || "≈≈", " ").replace(/\s+/g, " ").trim();
+    }
+    // ★ #2 자동 묶음 전환: "추가/더/보태" 의도면 기존 주문에 합침(ADD_TO_ORDER), 아니면 새 주문(CREATE_ORDER)
+    const addIntent = /(추가|더줘|더주문|더넣|더담|더시켜|보태|더받|더\s*주|한개더|하나더)/.test(t);
+    const action = (addIntent && nameHit) ? "ADD_TO_ORDER" : "CREATE_ORDER";
+    return { action, payload: { name: nameHit || "", product: product || (prodHit || ""), qty: qtyMatch ? qtyMatch[0] : (hasOneWord ? "1개" : ""), note: "" } };
+  }
+
+  // 2) 검색 — 찾아/검색/조회/보여 + 대상
+  if (/(찾아|검색|조회|보여|알려)/.test(t)) {
+    let kw = tryMatch(raw, [...personNames, ...productNames]);
+    if (!kw) kw = raw.replace(/(좀|을|를|이|가|은|는|의|찾아줘|찾아|검색해줘|검색|조회해줘|조회|보여줘|보여주세요|보여|알려줘|알려|주문|고객)/g, "").trim();
+    if (kw) return { action: "SEARCH", keyword: kw };
+  }
+
+  // 이름만 말했으면 검색으로 처리
+  const soloName = tryMatch(raw, personNames);
+  if (soloName) return { action: "SEARCH", keyword: soloName };
+
+  return { action: "UNKNOWN", raw };
+}
+
+/* ===== 고도화 헬퍼: 상품 퍼지매칭 · 동명이인 후보 · 선택 파싱 · 기존주문 묶음 ===== */
+// #3 상품명 오인식 자동 매칭 ("가피라"→"카이피라")
+/* 자주 잘못 들리는 발음 → 정식 상품 핵심명 (유사도로 못 잡는 하드 케이스 확실 교정). 필요시 계속 추가. */
+const PRODUCT_ALIASES = {
+  "채소": ["산체수", "산채수", "산채소", "산체소", "새채소", "새소", "채수", "체수", "쌈채", "쌈채소", "최소", "챗소", "상체수", "삼채수"],
+  "카이피라": ["가피라", "카이빠라", "가이피라", "가이빠라", "카피라"],
+  "루꼴라": ["루꼬라", "루콜라", "루꾸라", "루쿨라"],
+  "로메인": ["로메인상추", "노메인"],
+};
+function canonicalizeSpoken(q) {
+  const s = String(q || "").replace(/\s/g, "");
+  if (!s) return null;
+  for (const canon in PRODUCT_ALIASES) {
+    if (PRODUCT_ALIASES[canon].some((a) => s === a || s.includes(a) || ((typeof simJamo === "function") && simJamo(s, a) >= 0.82))) return canon;
+  }
+  return null;
+}
+function fuzzyProductMatch(spoken, products, minScore) {
+  const q = String(spoken || "").replace(/\s/g, "").trim();
+  if (!q) return null;
+  const th = (typeof minScore === "number") ? minScore : 0.55;
+  const list = (products || []).filter((p) => p && p.name);
+  const core = (s) => String(s).replace(new RegExp(WEIGHT_RE, "g"), "").replace(/\s/g, "");   // 무게 제거 핵심명
+  let hit = list.find((p) => { const n = p.name.replace(/\s/g, ""); const c = core(p.name); return n === q || q.includes(n) || n.includes(q) || (c.length >= 2 && q.includes(c)); });
+  if (hit) return hit;
+  // ★ 명시적 별칭 교정: "산체수"→"채소" 처럼 유사도로 못 잡는 것 확실히 매칭
+  const alias = canonicalizeSpoken(q);
+  if (alias) {
+    let ap = list.find((p) => core(p.name) === alias);
+    if (!ap) ap = list.filter((p) => core(p.name).includes(alias)).sort((a, b) => core(a.name).length - core(b.name).length)[0];
+    if (ap) return ap;
+  }
+  // 핵심명(무게 제거)끼리도 유사도 비교 → "가피라"가 "카이피라 1kg"에도 매칭
+  let best = null, bs = 0;
+  for (const p of list) {
+    const s1 = (typeof simJamo === "function") ? simJamo(q, p.name.replace(/\s/g, "")) : 0;
+    const s2 = (typeof simJamo === "function") ? simJamo(q, core(p.name)) : 0;
+    const s = Math.max(s1, s2);
+    if (s > bs) { bs = s; best = p; }
+  }
+  return bs >= th ? best : null;
+}
+function orderRecipientName(o) { return (o && ((o.recipient && o.recipient.name) || (o.sender && o.sender.name) || o.name)) || ""; }
+// #4 동명이인/유사 이름 후보 찾기 (0개=없음, 1개=확정, 2개이상=사용자 확인 필요)
+function findNameCandidates(spokenName, customers, vendors) {
+  const q = String(spokenName || "").replace(/\s/g, "").trim();
+  if (!q) return [];
+  const all = [
+    ...(customers || []).map((c) => ({ ...c, _kind: "고객" })),
+    ...(vendors || []).map((v) => ({ ...v, _kind: "업체" })),
+  ].filter((x) => x && x.name);
+  const exact = all.filter((x) => x.name.replace(/\s/g, "") === q);
+  if (exact.length) return exact;                 // 정확 일치 (1명=확정, 2명↑=동명이인)
+  if (q.length >= 2) {                             // 부분 포함 ("하레하레"→"하레하레베이커리카페")
+    const sub = all.filter((x) => { const n = x.name.replace(/\s/g, ""); return n.includes(q) || q.includes(n); });
+    if (sub.length) return sub;
+  }
+  const scored = all.map((x) => ({ x, s: (typeof simJamo === "function") ? simJamo(q, x.name.replace(/\s/g, "")) : 0 }))
+    .filter((o) => o.s >= 0.6).sort((a, b) => b.s - a.s);
+  if (!scored.length) return [];
+  const top = scored[0].s;
+  return scored.filter((o) => top - o.s <= 0.12).map((o) => o.x).slice(0, 5);
+}
+// #4 후보 중 사용자의 선택 해석 ("첫 번째", "강남구 홍길동")
+function parseSelection(text, candidates) {
+  const t = String(text || "").replace(/\s/g, "");
+  const n = (candidates || []).length;
+  const ord = [["첫번째|첫째|일번|1번|하나|처음", 0], ["두번째|둘째|이번|2번|둘", 1], ["세번째|셋째|삼번|3번|셋", 2], ["네번째|넷째|사번|4번|넷", 3], ["다섯번째|오번|5번|다섯", 4]];
+  for (const [re, idx] of ord) { if (new RegExp(re).test(t) && idx < n) return idx; }
+  // 동명이인은 이름이 같으므로, 이름 말고 '주소·전화'로 구분되는 토큰만 사용
+  for (let i = 0; i < n; i++) {
+    const c = candidates[i];
+    const hay = ((c.address || "") + (c.phone || "")).replace(/\s/g, "");
+    const toks = String(text || "").split(/\s+/).filter((w) => w.length >= 2 && !(c.name || "").includes(w));
+    if (toks.some((w) => hay.includes(w))) return i;
+  }
+  return -1;
+}
+// #2 특정 사람의 (미발송) 기존 주문들 찾기
+function findOrdersForBundle(spokenName, orders) {
+  const q = String(spokenName || "").replace(/\s/g, "").trim();
+  if (!q) return [];
+  return (orders || []).filter((o) => {
+    if (o.status === "shipped") return false;
+    const nm = orderRecipientName(o).replace(/\s/g, "");
+    return nm === q || nm.includes(q) || q.includes(nm) || ((typeof simJamo === "function") && simJamo(q, nm) >= 0.7);
+  });
+}
+function orderHasAnyProduct(o, productNames) {
+  const items = (o && o.items) || [];
+  const wanted = (productNames || []).map((n) => n.replace(/\s/g, "")).filter(Boolean);
+  if (!wanted.length) return true;
+  return items.some((it) => {
+    const nm = String(it.name || "").replace(/\s/g, "");
+    return wanted.some((w) => nm.includes(w) || w.includes(nm) || ((typeof simJamo === "function") && simJamo(nm, w) >= 0.7));
+  });
+}
+// 재묶음 정리: 어떤 bundleId에 주문이 1건만 남으면 묶음 해제(연결 깨짐 방지, 단독 주문으로 환원)
+function dissolveLoneBundles(list) {
+  const cnt = {};
+  (list || []).forEach((o) => { if (o && o.bundleId) cnt[o.bundleId] = (cnt[o.bundleId] || 0) + 1; });
+  return (list || []).map((o) => (o && o.bundleId && cnt[o.bundleId] < 2) ? { ...o, isBundle: false, bundleId: "" } : o);
+}
+
+/* ===== 앱 전체 데이터 기반 질문 답변 (상품가격·재고·송장추적·정기배송·연락처·발송상태) =====
+ * 조비서가 모든 도메인 질문을 실제 앱 데이터로 답하도록. 답할 수 있으면 문장 반환, 아니면 null. */
+function answerFromAppData(text, data) {
+  const raw = String(text || "").trim();
+  const t = raw.replace(/\s/g, "");
+  if (!t) return null;
+  const { orders = [], customers = [], products = [], vendors = [], subscriptions = [] } = data || {};
+  const won = (n) => (Number(n) || 0).toLocaleString("ko-KR") + "원";
+
+  // 정기배송
+  if (/정기배송|구독/.test(t)) {
+    const n = subscriptions.length;
+    if (n === 0) return "등록된 정기배송이 없어요.";
+    if (/몇|건|개수|수량|목록|리스트|보여|알려/.test(t)) {
+      const names = subscriptions.slice(0, 5).map((s) => s.name || s.customerName || (s.recipient && s.recipient.name) || "").filter(Boolean).join(", ");
+      return `정기배송은 모두 ${n}건이에요.${names ? " " + names + " 등이 있어요." : ""}`;
+    }
+    return `정기배송은 모두 ${n}건 등록돼 있어요.`;
+  }
+
+  // 상품 개수
+  if (/상품/.test(t) && /(몇|개수|가짓수|종류|얼마나)/.test(t) && !fuzzyProductMatch(raw, products)) {
+    return `등록된 상품은 모두 ${products.length}가지예요.`;
+  }
+
+  // 상품 가격 / 재고
+  const prod = fuzzyProductMatch(raw, products);
+  if (prod && /(재고|남았|수량|가격|얼마|단가|price|원|팔아|판매가)/.test(t)) {
+    if (/(재고|남았|수량)/.test(t)) {
+      const st = prod.stock;
+      return `${prod.name} 재고는 ${st == null || st === "" ? "등록 안 됨" : st + "개"}예요.`;
+    }
+    const rp = prod.price, wp = prod.wholesalePrice;
+    const bits = [];
+    if (rp != null && rp !== "") bits.push(`일반가 ${won(rp)}`);
+    if (wp != null && wp !== "") bits.push(`업체가 ${won(wp)}`);
+    return `${prod.name} 가격은 ${bits.length ? bits.join(", ") : "등록 안 됨"}이에요.`;
+  }
+
+  // 이름(고객/업체) — 질문어를 떼고 이름만 추출해 후보 검색
+  const nameQuery = raw
+    .replace(/(전화번호|송장번호|운송장번호|전화|연락처|번호|폰|핸드폰|주소|어디사|어디에|어디로|어디|송장|운송장|추적|택배사|배송조회|배송추적|발송|보냈나|보냈|출고|배송됐|배송했|배송|정보|알려줘|알려|보여줘|보여|얼마|가격|재고|님|씨|의|은|는|이|가|좀|해줘|해줄래|줘)/g, " ")
+    .replace(/\s+/g, " ").trim();
+  const cands = findNameCandidates(nameQuery || raw, customers, vendors);
+  const person = cands.length === 1 ? cands[0] : null;
+  if (person) {
+    const pOrders = orders.filter((o) => orderRecipientName(o).replace(/\s/g, "") === person.name.replace(/\s/g, ""));
+    // 순서 중요: '송장번호'에 '번호'가 들어있으므로 송장/발송을 연락처보다 먼저 검사
+    if (/(송장|운송장|추적|택배사|배송조회|배송추적)/.test(t)) {
+      const withInv = pOrders.filter((o) => o.invoiceNo);
+      if (!withInv.length) return `${person.name} 님은 아직 등록된 송장번호가 없어요.`;
+      const r = withInv[withInv.length - 1];
+      return `${person.name} 님 최근 송장번호는 ${r.courier ? r.courier + " " : ""}${r.invoiceNo}예요.`;
+    }
+    if (/(발송|보냈|출고|배송됐|배송했|보냈나|갔나)/.test(t)) {
+      const total = pOrders.length;
+      if (!total) return `${person.name} 님 주문 내역이 없어요.`;
+      const shipped = pOrders.filter((o) => o.status === "shipped").length;
+      return `${person.name} 님 주문 ${total}건 중 ${shipped}건 발송완료예요.`;
+    }
+    if (/(전화|연락처|폰|핸드폰|번호)/.test(t)) return `${person.name} ${person._kind}의 연락처는 ${person.phone || "등록 안 됨"}이에요.`;
+    if (/(주소|어디)/.test(t)) return `${person.name} ${person._kind}의 주소는 ${person.address || "등록 안 됨"}이에요.`;
+  }
+  return null;
+}
+
+async function analyzePhotoWithGemini(imageFile, products, apiKey) {
+  const model = await getGeminiModel(apiKey);
+  const base64 = await new Promise((res, rej) => {
+    const r = new FileReader(); r.onload = () => res(r.result.split(',')[1]); r.onerror = rej; r.readAsDataURL(imageFile);
+  });
+  const productStr = products.length ? products.map(p => `- ${p.name}`).join('\n') : '(없음)';
+  const prompt = `이 이미지에서 농산물 주문 정보를 추출하세요.\n\n등록 상품:\n${productStr}\n\nconfidence: "high"=명확, "medium"=추정, "low"=불확실\n없는 항목은 value="" confidence="high"\n배송 메시지/요청사항도 반드시 추출\n\nJSON으로만:\n{"senderName":{"value":"","confidence":"high"},"senderPhone":{"value":"","confidence":"high"},"recipName":{"value":"","confidence":"high"},"recipPhone":{"value":"","confidence":"high"},"address":{"value":"","confidence":"high"},"deliveryMessage":{"value":"","confidence":"high"},"reserveDate":{"value":"","confidence":"high"},"items":[{"name":"","qty":1,"confidence":"high","note":""}],"overallNote":""}`;
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+    { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ contents:[{ parts:[{ text: prompt },{ inline_data:{ mime_type: imageFile.type||'image/jpeg', data: base64 }}]}], generationConfig:{ temperature:0.1 } }) }
+  );
+  if (!res.ok) { const e = await res.json().catch(()=>({})); throw new Error(e.error?.message||'Gemini Vision 오류'); }
+  const data = await res.json();
+  const raw = (data.candidates?.[0]?.content?.parts?.[0]?.text||'').trim();
+  try { return JSON.parse(raw.replace(/```(?:json)?/g,'').replace(/```/g,'').trim()); }
+  catch { const m = raw.match(/(\{[\s\S]*\})/); if(m) return JSON.parse(m[1]); throw new Error('파싱 실패'); }
+}
+
+// ★ 여러 키 자동 전환 래퍼: 한 키가 한도(429)면 다음 키로 자동 재시도
+async function callGeminiJarvis(history, ctx, apiKey) {
+  const pool = buildGeminiKeyPool(apiKey);
+  if (!pool.length) throw new Error('Gemini API 키가 없습니다.');
+  // 살아있는 키 먼저, 전부 쿨다운이면 가장 빨리 풀리는 순서로 시도
+  const live = pool.filter(k => geminiCooldownRemaining(k) === 0);
+  const order = live.length ? live
+    : [...pool].sort((a, b) => geminiCooldownRemaining(a) - geminiCooldownRemaining(b));
+  let lastErr = null;
+  for (const key of order) {
+    try {
+      return await callGeminiJarvisOnce(history, ctx, key);
+    } catch (e) {
+      if (e && e.message && e.message.startsWith('QUOTA_EXCEEDED:')) {
+        const secs = parseInt(e.message.split(':')[1]) || 60;
+        _geminiCooldownUntil[key] = Date.now() + secs * 1000;  // 이 키 쿨다운 등록
+        lastErr = e;
+        continue;  // 다음 키로 자동 전환
+      }
+      throw e;  // 한도 외 오류는 전환 안 함
+    }
+  }
+  // 모든 키 소진 → 가장 빨리 풀리는 시간으로 안내
+  const rems = pool.map(geminiCooldownRemaining).filter(x => x > 0);
+  const minRem = rems.length ? Math.min(...rems) : 60;
+  throw new Error(`QUOTA_EXCEEDED:${minRem}`);
+}
+
+// ★ v18: AI 음성 주문 이해 — 문장 전체를 등록된 업체·상품 목록과 함께 해석해 주문서로 정리
+//  (발음이 뭉개져도 목록에서 가장 비슷한 것으로 AI가 맞춤). 키 여러 개 자동 전환.
+async function callGeminiOrderParse(utterance, draft, lists, apiKey) {
+  const pool = buildGeminiKeyPool(apiKey);
+  if (!pool.length) throw new Error('Gemini API 키가 없습니다.');
+  const live = pool.filter(k => geminiCooldownRemaining(k) === 0);
+  const order = live.length ? live : [...pool].sort((a, b) => geminiCooldownRemaining(a) - geminiCooldownRemaining(b));
+  for (const key of order) {
+    try { return await callGeminiOrderParseOnce(utterance, draft, lists, key); }
+    catch (e) {
+      if (e && e.message && e.message.startsWith('QUOTA_EXCEEDED:')) {
+        const secs = parseInt(e.message.split(':')[1]) || 60;
+        _geminiCooldownUntil[key] = Date.now() + secs * 1000; continue;
+      }
+      throw e;
+    }
+  }
+  const rems = pool.map(geminiCooldownRemaining).filter(x => x > 0);
+  throw new Error(`QUOTA_EXCEEDED:${rems.length ? Math.min(...rems) : 60}`);
+}
+async function callGeminiOrderParseOnce(utterance, draft, lists, apiKey) {
+  const model = await getGeminiModel(apiKey);
+  const today = new Date();
+  const p = n => String(n).padStart(2, '0');
+  const todayStr = `${today.getFullYear()}-${p(today.getMonth() + 1)}-${p(today.getDate())}`;
+  const dow = ['일','월','화','수','목','금','토'][today.getDay()];
+  const vendorNames = (lists.vendors || []).map(v => v.name).filter(Boolean);
+  const custNames = (lists.customers || []).map(c => c.name).filter(Boolean);
+  const prodNames = (lists.products || []).map(pr => pr.name).filter(Boolean);
+  const sys = `${FARM_TERM_RULES}
+
+당신은 농산물 직거래 주문접수 직원입니다. 사장님이 말한 주문을 정확히 주문서로 정리하세요.
+음성인식이라 발음이 뭉개질 수 있으니, 사람이름·업체·상품은 아래 "등록 목록"에서 발음이 가장 비슷한 것으로 반드시 맞추세요.
+
+[오늘] ${todayStr} (${dow}요일)
+[등록된 업체] ${vendorNames.join(', ') || '없음'}
+[등록된 고객] ${custNames.join(', ') || '없음'}
+[등록된 상품] ${prodNames.join(', ') || '없음'}
+
+[현재까지 작성된 주문서]
+${JSON.stringify(draft || { name:'', items:[], reserveDate:'', deliveryMessage:'' })}
+
+[방금 사장님이 한 말]
+"${utterance}"
+
+[규칙]
+0. 방금 말이 주문 내용이 아니면(불평·질문·잡담·"아니야" 같은 거절이면) 현재 주문서를 그대로 두고 아무 것도 바꾸지 마세요. 없는 이름·상품을 지어내지 마세요.
+1. name: 말한 이름을 위 업체/고객 목록에서 발음이 가장 비슷한 것으로 교체(예: "할애하래"→"하레하레"). 목록에 없거나 이름을 안 말했으면 현재 값 유지.
+2. items: 여러 상품을 말하면 반드시 모두 배열에 담기(예 "샐러드 2키로 로메인 2키로 적상추 5봉지" → 3개 항목). 각 상품을 위 상품 목록에서 비슷한 것으로 맞춤. 무게("키로"=킬로, 1kg·800g·500g·2kg·2키로 등)는 상품명 뒤에 붙임(예 "삼겹살 2kg"). qty는 개수(개/박스/봉/하나)만. 무게는 수량이 아님.
+3. reserveDate: 오늘/내일/모레/글피/N일후/N월N일/요일 → YYYY-MM-DD. 없으면 "".
+4. deliveryMessage: 배송 요청문구(문앞/부재시 등). 없으면 "".
+5. 현재 주문서에 새 정보를 합치되, "바꿔/변경/취소"라고 하면 해당 항목 교체·삭제.
+6. 반드시 JSON만 출력, 설명 금지:
+{"name":"","items":[{"name":"","qty":1}],"reserveDate":"","deliveryMessage":""}`;
+
+  // ★ v18: 8초 타임아웃 — 네트워크가 느리거나 막히면 즉시 로컬 규칙으로 폴백
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8000);
+  let res;
+  try {
+    res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+      { method:'POST', headers:{'Content-Type':'application/json'}, signal: ctrl.signal,
+        body: JSON.stringify({ contents:[{ role:'user', parts:[{ text: sys }] }], generationConfig:{ temperature:0.2, maxOutputTokens:500 } }) }
+    );
+  } finally { clearTimeout(timer); }
+  if (!res.ok) {
+    const e = await res.json().catch(()=>({}));
+    if (res.status === 429) {
+      const rm = (e.error?.message||'').match(/retry in\s+([\d.]+)s/i);
+      throw new Error(`QUOTA_EXCEEDED:${rm ? Math.ceil(parseFloat(rm[1])) : 60}`);
+    }
+    throw new Error(e.error?.message || `API 오류 (${res.status})`);
+  }
+  const data = await res.json();
+  const raw = (data.candidates?.[0]?.content?.parts?.[0]?.text||'').replace(/```(?:json)?/g,'').replace(/```/g,'').trim();
+  let obj = null;
+  try { obj = JSON.parse(raw); }
+  catch { const m = raw.match(/\{[\s\S]*\}/); if (m) { try { obj = JSON.parse(m[0]); } catch {} } }
+  if (!obj || typeof obj !== 'object') throw new Error('주문 해석 실패');
+  return {
+    name: (obj.name || '').trim(),
+    items: Array.isArray(obj.items) ? obj.items.filter(it => it && it.name).map(it => ({ productId: null, name: String(it.name).trim(), qty: Number(it.qty) || 1 })) : [],
+    reserveDate: (obj.reserveDate || '').trim(),
+    deliveryMessage: (obj.deliveryMessage || '').trim(),
+  };
+}
+
+async function callGeminiJarvisOnce(history, ctx, apiKey) {
+  const model = await getGeminiModel(apiKey);
+  const now = new Date().toLocaleString('ko-KR', { timeZone:'Asia/Seoul' });
+
+  const sysText = `${FARM_TERM_RULES}
+
+당신은 "조비서"입니다. 조아저씨쌈 농산물 직거래 주문관리 앱의 전담 AI 비서입니다.
+
+[현재 상황 - ${now}]
+오늘날짜: ${ctx.todayStr||''}
+총 주문: ${ctx.total}건 | 오늘 신규: ${ctx.today}건
+입금대기: ${ctx.pending}건 | 결제완료: ${ctx.pendingPay||0}건 | 발송준비: ${ctx.ready}건 | 발송완료: ${ctx.shipped}건
+등록 고객: ${ctx.customers}명 | 등록 업체: ${ctx.vendorNames} | 정기배송: ${ctx.subsCount||0}건 | 현재화면: ${ctx.tab}
+취급 상품(${ctx.products}개): ${ctx.productNames}
+상품 가격·재고: ${ctx.productPricing || '없음'}
+최근 고객 5명: ${ctx.recentCustomers || '없음'}
+최근 주문 10건:
+${ctx.recentOrdersFull || '없음'}
+
+[역할 규칙]
+1. 반드시 한국어로만 대화하세요
+2. 음성 TTS용 자연스러운 말투로 답하세요 — 특수기호·마크다운·이모지 절대 사용 금지
+3. 대화하듯 자연스럽게 1~2문장으로 답하세요 (너무 길면 음성이 어색함)
+4. 숫자·통계는 반드시 위 데이터에서 읽어 정확하게 말하세요
+5. 농산물 직거래 비즈니스 특성을 이해하세요 (상추, 쌈채소, 겨자채, 청경채, 깻잎 등)
+6. 존댓말이지만 친근하고 자연스럽게 (~요, ~네요, ~군요 등 구어체 선호)
+7. 인사·잡담에도 따뜻하게 응대하세요 (업무 외 대화도 자연스럽게)
+8. 모르는 것은 "제가 확인하기 어렵네요"처럼 자연스럽게 표현하세요
+9. 주문 입력·상태 변경 등 실제 작업은 해당 화면으로 안내하세요
+10. 최근 주문 10건 데이터로 고객명·금액·상태를 구체적으로 답하세요
+
+[화면이동 - 이동 요청 시 반드시 action 설정]
+goOrders   : 주문목록/주문보여줘/주문현황
+goNew      : 새주문/주문입력/주문추가
+goCustomers: 고객관리/고객목록
+goProducts : 상품관리/상품목록
+goDelivery : 배송관리/배송현황
+goHome     : 홈/대시보드/처음
+null       : 이동 불필요한 일반 대화
+
+[출력 형식 - 반드시 아래 JSON 형식만, 앞뒤 텍스트 절대 금지]
+{"text":"자연스러운 한국어 답변","action":null}
+
+[예시]
+사용자: "주문 보여줘" → {"text":"주문 목록으로 이동할게요","action":"goOrders"}
+사용자: "새 주문 입력" → {"text":"새 주문 입력 화면이에요","action":"goNew"}
+사용자: "오늘 주문 몇 개야" → {"text":"오늘 신규 주문은 3건이에요","action":null}`;
+
+  const contents = [
+    { role:'user', parts:[{ text: sysText }] },
+    { role:'model', parts:[{ text:'{"text":"안녕하세요! 조비서예요. 주문이나 고객 정보, 뭐든 물어보세요!","action":null}' }] },
+    ...history.slice(-20)
+  ];
+
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+    { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ contents, generationConfig:{ temperature:0.5, maxOutputTokens:2048 } }) }
+  );
+  if (!res.ok) {
+    const e = await res.json().catch(()=>({}));
+    const msg = e.error?.message || '';
+    // 할당량 초과 (429) — 재시도 시간 파싱해서 한국어로 안내
+    if (res.status === 429) {
+      const retryMatch = msg.match(/retry in\s+([\d.]+)s/i);
+      const seconds = retryMatch ? Math.ceil(parseFloat(retryMatch[1])) : 60;
+      const err = new Error(`QUOTA_EXCEEDED:${seconds}`);
+      err.retryAfter = seconds;
+      throw err;
+    }
+    // 기타 오류
+    throw new Error(msg || `API 오류 (${res.status})`);
+  }
+  const data = await res.json();
+  const raw = (data.candidates?.[0]?.content?.parts?.[0]?.text||'').trim();
+  // ★ v5 Fix: 다중 파싱 전략으로 JSON 추출 실패 최소화
+  const cleaned = raw.replace(/```(?:json)?/g,'').replace(/```/g,'').trim();
+  // 전략1: 직접 파싱
+  try { return JSON.parse(cleaned); } catch {}
+  // 전략2: 텍스트 속 JSON 객체 찾기 (Gemini가 설명 텍스트 추가 시)
+  const jsonMatch = cleaned.match(/\{[\s\S]*?\}/g);
+  if (jsonMatch) {
+    for (let i = jsonMatch.length - 1; i >= 0; i--) {
+      try { const obj = JSON.parse(jsonMatch[i]); if (obj.text) return obj; } catch {}
+    }
+  }
+  // 전략3: text 필드 추출 (정상 종료된 문자열)
+  const actionM = cleaned.match(/"action"\s*:\s*"([^"]+)"/);
+  let m = cleaned.match(/"text"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (m) return { text: m[1].replace(/\\"/g, '"').replace(/\\n/g, ' ').trim(), action: actionM ? actionM[1] : null };
+  // 전략4: 잘린 JSON (닫는 따옴표 없음) — text 값만 최대한 살림
+  m = cleaned.match(/"text"\s*:\s*"([^"]*)$/);
+  if (m) return { text: m[1].replace(/[{}\[\]"]+$/, '').trim() || '다시 말씀해 주세요.', action: actionM ? actionM[1] : null };
+  // 전략5: JSON 흔적 완전 제거 (중괄호·따옴표가 화면에 새는 것 방지)
+  const stripped = cleaned
+    .replace(/^[^{]*\{/, '')
+    .replace(/["']?\s*text\s*["']?\s*:\s*["']?/i, '')
+    .replace(/["']?\s*,?\s*["']?action["']?\s*:[\s\S]*$/i, '')
+    .replace(/[{}"]/g, '')
+    .trim();
+  return { text: stripped || '다시 말씀해 주세요.', action: null };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
 
 function downloadWorkbook(rows, sheetName, filename, columnOrder, rowFillFn) {
   const sheet = XLSX.utils.json_to_sheet(rows, columnOrder ? { header: columnOrder } : undefined);
@@ -1612,6 +2913,8 @@ function App() {
   const [sideMenuOpen, setSideMenuOpen] = useState(false);
   const [ocrLoading, setOcrLoading] = useState(false);
   const [bulkSmsOpen, setBulkSmsOpen] = useState(false);
+  const [geminiKey, setGeminiKey] = React.useState(loadGeminiKey);
+  const [photoAiResult, setPhotoAiResult] = React.useState(null);
 
   function askConfirm(message, onConfirm, confirmLabel) {
     setConfirmDialog({
@@ -1640,6 +2943,345 @@ function App() {
   const [draft, setDraft] = useState(blankDraft);
   const [toast, setToast] = useState("");
   const [boxPlanModal, setBoxPlanModal] = useState(null); // { deliveryIdx, items, boxes } 수동 묶음 선택
+
+  // ── 음성 명령(3단계) 상태 ──
+  const [isListening, setIsListening] = useState(false); // 명령 마이크 동작 중 표시용
+  const [voiceText, setVoiceText]     = useState("");    // 마지막으로 인식된 문장(표시용)
+  // #4 동명이인/유사업체 확인 대기 상태 (있으면 등록 일시중지, 사용자 선택 대기)
+  const [nameChoice, setNameChoice]   = useState(null);  // { candidates:[...], payload }
+  const nameChoiceRef = useRef(null);
+  useEffect(() => { nameChoiceRef.current = nameChoice; }, [nameChoice]);
+
+  // ── 화면 자동 잠금 방지 (Wake Lock) ──
+  //  앱이 화면에 보이는 동안 화면이 꺼지지 않게 유지. 백그라운드로 가면 자동 해제,
+  //  다시 돌아오면 재획득. 미지원 브라우저/권한거부는 조용히 무시(앱 정상 동작).
+  const wakeLockRef = useRef(null);
+  useEffect(() => {
+    let cancelled = false;
+    async function acquireWakeLock() {
+      try {
+        if ("wakeLock" in navigator && document.visibilityState === "visible" && !cancelled) {
+          wakeLockRef.current = await navigator.wakeLock.request("screen");
+          // 시스템이 강제 해제(전화 수신 등)하면 참조만 정리
+          if (wakeLockRef.current && wakeLockRef.current.addEventListener) {
+            wakeLockRef.current.addEventListener("release", () => { wakeLockRef.current = null; });
+          }
+        }
+      } catch (e) { /* 미지원/거부 — 무시 */ }
+    }
+    async function releaseWakeLock() {
+      try { if (wakeLockRef.current) { await wakeLockRef.current.release(); } } catch (e) {}
+      wakeLockRef.current = null;
+    }
+    function onVisibility() {
+      if (document.visibilityState === "visible") acquireWakeLock();
+      else releaseWakeLock();
+    }
+    acquireWakeLock();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVisibility);
+      releaseWakeLock();
+    };
+  }, []);
+
+  // AI가 준 명령(JSON)에 따라 앱을 실제로 제어
+  // #3+#4: 선택된 고객(또는 말한 이름)으로 새 주문 폼을 채움 (상품은 퍼지매칭). 저장은 안 함.
+  function fillOrderFromChoice(cand, p) {
+    setTab("new");
+    setDraft((prev) => {
+      const next = JSON.parse(JSON.stringify(prev));
+      const d = next.deliveries && next.deliveries[0];
+      if (!d) return prev;
+      d.name = cand ? cand.name : (p.name || d.name || "");
+      if (cand && cand.phone) d.phone = cand.phone;
+      if (cand && cand.address) d.address = cand.address;
+      if (p.note) next.message = (next.message ? next.message + " " : "") + p.note;
+      if (p.product) {
+        const prod = fuzzyProductMatch(p.product, products);   // '가피라'→'카이피라'
+        const qtyNum = parseInt(String(p.qty || "").replace(/[^0-9]/g, ""), 10) || 1;
+        if (prod) d.cart = { ...(d.cart || {}), [prod.id]: qtyNum };
+        else next.message = (next.message ? next.message + " " : "") + `[상품:${p.product} ${p.qty || ""}]`;
+      }
+      return next;
+    });
+    fireToast(`📝 새 주문 폼을 채웠어요${cand ? ` (${cand._kind || ""} ${cand.name})` : (p.name ? ` (${p.name})` : "")} — 확인 후 저장하세요`);
+  }
+
+  // #4: 후보 확정 (버튼 터치 또는 음성 선택)
+  function confirmNameChoice(cand) {
+    const pending = nameChoiceRef.current;
+    setNameChoice(null);
+    if (pending) fillOrderFromChoice(cand, pending.payload || {});
+  }
+
+  // #2: 기존 주문 묶음배송 / 부분 묶음 — setOrders로 bundleId·isBundle 부여 (기존 저장 경로 사용)
+  function bundleExistingOrders(name, productList, partial) {
+    let targets = findOrdersForBundle(name, orders);
+    if (partial && productList && productList.length) targets = targets.filter((o) => orderHasAnyProduct(o, productList));
+    if (!targets.length) { fireToast(`'${name || "해당 고객"}'의 묶을 미발송 주문을 못 찾았어요`); return; }
+    if (targets.length < 2) { fireToast(`'${name}' 미발송 주문이 1건뿐이라 묶을 게 없어요`); setTab("orders"); setSearchQuery(name || ""); return; }
+    const bundleId = uid("bundle");
+    const idset = new Set(targets.map((o) => o.id));
+    setOrders((prev) => prev.map((o) => (idset.has(o.id) ? { ...o, isBundle: true, bundleId } : o)));
+    setTab("orders"); setSearchQuery(name || "");
+    fireToast(`📦 ${partial ? "부분 " : ""}묶음배송: '${name}' 주문 ${targets.length}건을 한 묶음으로 처리했어요`);
+  }
+
+  // ★ v38: 말한 이름으로 기존 주문 1건 찾기 (발송완료 포함, 가장 최근 것 우선). 못 찾으면 null.
+  function findOrderBySpokenName(spokenName) {
+    const q = String(spokenName || "").replace(/\s/g, "").trim();
+    if (!q) return null;
+    const scoreName = (nm) => {
+      const n = String(nm || "").replace(/\s/g, "");
+      if (!n) return 0;
+      if (n === q) return 1;
+      if (n.includes(q) || q.includes(n)) return 0.9;
+      return (typeof simJamo === "function") ? simJamo(q, n) : 0;
+    };
+    let best = null, bestScore = 0.6;
+    (orders || []).forEach((o) => {
+      const cand = Math.max(
+        scoreName(orderRecipientName(o)),
+        scoreName((customerMap[o.customerId] || {}).name),
+        scoreName(o.name)
+      );
+      // 점수가 같거나 높으면 뒤(=더 최근에 추가된) 주문을 선택
+      if (cand >= bestScore) { bestScore = cand; best = o; }
+    });
+    return best;
+  }
+
+  function handleVoiceAction(command) {
+    if (!command || !command.action) return;
+    const tabName = { orders: "주문목록", new: "새 주문", customers: "고객관리", settings: "설정" };
+    switch (command.action) {
+      case "NAVIGATE":
+        if (command.target === "settings") { setSideMenuOpen(true); }   // 설정/메뉴 열기
+        else setTab(command.target);                                    // orders / new / customers
+        fireToast(`🧭 '${tabName[command.target] || command.target}' 화면으로 이동`);
+        break;
+      case "SEARCH":
+        setTab("orders");                             // 검색 결과를 볼 수 있게 주문목록으로 강제 이동
+        setSearchQuery(command.keyword);              // 통합 검색창 채우기
+        if (typeof setStatusFilter === "function") setStatusFilter("all");
+        fireToast(`🔍 '${command.keyword}' 검색`);
+        break;
+      case "CONTROL":
+        if (command.command === "close") {
+          setSideMenuOpen(false);                     // 설정/메뉴 닫기
+          fireToast("✅ 창을 닫았어요");
+        } else if (command.command === "reset") {
+          setDraft(blankDraft);                       // 새 주문 폼 초기화
+          setSearchQuery("");                         // 검색어 지우기
+          fireToast("🧹 폼·검색을 초기화했어요");
+        }
+        break;
+      case "CREATE_ORDER": {
+        const p = command.payload || {};
+        // #4 동명이인/유사업체 방어: 후보가 2개 이상이면 등록 멈추고 사용자에게 선택 요청
+        if (p.name) {
+          const cands = findNameCandidates(p.name, customers, vendors);
+          if (cands.length >= 2) {
+            setNameChoice({ candidates: cands, payload: p });
+            fireToast("⚠️ 비슷한 이름이 여러 곳이에요 — 누구인지 골라 주세요");
+            break;
+          }
+          if (cands.length === 1) { fillOrderFromChoice(cands[0], p); break; }
+        }
+        fillOrderFromChoice(null, p); // 매칭 없음 → 말한 이름 그대로
+        break;
+      }
+      case "ADD_TO_ORDER": {
+        // #2 기존 주문에 상품/수량 추가 → 없으면 새 주문, 있으면 합치고(여러 건이면) 묶음으로 자동 전환
+        const p = command.payload || {};
+        const targets = findOrdersForBundle(p.name, orders);   // 미발송 주문들
+        if (!targets.length) {
+          fireToast(`'${p.name}'의 기존 주문이 없어 새 주문으로 열게요`);
+          handleVoiceAction({ action: "CREATE_ORDER", payload: p });
+          break;
+        }
+        const prod = fuzzyProductMatch(p.product, products);
+        const qtyNum = parseInt(String(p.qty || "").replace(/[^0-9]/g, ""), 10) || 1;
+        // 등록 상품이면 productId로 병합(같은 상품 수량↑), 미등록이면 이름으로 커스텀 추가
+        const itemName = prod ? prod.name : (p.product || "").trim();
+        const itemKey = prod ? prod.id : itemName;
+        const newItem = prod ? { productId: prod.id, name: prod.name, qty: qtyNum, price: prod.price || 0 }
+                             : { productId: null, name: itemName, qty: qtyNum, price: 0 };
+        const target = targets[targets.length - 1];            // 가장 최근 주문에 합침
+        setOrders((prev) => {
+          let next = prev.map((o) => {
+            if (o.id !== target.id) return o;
+            const items = JSON.parse(JSON.stringify(o.items || []));   // 깊은 복사
+            const idx = items.findIndex((it) => (it.productId || it.name) === itemKey);
+            if (idx >= 0) items[idx].qty = (Number(items[idx].qty) || 0) + qtyNum;   // 수량 증가
+            else items.push(newItem);   // 상품 합침
+            return { ...o, items };
+          });
+          // 같은 고객 미발송 주문이 2건 이상이면 묶음으로 자동 업그레이드
+          if (targets.length >= 2) {
+            const bid = target.bundleId || uid("bundle");
+            const idset = new Set(targets.map((o) => o.id));
+            next = next.map((o) => (idset.has(o.id) ? { ...o, isBundle: true, bundleId: bid } : o));
+          }
+          return next;
+        });
+        setTab("orders"); setSearchQuery(p.name || "");
+        fireToast(`➕ ${p.name} 주문에 ${itemName} ${qtyNum}개 추가${targets.length >= 2 ? " · 묶음 전환" : ""} — 확인하세요`);
+        break;
+      }
+      case "BUNDLE_ORDERS":
+        bundleExistingOrders(command.name, command.products || [], false);
+        break;
+      case "PARTIAL_BUNDLE":
+        bundleExistingOrders(command.name, command.products || [], true);
+        break;
+      case "REBUNDLE_ONE": {
+        // 단일 주문의 발송 박스(묶음) 재구성 — 대상: 말한 고객의 최근 미발송 주문, 없으면 현재 열린 주문
+        let target = null;
+        if (command.name) {
+          const cands = findOrdersForBundle(command.name, orders);
+          target = cands.length ? cands[cands.length - 1] : null;
+        }
+        if (!target && selectedOrderId) target = orders.find((o) => o.id === selectedOrderId) || null;
+        if (!target) { fireToast("어느 주문인지 못 찾았어요 — 주문을 연 뒤 다시 말씀해 주세요"); break; }
+        setTab("orders"); setSelectedOrderId(target.id);
+        if (command.mode === "all") {
+          // 전부 한 박스로 (같은 상품 수량 합산)
+          const map = {};
+          (target.items || []).forEach((it) => {
+            const p = productMap[it.productId];
+            const key = it.productId || it.name;
+            if (!map[key]) map[key] = { productId: it.productId || null, name: p ? p.name : (it.name || "상품"), qty: 0, price: it.price != null ? it.price : (p ? (p.wholesalePrice || p.price) : 0), unit: p ? (p.unit || "kg") : (it.unit || "kg") };
+            map[key].qty += Number(it.qty) || 0;
+          });
+          const items = Object.values(map);
+          updateOrder(target.id, { manualBoxes: [{ items, volume: volumeForBoxItems(items, productMap) }] });
+          fireToast("📦 전부 한 박스로 묶었어요");
+        } else if (command.mode === "auto") {
+          updateOrder(target.id, { manualBoxes: null });
+          fireToast("📦 자동 묶음(박스 규칙)으로 되돌렸어요");
+        } else {
+          fireToast("📦 주문을 열었어요 — '묶음 수정'을 눌러 박스를 조정하세요");
+        }
+        break;
+      }
+      case "EDIT_ORDER": {
+        // 기존 주문을 찾아 상세 화면을 열어 편집 준비 (발송완료 주문 포함)
+        const target = findOrderBySpokenName(command.name);
+        if (!target) {
+          setTab("orders");
+          if (command.name) setSearchQuery(command.name);
+          fireToast(`${command.name || ""} 주문을 못 찾았어요 — 목록에서 골라 주세요`);
+          break;
+        }
+        setTab("orders"); setSelectedOrderId(target.id);
+        fireToast(`✏️ ${orderRecipientName(target)} 주문을 열었어요 — 상품 추가·삭제·묶음 수정 가능`);
+        break;
+      }
+      case "REMOVE_FROM_ORDER": {
+        // 기존 주문에서 상품 제거 — 대상: 말한 고객의 주문, 없으면 현재 열린 주문
+        let target = command.name ? findOrderBySpokenName(command.name) : null;
+        if (!target && selectedOrderId) target = orders.find((o) => o.id === selectedOrderId) || null;
+        if (!target) { fireToast("어느 주문인지 못 찾았어요 — 주문을 먼저 열어 주세요"); break; }
+        const raw = command.raw || "";
+        const tt = raw.replace(/\s/g, "");
+        const clearAll = /(전부|전체|모두|모조리|싹다|다빼|다삭제|전부삭제|모두삭제|전부빼|모두빼|다지워|전체삭제|전체빼)/.test(tt);
+        const stripRm = (s) => s
+          .replace(/(빼주세요|빼줘|빼주|빼고|빼기|빼|삭제해줘|삭제해|삭제|제외해줘|제외해|제외|없애줘|없애|지워줘|지워)/g, "")
+          .replace(/(모든|모두|전부|전체|모조리|싹|좀|주문|상품|에서|그거|이거|저거|그것|이것|저것|것|거)/g, "")
+          .replace(new RegExp("(\\d+|한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\\s*(?:" + COUNT_UNIT + ")", "g"), "")
+          .replace(/\d+개/g, "");
+        const nm = command.name ? command.name.replace(/\s/g, "") : "";
+        const coreOf = (s) => String(s || "").replace(new RegExp(WEIGHT_RE, "g"), "").replace(/[\s\d]/g, "").trim();
+        let spoken = stripRm(tt);
+        if (nm) spoken = spoken.split(nm).join("");
+        const spokenCore = coreOf(spoken);
+        const items = JSON.parse(JSON.stringify(target.items || []));
+        let kept, removed = [];
+        if (clearAll && !spokenCore) { removed = items.slice(); kept = []; }
+        else if (spokenCore) {
+          kept = items.filter((it) => {
+            const c = coreOf(it.name);
+            const hit = !!c && (c.includes(spokenCore) || spokenCore.includes(c));
+            if (hit) removed.push(it);
+            return !hit;
+          });
+        } else {
+          setTab("orders"); setSelectedOrderId(target.id);
+          fireToast(`무엇을 뺄까요? 현재 ${items.map((i) => i.name).join(", ")}`);
+          break;
+        }
+        if (!removed.length) { setTab("orders"); setSelectedOrderId(target.id); fireToast(`"${spokenCore}" 상품이 이 주문에 없어요`); break; }
+        setTab("orders"); setSelectedOrderId(target.id);
+        if (!kept.length) {
+          askConfirm(`${orderRecipientName(target)} 주문의 상품을 모두 빼면 주문이 삭제됩니다. 삭제할까요?`, () => { deleteOrder(target.id); setSelectedOrderId(null); });
+          break;
+        }
+        updateOrder(target.id, { items: kept, manualBoxes: null });
+        fireToast(`🗑️ ${removed.map((i) => i.name).join(", ")} 뺐어요`);
+        break;
+      }
+      default:
+        break; // UNKNOWN: 앱은 건드리지 않음
+    }
+  }
+
+  // 마이크에서 나온 텍스트 → AI 해석 → 액션 실행 (파이프라인)
+  // ★ 조비서 orb 공용: 로컬 규칙으로 앱 명령을 즉시 실행 (Gemini 없이). 처리했으면 true 반환.
+  function runLocalVoiceCommand(text) {
+    const said = String(text || "").trim();
+    if (!said) return false;
+    // #4 후보 선택 대기 중이면, 이번 말을 '선택'으로 해석
+    if (nameChoiceRef.current) {
+      const idx = parseSelection(said, nameChoiceRef.current.candidates);
+      if (idx >= 0) { confirmNameChoice(nameChoiceRef.current.candidates[idx]); return true; }
+      fireToast('후보 중에서 "첫 번째" 또는 "강남구 홍길동"처럼 골라 주세요');
+      return true;
+    }
+    const cmd = localParseVoiceCommand(said, { products, customers, vendors });
+    if (cmd && cmd.action !== "UNKNOWN") { handleVoiceAction(cmd); return true; }
+    return false;
+  }
+
+  async function runVoiceCommand(text) {
+    const said = String(text || "").trim();
+    if (!said) return;
+    setVoiceText(said);
+    // #4 후보 선택 대기 중이면, 이번 말을 '선택'으로 해석 (AI 호출 없이 즉시)
+    if (nameChoiceRef.current) {
+      const idx = parseSelection(said, nameChoiceRef.current.candidates);
+      if (idx >= 0) { confirmNameChoice(nameChoiceRef.current.candidates[idx]); return; }
+      fireToast('후보 중에서 "첫 번째" 또는 "강남구 홍길동"처럼 골라 주세요');
+      return;
+    }
+    setIsListening(true);
+    let command = null;
+    // 1) Gemini 우선 (키 있을 때) — 발음 오인식까지 보정
+    if (geminiKey) {
+      try {
+        command = await parseVoiceCommand(said, {
+          apiKey: geminiKey, currentTab: tab, products: products, customers: customers, vendors: vendors,
+        });
+      } catch (e) {
+        console.error("AI 해석 실패 → 로컬 규칙 분석으로 대체:", e);
+      }
+    }
+    // 2) AI 실패/UNKNOWN/키없음 → 로컬 규칙 분석 (인터넷·키 없어도 동작)
+    if (!command || command.action === "UNKNOWN") {
+      const local = localParseVoiceCommand(said, { products, customers, vendors });
+      if (local && local.action !== "UNKNOWN") command = local;
+    }
+    setIsListening(false);
+    // 3) 그래도 못 알아들으면 화면에 알려줌 (조용히 먹통되지 않게)
+    if (!command || command.action === "UNKNOWN") {
+      fireToast(`"${said}" — 무슨 동작인지 못 알아들었어요. 예: "주문목록 보여줘"`);
+      return;
+    }
+    // 4) 실제 앱 상태 변경 실행
+    handleVoiceAction(command);
+  }
   const [invoicePreview, setInvoicePreview] = useState(null);
   const [smsBatch, setSmsBatch] = useState(null); // { rows: [{name, phone, message, checked}] }
   const [bulkOrderModal, setBulkOrderModal] = useState(null); // { step: 'choose'|'preview', mode, rows }
@@ -1933,7 +3575,8 @@ function App() {
   }
 
   function deleteOrder(orderId) {
-    setOrders((prev) => prev.filter((o) => o.id !== orderId));
+    // 삭제 후 재묶음 정리 — 묶음에 1건만 남으면 자동 해제
+    setOrders((prev) => dissolveLoneBundles(prev.filter((o) => o.id !== orderId)));
     setCheckedIds((prev) => {
       const next = new Set(prev);
       next.delete(orderId);
@@ -2795,14 +4438,14 @@ function App() {
     const biz = vendors.some((v) =>
       (ph && (v.phone || "").replace(/-/g, "") === ph) || (nm && v.name === nm)
     );
-    return Object.entries(d.cart).reduce((sum, [productId, qty]) => {
+    return Object.entries(d.cart || {}).reduce((sum, [productId, qty]) => {
       const p = productMap[productId];
       const price = p ? (((biz || (p.channel === "business")) ? (p.wholesalePrice || p.price) : p.price)) : 0;
       return sum + price * qty;
     }, 0);
   }
 
-  const draftItems = draft.deliveries.flatMap((d) => Object.entries(d.cart).map(([productId, qty]) => ({ productId, qty })));
+  const draftItems = draft.deliveries.flatMap((d) => Object.entries(d.cart || {}).map(([productId, qty]) => ({ productId, qty })));
   const draftTotal = draft.deliveries.reduce((sum, d) => sum + deliveryTotal(d), 0);
 
   function applyParsedMessage(text) {
@@ -2823,7 +4466,7 @@ function App() {
           name: parsed.recipName,
           phone: parsed.recipPhone,
           address: parsed.address,
-          cart: Object.keys(cart).length ? cart : prev.deliveries[0].cart,
+          cart: Object.keys(cart || {}).length ? cart : ((prev.deliveries[0] && prev.deliveries[0].cart) || {}),
         },
         ...prev.deliveries.slice(1),
       ],
@@ -2836,12 +4479,24 @@ function App() {
   // 사진(명함/메모/문서)을 찍어서 글자를 인식하고 주문정보를 자동으로 채웁니다.
   function handlePhotoCapture(file) {
     if (!file) return;
+    // Gemini Vision 사용 가능하면 AI로 분석 (훨씬 정확)
+    if (geminiKey) {
+      setOcrLoading(true);
+      analyzePhotoWithGemini(file, products, geminiKey)
+        .then(result => {
+          setPhotoAiResult(result);
+          fireToast("📷 AI가 사진을 분석했습니다. 결과를 확인해주세요!");
+        })
+        .catch(e => fireToast("사진 AI 분석 오류: " + e.message))
+        .finally(() => setOcrLoading(false));
+      return;
+    }
+    // Gemini 키 없으면 기존 Tesseract OCR 사용
     if (typeof Tesseract === "undefined") {
       fireToast("이 기기에서는 사진 인식 기능을 불러오지 못했어요. 인터넷 연결을 확인해주세요");
       return;
     }
     setOcrLoading(true);
-    // 사진을 보정(확대·흑백·대비강화)한 뒤 인식 → 정확도 향상
     preprocessForOcr(file).then((dataUrl) => {
       const target = dataUrl || file;
       return Tesseract.recognize(target, "kor+eng");
@@ -2855,9 +4510,7 @@ function App() {
           fireToast("사진에서 글자를 인식해서 자동으로 채웠어요. 확인 후 등록해주세요");
         }
       })
-      .catch(() => {
-        fireToast("사진 인식 중 문제가 발생했어요. 다시 시도해주세요");
-      })
+      .catch(() => fireToast("사진 인식 중 문제가 발생했어요. 다시 시도해주세요"))
       .finally(() => setOcrLoading(false));
   }
 
@@ -2903,8 +4556,86 @@ function App() {
     fireToast(`과거 주문에서 ${parts.join(", ")}을 찾아서 반영했어요`);
   }
 
+  // ★ v14: 음성 주문 등록 — 조비서가 만든 주문서를 바로 주문으로 저장 (자동 Firestore 저장)
+  // ★ v24: 음성 주문 등록 — 묶음(박스) 계획이 있으면 박스별 주문으로 나눠 등록
+  //  반환: 생성된 주문 배열 (박스 1개면 길이 1). 같은 batchId로 묶여 목록에 한 카드로 표시됨.
+  function createVoiceOrder(vo) {
+    if (!vo || !vo.name || !vo.items || !vo.items.length) return null;
+    justSubmittedRef.current = true;
+    const baseItems = vo.items.map((it) => ({ productId: it.productId || null, name: it.name || "", qty: Number(it.qty) || 1 }));
+    const plan = vo.boxPlan || (vo.boxMode ? { mode: vo.boxMode } : null);
+    let boxList;
+    if (plan && plan.mode === 'auto') {
+      const b = splitIntoBoxes(baseItems, productMap);
+      boxList = b.length ? b : [{ items: baseItems }];
+    } else {
+      boxList = buildBoxItems(baseItems, plan);
+    }
+    if (!boxList.length) boxList = [{ items: baseItems }];
+    const recipient = { name: vo.name, phone: vo.phone || "", address: vo.address || "", postalCode: estimatePostalCode(vo.address || "") };
+    const sender = { name: vo.name, phone: vo.phone || "" };
+    const total = boxList.length;
+    const batchId = total > 1 ? uid("batch") : "";
+    const orders = boxList.map((box, i) => ({
+      id: uid("o"),
+      batchId,
+      customerId: vo.customerId || null,
+      sender,
+      recipient,
+      items: (box.items || []).map((it) => ({ productId: it.productId || null, name: it.name || "", qty: Number(it.qty) || 1 })),
+      status: "pending",
+      invoiceNo: "", courier: "",
+      createdAt: nowStamp(),
+      orderDate: todayStr(),
+      reserveDate: vo.reserveDate || "",
+      boxVolume: "", deliveryMessage: vo.deliveryMessage || "", memo: "",
+      boxInfo: total > 1 ? `${i + 1}/${total}박스` : "",
+      message: "",
+      isBusiness: !!vo.vendorId,
+      vendorId: vo.vendorId || "",
+    }));
+    // ★ #3 자동 묶음/병합: 같은 날 + 같은 고객/업체 + (있으면)같은 배송지의 미발송 기존 주문이 있으면
+    //  - 단일 주문(박스 1개)이면 그 주문에 '수량 합산·새 품목 추가'로 하나로 병합
+    //  - 여러 박스로 나뉜 주문이면 공통 bundleId로 묶음 처리
+    //  (깊은 복사로 불변성 유지 → 화면 실시간 반영)
+    setOrders((prev) => {
+      const nmNS = (recipient.name || "").replace(/\s/g, "");
+      const addrNS = (recipient.address || "").replace(/\s/g, "");
+      const today = todayStr();
+      const sameDay = prev.filter((o) => o && o.status !== "shipped"
+        && orderRecipientName(o).replace(/\s/g, "") === nmNS && nmNS
+        && (o.orderDate === today)
+        && (!addrNS || !(o.recipient && o.recipient.address) || String(o.recipient.address).replace(/\s/g, "") === addrNS));
+      if (sameDay.length && total === 1 && !plan) {
+        // 하나로 병합 (별개 주문으로 쪼개지 않음)
+        const targetId = sameDay[0].id;
+        return prev.map((o) => {
+          if (o.id !== targetId) return o;
+          const items = JSON.parse(JSON.stringify(o.items || []));   // 깊은 복사
+          for (const ni of baseItems) {
+            const key = ni.productId || ni.name;
+            const idx = items.findIndex((it) => (it.productId || it.name) === key);
+            if (idx >= 0) items[idx].qty = (Number(items[idx].qty) || 0) + ni.qty;   // 수량 합산
+            else items.push({ ...ni });                                             // 새 품목 병합
+          }
+          return { ...o, items };
+        });
+      }
+      if (sameDay.length) {
+        // 여러 박스 신규 → 공통 bundleId로 묶음
+        const bid = sameDay[0].bundleId || uid("bundle");
+        const idset = new Set(sameDay.map((o) => o.id));
+        const taggedNew = orders.map((o) => ({ ...o, isBundle: true, bundleId: bid }));
+        const taggedPrev = prev.map((o) => (idset.has(o.id) ? { ...o, isBundle: true, bundleId: bid } : o));
+        return [...taggedNew, ...taggedPrev];
+      }
+      return [...orders, ...prev];
+    });
+    return orders;
+  }
+
   function submitOrder(manualBoxesByIdx) {
-    const activeDeliveries = draft.deliveries.filter((d) => Object.keys(d.cart).length > 0);
+    const activeDeliveries = draft.deliveries.filter((d) => Object.keys(d.cart || {}).length > 0);
     if (activeDeliveries.length === 0) return;
     justSubmittedRef.current = true; // 내가 등록하는 주문은 알림에서 제외
     const c = draft.customerId ? customerMap[draft.customerId] : null;
@@ -2947,7 +4678,7 @@ function App() {
         : (c ? { name: c.name, phone: c.phone } : draft.sender);
 
       // 장바구니를 items로 변환(가격 포함)
-      const allItems = Object.entries(d.cart).map(([productId, qty]) => {
+      const allItems = Object.entries(d.cart || {}).map(([productId, qty]) => {
         const p = productMap[productId];
         const price = p ? (((biz || (p.channel === "business")) ? (p.wholesalePrice || p.price) : p.price)) : 0;
         return { productId, name: p ? p.name : "", qty, price };
@@ -3014,16 +4745,16 @@ function App() {
 
   // 주문 등록 시도: 단일 배송지에 낱개 2개 이상이면 묶음 선택 모달, 아니면 바로 자동 등록
   function handleSubmitOrder() {
-    const active = draft.deliveries.filter((d) => Object.keys(d.cart).length > 0);
+    const active = draft.deliveries.filter((d) => Object.keys(d.cart || {}).length > 0);
     if (active.length === 0) return;
     // 배송지가 1개이고, 담긴 낱개 합이 2개 이상이면 묶음 선택 제공
     if (active.length === 1) {
       const d = active[0];
-      const units = Object.entries(d.cart).reduce((s, [, qty]) => s + qty, 0);
+      const units = Object.entries(d.cart || {}).reduce((s, [, qty]) => s + qty, 0);
       if (units >= 2) {
         // 낱개 펼치기 (각 낱개를 개별 항목으로)
         const unitItems = [];
-        Object.entries(d.cart).forEach(([productId, qty]) => {
+        Object.entries(d.cart || {}).forEach(([productId, qty]) => {
           const p = productMap[productId];
           const price = p ? (p.channel === "business" ? (p.wholesalePrice || p.price) : p.price) : 0;
           for (let i = 0; i < qty; i++) unitItems.push({ productId, name: p ? p.name : "", price, unit: p ? (p.unit || "kg") : "kg" });
@@ -3058,8 +4789,13 @@ function App() {
 
   // 주문 하나를 박스 규칙으로 펼쳐 박스별 가상주문 배열로 반환 (발송/송장용)
   // 이미 분할된 주문(boxInfo 있음)이나 박스 1개면 그대로 1건 반환
+  // 주문의 박스 구성: 사용자가 수동으로 지정한 manualBoxes가 있으면 그것을, 없으면 자동 분할
+  function getOrderBoxes(o) {
+    if (o && Array.isArray(o.manualBoxes) && o.manualBoxes.length) return o.manualBoxes;
+    return splitIntoBoxes((o && o.items) || [], productMap);
+  }
   function expandOrderToBoxes(o) {
-    const boxes = splitIntoBoxes(o.items || [], productMap);
+    const boxes = getOrderBoxes(o);
     if (boxes.length <= 1) {
       // 단일 박스: 부피만 채워서 반환
       const vol = boxes[0] ? boxes[0].volume : o.boxVolume;
@@ -4070,6 +5806,9 @@ function App() {
               ocrLoading={ocrLoading}
               onBack={() => setTab("orders")}
               onGoProducts={() => setTab("products")}
+              geminiKey={geminiKey}
+              photoAiResult={photoAiResult}
+              clearPhotoAiResult={() => setPhotoAiResult(null)}
             />
           )}
 
@@ -4545,7 +6284,38 @@ function App() {
             askConfirm={askConfirm}
             handleLogout={handleLogout}
             fireToast={fireToast}
+            geminiKey={geminiKey}
+            setGeminiKey={setGeminiKey}
           />
+        )}
+
+
+        {/* #4 동명이인/유사업체 확인 오버레이 — 2곳 이상 매칭 시 등록 멈추고 사용자에게 선택 요청 */}
+        {nameChoice && (
+          <div onClick={() => setNameChoice(null)}
+            style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 4000, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 }}>
+            <div onClick={(e) => e.stopPropagation()}
+              style={{ background: "#fff", borderRadius: 16, padding: 18, width: "100%", maxWidth: 420, maxHeight: "80vh", overflowY: "auto", boxShadow: "0 10px 40px rgba(0,0,0,0.4)" }}>
+              <div style={{ fontSize: 16, fontWeight: 800, color: "#1B2430", marginBottom: 4 }}>⚠️ 어떤 분이 맞나요?</div>
+              <div style={{ fontSize: 12.5, color: "#6b7280", marginBottom: 14 }}>
+                이름이 같거나 비슷한 곳이 {nameChoice.candidates.length}곳 있어요. 잘못 등록되지 않게 직접 골라 주세요. (음성으로 "첫 번째", "강남구 홍길동"이라고 말해도 돼요)
+              </div>
+              {nameChoice.candidates.map((c, i) => (
+                <button key={c.id || i} onClick={() => confirmNameChoice(c)}
+                  style={{ display: "block", width: "100%", textAlign: "left", border: "1px solid #E2E4DD", background: "#F8FAF7", borderRadius: 10, padding: "11px 13px", marginBottom: 9, cursor: "pointer" }}>
+                  <div style={{ fontSize: 14.5, fontWeight: 700, color: "#1B2430" }}>
+                    <span style={{ fontSize: 11, color: "#185FA5", background: "#E6F1FB", borderRadius: 6, padding: "1px 6px", marginRight: 6 }}>{i + 1}번 · {c._kind || "고객"}</span>
+                    {c.name}
+                  </div>
+                  <div style={{ fontSize: 12, color: "#5F5E5A", marginTop: 3 }}>
+                    {c.phone ? `📞 ${c.phone}` : "전화번호 없음"}{c.address ? ` · 📍 ${c.address}` : ""}
+                  </div>
+                </button>
+              ))}
+              <button onClick={() => setNameChoice(null)}
+                style={{ width: "100%", border: "none", background: "#EEE", color: "#555", borderRadius: 10, padding: "10px 0", fontSize: 13, fontWeight: 700, cursor: "pointer", marginTop: 2 }}>취소</button>
+            </div>
+          </div>
         )}
 
         {bulkSmsOpen && (
@@ -5555,7 +7325,7 @@ function SubscriptionsTab({ subscriptions, customers, products, addSubscription,
   }
 
   function submit() {
-    const items = Object.entries(form.cart).map(([productId, qty]) => ({ productId, qty }));
+    const items = Object.entries(form.cart || {}).map(([productId, qty]) => ({ productId, qty }));
     if (items.length === 0) {
       fireToast("상품을 1개 이상 선택해주세요");
       return;
@@ -5697,7 +7467,7 @@ function SubscriptionsTab({ subscriptions, customers, products, addSubscription,
           <label style={{ fontSize: 12, color: "#5F5E5A" }}>상품 선택</label>
           <div style={{ display: "flex", flexDirection: "column", gap: 6, margin: "6px 0 10px" }}>
             {products.map((p) => {
-              const qty = form.cart[p.id] || 0;
+              const qty = (form.cart || {})[p.id] || 0;
               return (
                 <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", border: "1px solid #E2E4DD", borderRadius: 8, padding: "8px 10px" }}>
                   <div>
@@ -5788,7 +7558,7 @@ function SubscriptionRow({ subscription: s, customers, products, updateSubscript
   }
 
   function saveEdit() {
-    const items = Object.entries(form.cart).map(([productId, qty]) => ({ productId, qty }));
+    const items = Object.entries(form.cart || {}).map(([productId, qty]) => ({ productId, qty }));
     const cycleDays = Number(form.cycleDays);
     if (items.length === 0 || !cycleDays || cycleDays < 1 || !form.name.trim()) {
       fireToast("받는분 이름·상품·주기를 확인해주세요");
@@ -5835,7 +7605,7 @@ function SubscriptionRow({ subscription: s, customers, products, updateSubscript
         <div style={{ fontSize: 11.5, color: "#5F5E5A", marginBottom: 6 }}>상품</div>
         <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
           {products.map((p) => {
-            const qty = form.cart[p.id] || 0;
+            const qty = (form.cart || {})[p.id] || 0;
             return (
               <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", border: "1px solid #E2E4DD", borderRadius: 8, padding: "6px 10px" }}>
                 <span style={{ fontSize: 12 }}>{p.name}</span>
@@ -7755,10 +9525,12 @@ function sheetBtnStyle(bg, color) {
   };
 }
 
-function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onOpenBackupList, onCheckUpdate, checkingUpdate, isAdmin, onClose, onNavigate, askConfirm, handleLogout, fireToast }) {
+function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onOpenBackupList, onCheckUpdate, checkingUpdate, isAdmin, onClose, onNavigate, askConfirm, handleLogout, fireToast, geminiKey, setGeminiKey }) {
   const [editingName, setEditingName] = useState(false);
   const [draftName, setDraftName] = useState(appName);
   const [restoreDate, setRestoreDate] = useState(todayStr());
+  const [draftGeminiKey, setDraftGeminiKey] = React.useState(geminiKey || "");
+  const [geminiKeySaved, setGeminiKeySaved] = React.useState(false);
   const [restoreHour, setRestoreHour] = useState(String(new Date().getHours()).padStart(2, "0"));
 
   function saveName() {
@@ -7885,6 +9657,32 @@ function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, 
             <button key={m.label} onClick={m.onClick} style={sideMenuRowStyle}>{m.label}</button>
           ))}
           <div style={{ padding: "10px 20px", fontSize: 11, color: "#888780" }}>버전 1.0.0</div>
+        </div>
+
+        <div style={{ padding: "12px 20px", borderBottom: "1px solid #F1F2EC" }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#2F6F4E", marginBottom: 6 }}>🤖 Gemini AI API 키</div>
+          <div style={{ fontSize: 11, color: "#888780", marginBottom: 6 }}>
+            구글 Gemini AI 주문 분석 기능을 사용하려면 API 키를 입력하세요.<br/>
+            <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" style={{ color: "#2F6F4E" }}>aistudio.google.com</a>에서 무료로 발급받을 수 있습니다.
+          </div>
+          <input
+            type="password"
+            value={draftGeminiKey}
+            onChange={e => setDraftGeminiKey(e.target.value)}
+            placeholder="AIza..."
+            style={{ width: "100%", padding: "8px 10px", borderRadius: 7, border: "1px solid #D3D1C7", fontSize: 12, boxSizing: "border-box", marginBottom: 6, fontFamily: "monospace" }}
+          />
+          <button
+            onClick={() => {
+              saveGeminiKey(draftGeminiKey.trim());
+              setGeminiKey(draftGeminiKey.trim());
+              setGeminiKeySaved(true);
+              setTimeout(() => setGeminiKeySaved(false), 2000);
+            }}
+            style={{ width: "100%", padding: "8px 0", borderRadius: 7, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
+          >
+            {geminiKeySaved ? "✅ 저장됨!" : "저장"}
+          </button>
         </div>
 
         <div style={{ padding: "8px 0" }}>
@@ -8160,6 +9958,43 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
 
   const [editing, setEditing] = useState(false);
   const [editProdTab, setEditProdTab] = useState("all"); // 전체/공용/일반용/업체용
+  const [boxEdit, setBoxEdit] = useState(null); // 묶음 수정 모달용 낱개 배열(null이면 닫힘)
+
+  // 현재 주문의 박스 구성: 수동 지정(manualBoxes) 우선, 없으면 자동 분할
+  const orderBoxes = (order.manualBoxes && order.manualBoxes.length)
+    ? order.manualBoxes
+    : splitIntoBoxes(order.items || [], productMap);
+  const totalUnits = (order.items || []).reduce((s, it) => s + (Number(it.qty) || 0), 0);
+
+  // 묶음 수정 모달 열기 — 주문 품목을 낱개로 펼쳐 BoxPlanModal에 전달
+  function openBoxEdit() {
+    const unitItems = [];
+    (order.items || []).forEach((it) => {
+      const p = productMap[it.productId];
+      const name = p ? p.name : (it.name || "상품");
+      const price = it.price != null ? it.price : (p ? (p.wholesalePrice || p.price) : 0);
+      const unit = p ? (p.unit || "kg") : (it.unit || "kg");
+      const qty = Number(it.qty) || 0;
+      for (let i = 0; i < qty; i++) unitItems.push({ productId: it.productId, name, price, unit });
+    });
+    setBoxEdit(unitItems);
+  }
+
+  // 묶음선택 완료 → 수동 박스 구성 저장 (등록 때 applyBoxPlan과 동일 규칙)
+  function applyBoxEdit(boxesOfUnits) {
+    const boxes = boxesOfUnits.map((unitArr) => {
+      const map = {};
+      unitArr.forEach((u) => {
+        const key = u.productId || u.name;
+        if (!map[key]) map[key] = { productId: u.productId, name: u.name, qty: 0, price: u.price, unit: u.unit };
+        map[key].qty += 1;
+      });
+      const items = Object.values(map);
+      return { items, volume: volumeForBoxItems(items, productMap) };
+    });
+    updateOrder(order.id, { manualBoxes: boxes });
+    setBoxEdit(null);
+  }
   const [form, setForm] = useState(() => ({
     sender: { ...order.sender },
     recipient: { ...order.recipient },
@@ -8167,7 +10002,7 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
     deliveryMessage: order.deliveryMessage || "",
     memo: order.memo || "",
     reserveDate: order.reserveDate || "",
-    cart: Object.fromEntries((order.items || []).map((it) => [it.productId, it.qty])),
+    items: JSON.parse(JSON.stringify(order.items || [])),   // ★ 커스텀 상품(productId 없음)도 보존
   }));
 
   function startEdit() {
@@ -8178,29 +10013,36 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
       deliveryMessage: order.deliveryMessage || "",
       memo: order.memo || "",
       reserveDate: order.reserveDate || "",
-      cart: Object.fromEntries((order.items || []).map((it) => [it.productId, it.qty])),
+      items: JSON.parse(JSON.stringify(order.items || [])),   // ★ 커스텀 상품(productId 없음)도 보존
     });
     setEditing(true);
   }
 
-  function changeFormQty(productId, delta) {
+  // key = productId(등록상품) 또는 name(커스텀상품). meta는 없던 항목을 새로 추가할 때 사용.
+  function changeFormQty(key, delta, meta) {
     setForm((prev) => {
-      const cart = { ...prev.cart };
-      const next = (cart[productId] || 0) + delta;
-      if (next <= 0) delete cart[productId];
-      else cart[productId] = next;
-      return { ...prev, cart };
+      const items = JSON.parse(JSON.stringify(prev.items || []));   // 깊은 복사(불변성)
+      const idx = items.findIndex((it) => (it.productId || it.name) === key);
+      if (idx === -1) {
+        if (delta > 0 && meta) items.push({ ...meta, qty: 1 });
+      } else {
+        items[idx].qty = (Number(items[idx].qty) || 0) + delta;
+        if (items[idx].qty <= 0) items.splice(idx, 1);
+      }
+      return { ...prev, items };
     });
   }
 
   function saveEdit() {
-    const items = Object.entries(form.cart).map(([productId, qty]) => {
-      const p = productMap[productId];
-      // 업체 주문이거나 업체용 상품이면 업체가 적용
-      const isBiz = order.isBusiness || (p && p.channel === "business");
-      const price = p ? (isBiz ? (p.wholesalePrice || p.price) : p.price) : 0;
-      return { productId, qty, name: p ? p.name : "상품", price };
-    });
+    const items = (form.items || []).map((it) => {
+      if (it.productId) {
+        const p = productMap[it.productId];
+        const isBiz = order.isBusiness || (p && p.channel === "business");
+        const price = p ? (isBiz ? (p.wholesalePrice || p.price) : p.price) : (it.price || 0);
+        return { productId: it.productId, name: p ? p.name : (it.name || "상품"), qty: it.qty, price };
+      }
+      return { productId: null, name: it.name || "상품", qty: it.qty, price: it.price || 0 };   // 커스텀 상품 그대로 보존
+    }).filter((it) => (Number(it.qty) || 0) > 0);
     if (items.length === 0) return;
     updateOrder(order.id, {
       sender: form.sender,
@@ -8210,6 +10052,7 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
       memo: form.memo,
       reserveDate: form.reserveDate,
       items,
+      manualBoxes: null,   // 품목을 바꾸면 수동 묶음 해제 → 자동 분할로 복귀
     });
     setEditing(false);
   }
@@ -8221,7 +10064,22 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
     });
   }
 
-  const formItems = Object.entries(form.cart).map(([productId, qty]) => ({ productId, qty }));
+  // ★ 상세 화면에서 품목 수량을 즉석 +/- (묶음/커스텀 상품 포함). 깊은 복사로 불변성 유지, bundleId는 updateOrder가 보존.
+  function quickAdjustQty(key, delta) {
+    const items = JSON.parse(JSON.stringify(order.items || []));   // 깊은 복사
+    const idx = items.findIndex((it) => (it.productId || it.name) === key);
+    if (idx === -1) return;
+    items[idx].qty = Math.max(0, (Number(items[idx].qty) || 0) + delta);
+    const kept = items.filter((it) => (Number(it.qty) || 0) > 0);
+    if (kept.length === 0) {
+      askConfirm("상품이 모두 0이 됩니다. 이 주문을 삭제할까요?", () => { deleteOrder(order.id); onBack(); });
+      return;
+    }
+    // 수량이 바뀌면 낱개 구성이 달라지므로 수동 묶음은 해제하고 자동 분할로 되돌린다.
+    updateOrder(order.id, { items: kept, manualBoxes: null });
+  }
+
+  const formItems = (form.items || []).map((it) => ({ productId: it.productId, name: it.name, qty: it.qty, price: it.price }));
 
   return (
     <div>
@@ -8261,11 +10119,19 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
             <FieldRow label="박스부피" value={order.boxVolume || "-"} />
             {order.boxInfo && <FieldRow label="박스" value={order.boxInfo} />}
             {(() => {
-              const boxes = splitIntoBoxes(order.items || [], productMap);
-              if (boxes.length <= 1) return null;
+              // 낱개가 2개 이상이면 묶음 구성/수정 UI를 노출 (수동 묶음이 있으면 1박스여도 노출)
+              const boxes = orderBoxes;
+              const isManual = !!(order.manualBoxes && order.manualBoxes.length);
+              if (totalUnits < 2 && !isManual) return null;
               return (
                 <div style={{ background: "#F4F8F5", border: "1px solid #D7E6DC", borderRadius: 10, padding: "10px 12px", margin: "8px 0" }}>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: "#2F6F4E", marginBottom: 8 }}>📦 발송 박스 {boxes.length}개 · 송장 {boxes.length}개</div>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: "#2F6F4E" }}>
+                      📦 발송 박스 {boxes.length}개 · 송장 {boxes.length}개
+                      {isManual ? <span style={{ fontSize: 10, fontWeight: 700, color: "#185FA5", background: "#E6F1FB", padding: "1px 6px", borderRadius: 6, marginLeft: 6 }}>수동</span> : null}
+                    </div>
+                    <button onClick={openBoxEdit} style={{ border: "1px solid #2F6F4E", background: "#fff", color: "#2F6F4E", fontSize: 11.5, fontWeight: 700, borderRadius: 7, padding: "4px 10px", cursor: "pointer" }}>묶음 수정</button>
+                  </div>
                   {boxes.map((b, i) => (
                     <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "7px 0", borderTop: i > 0 ? "1px solid #E6EFE9" : "none" }}>
                       <span style={{ fontSize: 13, color: "#1B2430" }}>
@@ -8277,6 +10143,9 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
                       </span>
                     </div>
                   ))}
+                  {isManual && (
+                    <button onClick={() => { updateOrder(order.id, { manualBoxes: null }); }} style={{ marginTop: 8, border: "none", background: "none", color: "#888780", fontSize: 11, fontWeight: 700, cursor: "pointer", padding: 0, textDecoration: "underline" }}>자동 묶음으로 되돌리기</button>
+                  )}
                 </div>
               );
             })()}
@@ -8291,14 +10160,21 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
           </div>
 
           <div style={{ borderTop: "1px dashed #D3D1C7", borderBottom: "1px dashed #D3D1C7", padding: "10px 0", margin: "0 0 14px" }}>
+            {order.isBundle ? <div style={{ fontSize: 11, fontWeight: 700, color: "#185FA5", background: "#E6F1FB", display: "inline-block", padding: "2px 8px", borderRadius: 8, marginBottom: 8 }}>📦 묶음배송</div> : null}
             {(order.items || []).map((it, idx) => {
               const p = productMap[it.productId];
               const dispName = p ? p.name : (it.name || "상품");
               const dispPrice = p ? p.price : (it.price || 0);
+              const key = it.productId || it.name;
               return (
-                <div key={idx} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 6 }}>
-                  <span>{dispName} × {it.qty}</span>
-                  <span>{dispPrice ? won(dispPrice * it.qty) : "-"}</span>
+                <div key={idx} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, marginBottom: 8, gap: 8 }}>
+                  <span style={{ flex: 1 }}>{dispName}</span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <button onClick={() => quickAdjustQty(key, -1)} style={qtyBtnStyle} title="수량 감소">−</button>
+                    <span style={{ minWidth: 18, textAlign: "center", fontWeight: 700 }}>{it.qty}</span>
+                    <button onClick={() => quickAdjustQty(key, +1)} style={qtyBtnStyle} title="수량 증가">＋</button>
+                    <span style={{ minWidth: 62, textAlign: "right", color: "#5F5E5A" }}>{dispPrice ? won(dispPrice * it.qty) : "-"}</span>
+                  </div>
                 </div>
               );
             })}
@@ -8366,9 +10242,25 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
               </button>
             ))}
           </div>
+          {/* ★ 커스텀(음성/무게) 상품 — 등록상품 목록엔 없으므로 따로 수량 편집. 커스텀 상품이 사라지던 버그 해결 */}
+          {(form.items || []).filter((it) => !it.productId).length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
+              {(form.items || []).filter((it) => !it.productId).map((it, i) => (
+                <div key={"c" + i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", border: "1px solid #D9C7A6", background: "#FBF7EE", borderRadius: 10, padding: "10px 12px" }}>
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>{it.name} <span style={{ fontSize: 9.5, fontWeight: 700, color: "#854F0B", background: "#F3E6CE", padding: "1px 5px", borderRadius: 6 }}>직접입력</span></div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <button onClick={() => changeFormQty(it.name, -1)} style={qtyBtnStyle}>−</button>
+                    <span style={{ fontSize: 13, fontWeight: 700, minWidth: 16, textAlign: "center" }}>{it.qty}</span>
+                    <button onClick={() => changeFormQty(it.name, 1)} style={qtyBtnStyle}>+</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 14 }}>
             {products.filter((p) => editProdTab === "all" || (p.channel || "both") === editProdTab).map((p) => {
-              const qty = form.cart[p.id] || 0;
+              const found = (form.items || []).find((it) => it.productId === p.id);
+              const qty = found ? found.qty : 0;
               const isBizProduct = (p.channel || "both") === "business";
               const showPrice = isBizProduct ? (p.wholesalePrice || p.price) : p.price;
               const CH = { both: "공용", retail: "일반용", business: "업체용" };
@@ -8381,7 +10273,7 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
                   <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                     <button onClick={() => changeFormQty(p.id, -1)} style={qtyBtnStyle}>−</button>
                     <span style={{ fontSize: 13, fontWeight: 700, minWidth: 16, textAlign: "center" }}>{qty}</span>
-                    <button onClick={() => changeFormQty(p.id, 1)} style={qtyBtnStyle}>+</button>
+                    <button onClick={() => changeFormQty(p.id, 1, { productId: p.id, name: p.name, price: showPrice })} style={qtyBtnStyle}>+</button>
                   </div>
                 </div>
               );
@@ -8391,7 +10283,7 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
             <span style={{ fontSize: 13, color: "#5F5E5A" }}>합계</span>
             <span style={{ fontSize: 16, fontWeight: 700 }}>
-              {won(formItems.reduce((s, it) => { const p = productMap[it.productId]; if (!p) return s; const isBiz = order.isBusiness || p.channel === "business"; const pr = isBiz ? (p.wholesalePrice || p.price) : p.price; return s + pr * it.qty; }, 0))}
+              {won(formItems.reduce((s, it) => { const p = productMap[it.productId]; if (p) { const isBiz = order.isBusiness || p.channel === "business"; const pr = isBiz ? (p.wholesalePrice || p.price) : p.price; return s + pr * it.qty; } return s + (Number(it.price) || 0) * it.qty; }, 0))}
             </span>
           </div>
 
@@ -8408,6 +10300,16 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
             </button>
           </div>
         </div>
+      )}
+
+      {boxEdit && (
+        <BoxPlanModal
+          unitItems={boxEdit}
+          productMap={productMap}
+          onCancel={() => setBoxEdit(null)}
+          onAutoSplit={() => { updateOrder(order.id, { manualBoxes: null }); setBoxEdit(null); }}
+          onApply={applyBoxEdit}
+        />
       )}
     </div>
   );
@@ -8553,9 +10455,71 @@ function CustomerSearchPicker({ customers, orders, value, onChange, onPickRaw })
   );
 }
 
-function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, changeCartQty, addDeliveryRow, removeDeliveryRow, updateDeliveryField, deliveryTotal, draftItems, draftTotal, submitOrder, analyzeMessage, handlePhotoCapture, ocrLoading, onBack, onGoProducts }) {
+function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, changeCartQty, addDeliveryRow, removeDeliveryRow, updateDeliveryField, deliveryTotal, draftItems, draftTotal, submitOrder, analyzeMessage, handlePhotoCapture, ocrLoading, onBack, onGoProducts, geminiKey, photoAiResult, clearPhotoAiResult }) {
   const isGuest = !draft.customerId;
   const [prodTab, setProdTab] = useState("all");
+  const [aiModalOpen, setAiModalOpen] = React.useState(false);
+  const [aiResult, setAiResult] = React.useState(null);
+  const [aiLoading, setAiLoading] = React.useState(false);
+
+  // 사진 AI 분석 결과가 오면 모달 표시
+  React.useEffect(() => {
+    if (photoAiResult) {
+      setAiResult(photoAiResult);
+      setAiModalOpen(true);
+      clearPhotoAiResult && clearPhotoAiResult();
+    }
+  }, [photoAiResult]);
+
+  async function handleAiAnalyze() {
+    const text = draft.message || "";
+    if (!text.trim()) { alert("먼저 주문 문자를 붙여넣어 주세요."); return; }
+    if (!geminiKey) { alert("설정에서 Gemini API 키를 먼저 입력해 주세요."); return; }
+    setAiLoading(true);
+    try {
+      const result = await callGeminiOrder(text, products, geminiKey);
+      setAiResult(result);
+      setAiModalOpen(true);
+    } catch(e) {
+      alert("AI 분석 오류: " + e.message);
+    } finally {
+      setAiLoading(false);
+    }
+  }
+
+  function handleAiApply(parsed) {
+    // AI 상품명 → productId 매칭
+    const cart = {};
+    (parsed.items || []).forEach(it => {
+      const name = (it.name || "").trim();
+      // 상품 목록에서 이름 유사 매칭
+      const matched = products.find(p =>
+        p.name === name ||
+        name.includes(p.name) ||
+        p.name.includes(name)
+      );
+      const pid = matched ? matched.id : ("__ai__" + name);
+      cart[pid] = (cart[pid] || 0) + (it.qty || 1);
+    });
+
+    setDraft(d => ({
+      ...d,
+      sender: {
+        name: parsed.senderName || d.sender?.name || "",
+        phone: parsed.senderPhone || d.sender?.phone || "",
+      },
+      deliveries: d.deliveries.map((del, idx) => idx === 0 ? {
+        ...del,
+        name: parsed.recipName || del.name || "",
+        phone: parsed.recipPhone || del.phone || "",
+        address: parsed.address || del.address || "",
+        cart: Object.keys(cart).length > 0 ? cart : del.cart,
+      } : del),
+      reserveDate: parsed.reserveDate || d.reserveDate || "",
+      deliveryMessage: parsed.deliveryMessage || d.deliveryMessage || "",
+    }));
+    setAiModalOpen(false);
+  }
 
   // 받는분/연락처가 등록된 업체와 일치하는지 자동 판별
   const matchedVendor = (() => {
@@ -8658,6 +10622,28 @@ function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, ch
         >
           보내는분·받는분·주소·상품 자동 분석 (첫 배송지에 채워집니다)
         </button>
+
+        <button
+          onClick={handleAiAnalyze}
+          disabled={!draft.message.trim() || aiLoading}
+          style={{
+            marginTop: 6, width: "100%", padding: "9px 0", borderRadius: 8, border: "none",
+            background: draft.message.trim() && !aiLoading ? "#2F6F4E" : "#D3D1C7",
+            color: "#fff", fontWeight: 700, fontSize: 13,
+            cursor: draft.message.trim() && !aiLoading ? "pointer" : "not-allowed",
+          }}
+        >
+          {aiLoading ? "🤖 AI 분석 중…" : "🤖 AI로 분석 (Gemini)"}
+        </button>
+
+        {aiModalOpen && aiResult && (
+          React.createElement(AiConfirmModal, {
+            result: aiResult,
+            products: products,
+            onApply: handleAiApply,
+            onClose: () => setAiModalOpen(false),
+          })
+        )}
 
         <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "10px 0" }}>
           <div style={{ flex: 1, height: 1, background: "#E2E4DD" }} />
@@ -8777,7 +10763,7 @@ function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, ch
                   );
                 }
                 return list.map((p) => {
-                  const qty = d.cart[p.id] || 0;
+                  const qty = (d.cart || {})[p.id] || 0;
                   // 업체용 상품은 업체가, 그 외는 일반가로 표시
                   const isBizProduct = (p.channel || "both") === "business";
                   const showPrice = isBizProduct ? (p.wholesalePrice || p.price) : p.price;
@@ -8799,7 +10785,7 @@ function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, ch
               })()}
             </div>
 
-            {Object.keys(d.cart).length > 0 && (
+            {Object.keys(d.cart || {}).length > 0 && (
               <div style={{ display: "flex", justifyContent: "flex-end", fontSize: 12, fontWeight: 700, color: "#27500A", marginTop: 8 }}>
                 배송지 합계 {won(deliveryTotal(d))}
               </div>
@@ -8940,14 +10926,23 @@ function VoiceInputButton({ onResult }) {
     }
     const rec = new SpeechRecognition();
     rec.lang = "ko-KR";
-    rec.interimResults = false;
+    rec.continuous = true;        // ★ 말이 길어져도 중간에 마이크가 끊기지 않게
+    rec.interimResults = false;   // ★ 최종 결과만 사용
     rec.maxAlternatives = 1;
+    // 여러 조각으로 나뉜 최종 결과를 모아뒀다가, 말이 끝나면(정지/침묵) 한 번에 전달
+    let acc = "";
     rec.onresult = (e) => {
-      const text = e.results[0][0].transcript;
-      onResult(text);
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) acc += e.results[i][0].transcript + " ";
+      }
     };
-    rec.onerror = () => setListening(false);
-    rec.onend = () => setListening(false);
+    rec.onerror = () => { setListening(false); };
+    rec.onend = () => {
+      setListening(false);
+      const finalText = acc.trim();
+      acc = "";
+      if (finalText) onResult(finalText);   // 누적된 전체 문장을 명령 처리로 전달
+    };
     recognitionRef.current = rec;
     rec.start();
     setListening(true);
