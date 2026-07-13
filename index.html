@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 73;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
+const APP_VERSION = 74;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -1037,6 +1037,17 @@ function needsBundleChoice(items, productMap) {
   return totalParcels >= 2 || hasChoice;
 }
 
+// ★ v74: 거래명세서/정산서 매칭 헬퍼 (검색·정산 버그 수정)
+function invNormNS(s) { return String(s || "").replace(/\s/g, "").toLowerCase(); }
+// 거래명세서 검색: 업체명 공백·대소문자 무시 (예: "대솔수곡점"으로 "대솔 수곡점" 찾기)
+function invoiceNameHit(inv, q) { const s = invNormNS(q); return !s || invNormNS(inv && inv.vendorName).includes(s); }
+// 정산서: 업체 매칭 — vendorId 있으면 id로, 없으면(직접입력·업로드) 업체명(공백무시)으로도 매칭
+function invoiceVendorMatch(inv, vendor) {
+  if (!inv || !vendor) return false;
+  if (inv.vendorId) return inv.vendorId === vendor.id;
+  return !!inv.vendorName && invNormNS(inv.vendorName) === invNormNS(vendor.name);
+}
+
 function orderGroupLabel(order) {
   const d = new Date(order.orderDate);
   if (isNaN(d.getTime())) return order.orderDate;
@@ -1596,7 +1607,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // ===== JARVIS AI ASSISTANT =====
-const APP_BUILD = "v73 (07-13 자주나온말학습)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const APP_BUILD = "v74 (07-13 명세서검색정산수정)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
 const JARVIS_TAB_MAP = {
   goHome:'home', goOrders:'orders', goNew:'new',
   goCustomers:'customers', goProducts:'products',
@@ -2043,6 +2054,13 @@ function runSelfTests() {
   T("묶음 박스변환 qty합산", () => { const c = planBundleClasses([{ name: "샐러드 2kg", qty: 2 }], {}); const b = parcelsToBoxes(c[0].options[0].parcels); return b.length === 1 && b[0].items[0].qty === 2; }, (g) => g === true);
   T("묶음 단일 1박스는 확인불필요", () => needsBundleChoice([{ name: "샐러드 2kg", qty: 1 }], {}), false);
   T("묶음 2박스는 확인필요", () => needsBundleChoice([{ name: "샐러드 2kg", qty: 2 }], {}), true);
+  // ★ v74: 거래명세서 검색·정산 매칭
+  T("명세서검색 공백무시(대솔수곡점→대솔 수곡점)", () => invoiceNameHit({ vendorName: "대솔 수곡점" }, "대솔수곡점"), true);
+  T("명세서검색 빈검색은 전부통과", () => invoiceNameHit({ vendorName: "쌈채우리" }, ""), true);
+  T("명세서검색 불일치", () => invoiceNameHit({ vendorName: "쌈채우리" }, "대솔"), false);
+  T("정산 매칭 id우선", () => invoiceVendorMatch({ vendorId: "v1", vendorName: "X" }, { id: "v1", name: "쌈채우리" }), true);
+  T("정산 매칭 다른id 제외", () => invoiceVendorMatch({ vendorId: "v2", vendorName: "쌈채우리" }, { id: "v1", name: "쌈채우리" }), false);
+  T("정산 매칭 id없으면 이름(공백무시)", () => invoiceVendorMatch({ vendorId: "", vendorName: "대솔 수곡점" }, { id: "v9", name: "대솔수곡점" }), true);
   T("학습명령 파싱", () => { const r = parseTeachAlias("'청겨'를 '청겨자'로 기억해"); return r && (r.from + ">" + r.to); }, "청겨>청겨자");
   T("학습 오탐방지(일반주문)", () => parseTeachAlias("채소 2개 주문해줘"), (g) => g === null);
   T("지난주문 찾기", () => lastOrderForName("대솔수곡점", [{ customerId: "c1", recipient: { name: "대솔수곡점" }, items: [{ name: "채소2kg", qty: 1 }], createdAt: "2026-07-05" }], C).items.length, 1);
@@ -6506,7 +6524,7 @@ function App() {
     const vendor = vendors.find((v) => v.id === vendorId);
     const vName = vendor ? vendor.name : "거래처";
     const list = invoices
-      .filter((inv) => inv.vendorId === vendorId && inv.date && inv.date >= startDate && inv.date <= endDate)
+      .filter((inv) => invoiceVendorMatch(inv, vendor) && inv.date && inv.date >= startDate && inv.date <= endDate)
       .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
     if (list.length === 0) {
       fireToast(`${startDate} ~ ${endDate} 기간에 ${vName}의 거래명세서가 없어요`);
@@ -6770,7 +6788,7 @@ function App() {
       if (it) {
         const p = productMap[it.productId];
         const nm = p ? p.name : (it.name || "상품");
-        const unit = p ? (p.unit || "kg") : "kg";
+        const unit = p ? (p.unit || "kg") : (it.unit || "kg");   // ★ v74: 저장된 규격 반영(개·박스 등)
         const price = p ? (p.wholesalePrice || p.price) : (it.price || 0);
         const amount = price * it.qty;
         total += amount;
@@ -10758,8 +10776,7 @@ function VendorHubTab({ vendors, invoices, products, onManageVendors, onEditSupp
   const twoDaysAgoStr = `${twoDaysAgo.getFullYear()}-${String(twoDaysAgo.getMonth() + 1).padStart(2, "0")}-${String(twoDaysAgo.getDate()).padStart(2, "0")}`;
   const hiddenOldCount = isInvoiceSearching ? 0 : invSorted.filter((inv) => (inv.date || "") < twoDaysAgoStr).length;
   const filtered = invSorted.filter((inv) => {
-    const s = q.trim().toLowerCase();
-    const nameOk = !s || (inv.vendorName || "").toLowerCase().includes(s);
+    const nameOk = invoiceNameHit(inv, q);   // ★ v74: 공백·대소문자 무시 검색
     const dateOk = !dateQ || (inv.date || "").includes(dateQ);
     if (!isInvoiceSearching && (inv.date || "") < twoDaysAgoStr) return false; // 검색 중이 아니면 오래된 건 숨김
     return nameOk && dateOk;
