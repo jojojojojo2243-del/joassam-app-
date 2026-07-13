@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 74;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
+const APP_VERSION = 75;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -1607,7 +1607,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // ===== JARVIS AI ASSISTANT =====
-const APP_BUILD = "v74 (07-13 명세서검색정산수정)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const APP_BUILD = "v75 (07-13 음성주문명세서자동생성)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
 const JARVIS_TAB_MAP = {
   goHome:'home', goOrders:'orders', goNew:'new',
   goCustomers:'customers', goProducts:'products',
@@ -6516,6 +6516,14 @@ function App() {
     return merged;
   }
 
+  // ★ v75: 기존 업체(거래처) 주문 중 거래명세서가 없는 것을 한 번에 만들어줌 (예전 음성 주문 소급 생성)
+  function backfillVendorInvoices() {
+    const biz = (orders || []).filter((o) => o && o.vendorId);
+    if (!biz.length) { fireToast("업체(거래처) 주문이 없어요"); return; }
+    saveInvoicesGrouped(biz);   // 같은 그룹키는 교체되므로 여러 번 눌러도 중복 안 생김
+    fireToast(`업체 주문 ${biz.length}건의 거래명세서를 정리했어요`);
+  }
+
   // 업체 하나를 골라 기간(예: 6월 1일~6월 30일)을 정하면, 그 기간 동안의 거래명세서를
   // 전부 모아 합친 "정산서"를 엑셀로 만들어줌. 정산할 때 한 장으로 몰아서 확인하기 위한 기능.
   function generatePeriodInvoiceSheet(vendorId, startDate, endDate) {
@@ -7074,7 +7082,7 @@ function App() {
     const sender = { name: vo.name, phone: vo.phone || "" };
     const total = boxList.length;
     const batchId = total > 1 ? uid("batch") : "";
-    const orders = boxList.map((box, i) => ({
+    const newOrders = boxList.map((box, i) => ({
       id: uid("o"),
       batchId,
       customerId: vo.customerId || null,
@@ -7124,15 +7132,27 @@ function App() {
         // 여러 박스 신규 → 공통 bundleId로 묶음
         const bid = sameDay[0].bundleId || uid("bundle");
         const idset = new Set(sameDay.map((o) => o.id));
-        const taggedNew = orders.map((o) => ({ ...o, isBundle: true, bundleId: bid }));
+        const taggedNew = newOrders.map((o) => ({ ...o, isBundle: true, bundleId: bid }));
         const taggedPrev = prev.map((o) => (idset.has(o.id) ? { ...o, isBundle: true, bundleId: bid } : o));
-        lastCreatedRef.current = { ids: orders.map((o) => o.id), name: recipient.name };   // ★ v72
+        lastCreatedRef.current = { ids: newOrders.map((o) => o.id), name: recipient.name };   // ★ v72
         return [...taggedNew, ...taggedPrev];
       }
-      lastCreatedRef.current = { ids: orders.map((o) => o.id), name: recipient.name };   // ★ v72
-      return [...orders, ...prev];
+      lastCreatedRef.current = { ids: newOrders.map((o) => o.id), name: recipient.name };   // ★ v72
+      return [...newOrders, ...prev];
     });
-    return orders;
+    // ★ v75: 업체(거래처) 주문이면 거래명세서 자동 저장 — 음성 주문도 수기 주문처럼 명세서가 생기게.
+    //  같은 (업체+받는분+날짜) 그룹의 기존 업체주문 + 새 주문을 합쳐 명세서 1장으로 갱신(누락·누적 정확).
+    try {
+      const bizNew = newOrders.filter((o) => o.vendorId);
+      if (bizNew.length) {
+        const today2 = todayStr();
+        const gkey = (o) => `${o.vendorId}|${(o.recipient && o.recipient.name) || ""}|${o.orderDate || today2}`;
+        const keys = new Set(bizNew.map(gkey));
+        const sameGroup = (orders || []).filter((o) => o && o.vendorId && keys.has(gkey(o)));
+        saveInvoicesGrouped([...sameGroup, ...bizNew]);
+      }
+    } catch (e) {}
+    return newOrders;
   }
   // ★ v72: 방금 등록한 주문에 주문자 메모 남기기 (조비서가 등록 후 물어보고 받은 내용)
   function setLastOrderMemo(memoText) {
@@ -8439,6 +8459,7 @@ function App() {
               onRemoveInvoice={removeInvoice}
               onDownloadInvoice={downloadInvoice}
               onGeneratePeriodSheet={generatePeriodInvoiceSheet}
+              onBackfillInvoices={backfillVendorInvoices}
               invoiceInputRef2={invoiceInputRef2}
               handleInvoiceFileUpload={handleInvoiceFileUpload}
               askConfirm={askConfirm}
@@ -10751,7 +10772,7 @@ function IntegrationCard({ marketplace, value, updateIntegration, fireToast, onD
   );
 }
 
-function VendorHubTab({ vendors, invoices, products, onManageVendors, onEditSupplier, onAddInvoice, onUpdateInvoice, onRemoveInvoice, onDownloadInvoice, onGeneratePeriodSheet, invoiceInputRef2, handleInvoiceFileUpload, askConfirm }) {
+function VendorHubTab({ vendors, invoices, products, onManageVendors, onEditSupplier, onAddInvoice, onUpdateInvoice, onRemoveInvoice, onDownloadInvoice, onGeneratePeriodSheet, onBackfillInvoices, invoiceInputRef2, handleInvoiceFileUpload, askConfirm }) {
   const [q, setQ] = useState("");
   const [dateQ, setDateQ] = useState("");
   const [editor, setEditor] = useState(null); // null | {mode:"new"|"edit", invoice}
@@ -10770,10 +10791,10 @@ function VendorHubTab({ vendors, invoices, products, onManageVendors, onEditSupp
 
   const invSorted = [...invoices].sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
   const isInvoiceSearching = q.trim() !== "" || dateQ.trim() !== "";
-  // 2일 지난 거래명세서는 화면에서만 안 보이게 함 (데이터는 그대로 있고, 검색하면 다시 나옴)
-  const twoDaysAgo = new Date();
-  twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
-  const twoDaysAgoStr = `${twoDaysAgo.getFullYear()}-${String(twoDaysAgo.getMonth() + 1).padStart(2, "0")}-${String(twoDaysAgo.getDate()).padStart(2, "0")}`;
+  // ★ v75: 기본 화면은 최근 한 달(약 31일) 거래명세서를 보여줌 (그 전 것은 숨김 — 데이터는 그대로, 검색하면 다시 나옴)
+  const hideBefore = new Date();
+  hideBefore.setDate(hideBefore.getDate() - 31);
+  const twoDaysAgoStr = `${hideBefore.getFullYear()}-${String(hideBefore.getMonth() + 1).padStart(2, "0")}-${String(hideBefore.getDate()).padStart(2, "0")}`;
   const hiddenOldCount = isInvoiceSearching ? 0 : invSorted.filter((inv) => (inv.date || "") < twoDaysAgoStr).length;
   const filtered = invSorted.filter((inv) => {
     const nameOk = invoiceNameHit(inv, q);   // ★ v74: 공백·대소문자 무시 검색
@@ -10805,9 +10826,18 @@ function VendorHubTab({ vendors, invoices, products, onManageVendors, onEditSupp
         <input ref={invoiceInputRef2} type="file" accept=".xlsx,.xls,.csv" onChange={handleInvoiceFileUpload} style={{ display: "none" }} />
       </div>
 
-      <div style={{ fontSize: 10.5, color: "#888780", marginBottom: 14, lineHeight: 1.6, background: "#F7F8F4", borderRadius: 8, padding: "8px 10px" }}>
+      <div style={{ fontSize: 10.5, color: "#888780", marginBottom: 10, lineHeight: 1.6, background: "#F7F8F4", borderRadius: 8, padding: "8px 10px" }}>
         업체 주문을 등록하면 거래명세서가 자동으로 여기 저장돼요. 직접 작성·수정·삭제도 가능하고, 업체명·날짜로 검색해 다운로드/업로드할 수 있어요. (주문서 작성은 하단 "+" 또는 주문 탭에서 통합으로 합니다.)
       </div>
+
+      {onBackfillInvoices && (
+        <button
+          onClick={() => askConfirm("지금까지 등록된 업체(거래처) 주문의 거래명세서를 한 번에 정리·생성할까요?\n(이미 있는 건 그대로 두고 빠진 것만 채워요)", onBackfillInvoices, "정리")}
+          style={{ width: "100%", padding: "10px 0", borderRadius: 9, border: "1px dashed #854F0B", background: "#FCF6EC", color: "#854F0B", fontWeight: 700, fontSize: 12, cursor: "pointer", marginBottom: 14 }}
+        >
+          🧾 기존 업체주문 거래명세서 한 번에 정리 (안 보이면 눌러보세요)
+        </button>
+      )}
 
       <div style={{ border: "1px solid #E2E4DD", borderRadius: 10, padding: "12px 14px", marginBottom: 16, background: "#FAFAF7" }}>
         <div style={{ fontSize: 13, fontWeight: 700, color: "#1B2430", marginBottom: 4 }}>📅 업체별 기간 정산서 만들기</div>
@@ -10863,7 +10893,7 @@ function VendorHubTab({ vendors, invoices, products, onManageVendors, onEditSupp
       <div style={{ fontSize: 12, fontWeight: 700, color: "#854F0B", margin: "6px 0 8px" }}>거래명세서 {filtered.length}건</div>
       {hiddenOldCount > 0 && (
         <div style={{ fontSize: 10.5, color: "#888780", marginBottom: 8 }}>
-          (2일 지난 {hiddenOldCount}건은 화면에서 숨겨져 있어요. 업체명이나 날짜로 검색하면 찾을 수 있어요)
+          (한 달 지난 {hiddenOldCount}건은 화면에서 숨겨져 있어요. 업체명이나 날짜로 검색하면 찾을 수 있어요)
         </div>
       )}
 
@@ -11478,7 +11508,7 @@ function GuideTab({ onBack }) {
       items: [
         { h: "거래명세서 자동 저장", b: "업체 주문을 등록하면 거래명세서가 자동으로 저장돼요. 업체 탭에서 직접 작성·수정·삭제도 가능해요." },
         { h: "기간별 정산서", b: "업체 탭 → \"업체별 기간 정산서 만들기\"에서 업체와 기간(직접 선택 또는 최근 1개월/6개월/1년)을 고르면, 그 기간의 거래를 모두 합친 정식 거래명세서 엑셀을 받을 수 있어요." },
-        { h: "2일 후 자동 숨김", b: "만든 지 2일 지난 거래명세서는 목록을 깔끔하게 하려고 화면에서만 안 보여요. 업체명이나 날짜로 검색하면 다시 찾아서 다운로드·수정·삭제할 수 있어요." },
+        { h: "한 달 후 자동 숨김", b: "만든 지 한 달 지난 거래명세서는 목록을 깔끔하게 하려고 화면에서만 안 보여요. 업체명이나 날짜로 검색하면 다시 찾아서 다운로드·수정·삭제할 수 있어요." },
       ],
     },
     {
