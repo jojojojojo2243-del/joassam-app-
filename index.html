@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 70;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
+const APP_VERSION = 71;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -946,6 +946,97 @@ function splitIntoBoxes(items, productMap) {
 }
 
 
+// ═══ v71: 묶음(박스) 계획 규칙 엔진 — 한 묶음 최대 4kg ═══
+//  · 2kg 상품: 한 묶음 2박스(=4kg). 같은 상품끼리 먼저 묶고, 남는 낱개는 서로 합침.
+//  · 1kg 상품: 한 묶음 4박스(=4kg)까지.
+//  · 무게가 섞이면 무게별로 따로 묶음(우선순위 1: 무게별).
+//  · 여러 방법이 가능하면 옵션으로 만들어 화면에서 고르게 함.
+function itemWeightKg(name) {
+  const m = String(name || "").match(/(\d+(?:\.\d+)?)\s*(kg|킬로그램|킬로그람|킬로|키로그램|키로그람|키로|g|그램|그람)/i);
+  if (!m) return 1;
+  let v = parseFloat(m[1]);
+  if (/^(g|그램|그람)$/i.test(m[2])) v = v / 1000;
+  return v > 0 ? v : 1;
+}
+function bdBaseName(name) {
+  return String(name || "").replace(/(\d+(?:\.\d+)?)\s*(kg|킬로그램|킬로그람|킬로|키로그램|키로그람|키로|g|그램|그람)/ig, "").replace(/\s+/g, " ").trim() || String(name || "").trim();
+}
+function bdExpandUnits(products) { const u = []; (products || []).forEach((p) => { for (let i = 0; i < p.qty; i++) u.push({ key: p.key, label: p.label, productId: p.productId }); }); return u; }
+function bdChunk(arr, size) { const out = []; for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size)); return out; }
+function bdBalanced(units, cap) {
+  const n = units.length; const k = Math.max(1, Math.ceil(n / cap));
+  const parcels = Array.from({ length: k }, () => []);
+  units.forEach((u, i) => parcels[i % k].push(u));
+  return parcels.filter((p) => p.length);
+}
+function bdRecommended(products, cap) {
+  const full = [], leftovers = [];
+  (products || []).forEach((p) => {
+    let q = p.qty;
+    while (q >= cap) { full.push(Array.from({ length: cap }, () => ({ key: p.key, label: p.label, productId: p.productId }))); q -= cap; }
+    for (let i = 0; i < q; i++) leftovers.push({ key: p.key, label: p.label, productId: p.productId });
+  });
+  for (let i = 0; i < leftovers.length; i += cap) full.push(leftovers.slice(i, i + cap));
+  return full.length ? full : [bdExpandUnits(products)];
+}
+function bdSig(parcels) { return parcels.map((p) => p.map((u) => u.label).sort().join("|")).sort().join(" ;; "); }
+function bdLabelForParcels(parcels, multi) {
+  if (multi) {
+    return parcels.map((px) => { const by = {}; px.forEach((u) => { const b = bdBaseName(u.label); by[b] = (by[b] || 0) + 1; }); return Object.keys(by).map((b) => (by[b] > 1 ? `${b} ${by[b]}박스` : b)).join("+"); }).join(" · ");
+  }
+  return parcels.map((p) => `${p.length}박스`).join(" + ");
+}
+function buildClassOptions(products, cap, multi) {
+  const units = bdExpandUnits(products); const N = units.length;
+  if (N <= 1) return [{ label: "1박스", parcels: [units.slice()], recommended: true }];
+  const raw = [];
+  const add = (parcels) => { if (parcels && parcels.length) raw.push(parcels); };
+  add(bdRecommended(products, cap));               // 0 = 추천
+  if (multi) {
+    if (N <= cap) add([units.slice()]);            // 전부 한 박스(4kg 이내일 때만)
+    add(units.map((u) => [u]));                     // 따로따로
+  } else {
+    add(bdChunk(units, cap));                       // cap씩 채움
+    if (cap > 2) add(bdChunk(units, 2));            // 2박스씩
+    add(bdBalanced(units, cap));                    // 고르게
+    if (N <= cap) add([units.slice()]);            // 전부 한 박스
+    add(units.map((u) => [u]));                     // 따로따로
+  }
+  const seen = new Set(); const opts = [];
+  raw.forEach((parcels, idx) => {
+    const s = bdSig(parcels); if (seen.has(s)) return; seen.add(s);
+    let label = bdLabelForParcels(parcels, multi);
+    if (parcels.length === N) label = "따로따로 (1개씩)";
+    else if (parcels.length === 1 && !multi) label = `${N}박스 한 묶음`;
+    opts.push({ label, parcels, recommended: idx === 0 });
+  });
+  return opts;
+}
+function planBundleClasses(items, productMap) {
+  const pm = productMap || {}; const classes = {};
+  (items || []).forEach((it) => {
+    const p = pm[it.productId]; const nm = p ? p.name : (it.name || ""); const w = itemWeightKg(nm); const key = it.productId || nm;
+    const cls = classes[w] || (classes[w] = { weightKg: w, cap: Math.max(1, Math.floor(4 / w)), prods: {}, order: [] });
+    if (!cls.prods[key]) { cls.prods[key] = { key, label: nm, qty: 0, productId: it.productId || null }; cls.order.push(key); }
+    cls.prods[key].qty += Math.max(1, Number(it.qty) || 1);
+  });
+  return Object.values(classes).sort((a, b) => b.weightKg - a.weightKg).map((cls) => {
+    const products = cls.order.map((k) => cls.prods[k]); const totalUnits = products.reduce((s, p) => s + p.qty, 0); const multi = products.length > 1;
+    return { weightKg: cls.weightKg, cap: cls.cap, products, totalUnits, multi, options: buildClassOptions(products, cls.cap, multi) };
+  });
+}
+// 선택된 묶음(parcels 여러 개) → 박스 목록 [{items:[{productId,name,qty}]}]
+function parcelsToBoxes(parcels) {
+  return (parcels || []).map((px) => { const map = {}; px.forEach((u) => { const k = u.productId || u.label; if (!map[k]) map[k] = { productId: u.productId || null, name: u.label, qty: 0 }; map[k].qty++; }); return { items: Object.values(map) }; });
+}
+// 여러 묶음이 필요한 주문인지(=확인 모달을 띄울지) 판단
+function needsBundleChoice(items, productMap) {
+  const cls = planBundleClasses(items, productMap);
+  const totalParcels = cls.reduce((s, c) => s + ((c.options[0] && c.options[0].parcels.length) || 1), 0);
+  const hasChoice = cls.some((c) => c.options.length > 1);
+  return totalParcels >= 2 || hasChoice;
+}
+
 function orderGroupLabel(order) {
   const d = new Date(order.orderDate);
   if (isNaN(d.getTime())) return order.orderDate;
@@ -1505,7 +1596,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // ===== JARVIS AI ASSISTANT =====
-const APP_BUILD = "v70 (07-12 줄별직접수정)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const APP_BUILD = "v71 (07-13 묶음배송규칙)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
 const JARVIS_TAB_MAP = {
   goHome:'home', goOrders:'orders', goNew:'new',
   goCustomers:'customers', goProducts:'products',
@@ -1897,6 +1988,23 @@ function runSelfTests() {
   T("박스분할 채소2kg×4→2박스", () => splitIntoBoxes([{ productId: "p1", name: "채소2kg", qty: 4 }], {}).length, 2);
   T("따로따로 4낱개→4박스", () => buildBoxItems([{ name: "채소2kg", qty: 4 }], { mode: "each" }).length, 4);
   T("전부 한 박스→1박스", () => buildBoxItems([{ name: "채소2kg", qty: 4 }], { mode: "all" }).length, 1);
+  // ★ v71: 묶음 규칙 엔진
+  T("묶음 2kg 무게=2", () => itemWeightKg("샐러드 2kg"), 2);
+  T("묶음 1키로 무게=1", () => itemWeightKg("로메인 1키로"), 1);
+  T("묶음 500g 무게=0.5", () => itemWeightKg("소스 500g"), 0.5);
+  T("묶음 2kg×6→추천 2·2·2", () => { const c = planBundleClasses([{ name: "샐러드 2kg", qty: 6 }], {}); return c[0].options[0].parcels.map((p) => p.length).join(","); }, "2,2,2");
+  T("묶음 2kg 멀티 남는낱개 합침", () => {
+    const c = planBundleClasses([{ name: "샐러드 2kg", qty: 2 }, { name: "루꼴라 2kg", qty: 1 }, { name: "로메인 2kg", qty: 2 }, { name: "크리스탈벨 2kg", qty: 1 }], {});
+    const rec = c[0].options[0]; const last = rec.parcels[2].map((u) => bdBaseName(u.label)).sort().join("+");
+    return rec.parcels.length === 3 && last === "루꼴라+크리스탈벨";
+  }, (g) => g === true);
+  T("묶음 1kg cap=4", () => planBundleClasses([{ name: "샐러드 1kg", qty: 4 }], {})[0].cap, 4);
+  T("묶음 1kg×4 옵션 2+2와 4 포함", () => { const os = planBundleClasses([{ name: "샐러드 1kg", qty: 4 }], {})[0].options.map((o) => o.parcels.map((p) => p.length).join("+")); return os.includes("4") && os.includes("2+2"); }, (g) => g === true);
+  T("묶음 1kg×3 옵션 2+1과 3 포함", () => { const os = planBundleClasses([{ name: "샐러드 1kg", qty: 3 }], {})[0].options.map((o) => o.parcels.map((p) => p.length).join("+")); return os.includes("3") && os.includes("2+1"); }, (g) => g === true);
+  T("묶음 1kg+2kg 무게별 2클래스", () => { const c = planBundleClasses([{ name: "샐러드 1kg", qty: 2 }, { name: "로메인 2kg", qty: 2 }], {}); return c.length === 2 && c[0].weightKg === 2; }, (g) => g === true);
+  T("묶음 박스변환 qty합산", () => { const c = planBundleClasses([{ name: "샐러드 2kg", qty: 2 }], {}); const b = parcelsToBoxes(c[0].options[0].parcels); return b.length === 1 && b[0].items[0].qty === 2; }, (g) => g === true);
+  T("묶음 단일 1박스는 확인불필요", () => needsBundleChoice([{ name: "샐러드 2kg", qty: 1 }], {}), false);
+  T("묶음 2박스는 확인필요", () => needsBundleChoice([{ name: "샐러드 2kg", qty: 2 }], {}), true);
   T("학습명령 파싱", () => { const r = parseTeachAlias("'청겨'를 '청겨자'로 기억해"); return r && (r.from + ">" + r.to); }, "청겨>청겨자");
   T("학습 오탐방지(일반주문)", () => parseTeachAlias("채소 2개 주문해줘"), (g) => g === null);
   T("지난주문 찾기", () => lastOrderForName("대솔수곡점", [{ customerId: "c1", recipient: { name: "대솔수곡점" }, items: [{ name: "채소2kg", qty: 1 }], createdAt: "2026-07-05" }], C).items.length, 1);
@@ -2579,7 +2687,7 @@ null       : 이동 불필요한 일반 대화
 // Gemini 설계 기준: 하단 슬라이드업 / 논모달 / 핸즈프리 / 앱 방해 안 함
 
 // ── Gemini Live 스타일 음성 대화 UI (핸즈프리, 버튼 없음) ────────────────────
-function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onClose, onAppCommand, subscriptions }) {
+function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onClose, onAppCommand, subscriptions, openBundlePlanner }) {
   // 단일 phase 상태: idle | listening | thinking | speaking
   const [phase, setPhase]           = React.useState('idle');
   const [interim, setInterim]       = React.useState('');
@@ -3206,6 +3314,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       const linked = resolveOrderLinks(cur2);
       linked.boxPlan = cur2.boxPlan || null;
       linked.boxMode = cur2.boxMode || null;
+      linked.boxList = cur2.boxList || null;   // ★ v71: 묶음 확인 모달에서 고른 박스 구성
       const createdArr = createVoiceOrder ? createVoiceOrder(linked) : null;
       const created = Array.isArray(createdArr) ? createdArr[0] : createdArr;
       const boxN = Array.isArray(createdArr) ? createdArr.length : 1;
@@ -3348,12 +3457,29 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       if (!cur.name) { say('누구 주문인지 먼저 말씀해 주세요.'); return; }
       if (!cur.items || !cur.items.length) { say('상품을 먼저 말씀해 주세요.'); return; }
       // ★ v39: 묶음을 물어본 뒤 "응/등록"만 답하면 → 자동 분할로 등록
-      if (cur.awaitingBundle && !cur.boxPlan && !cur.boxMode) {
+      if (cur.awaitingBundle && !cur.boxPlan && !cur.boxMode && !cur.boxList) {
         cur.awaitingBundle = false; cur.boxMode = 'auto'; orderDraftRef.current = cur;
         finalizeRegister(); return;
       }
-      // ★ v39: 아직 묶음 방식을 안 정했고, 낱개가 2박스 이상으로 나뉘면 → 등록 전에 먼저 물어봄
-      if (!cur.boxPlan && !cur.boxMode && !cur.bundleAsked) {
+      // ★ v71: 묶음이 필요하면(2박스 이상 or 나누는 방법이 여러 가지) 화면 확인 모달로 고르게 함
+      if (!cur.boxPlan && !cur.boxMode && !cur.boxList && openBundlePlanner) {
+        const linkedItems = resolveOrderLinks(cur).items;
+        const _pm = {}; (products || []).forEach((p) => { if (p && p.id) _pm[p.id] = p; });
+        if (typeof needsBundleChoice === 'function' && needsBundleChoice(linkedItems, _pm)) {
+          cur.bundleAsked = true; orderDraftRef.current = cur;
+          setMinimized(true);
+          openBundlePlanner(linkedItems, cur.name || '', (boxList) => {
+            const c = orderDraftRef.current; if (!c) return;
+            if (!boxList) { say('묶음을 취소했어요. 준비되면 "등록"이라고 하세요.'); return; }
+            c.boxList = boxList; c.awaitingBundle = false; orderDraftRef.current = c;
+            finalizeRegister();
+          });
+          say('묶음 방법을 화면에서 골라 주세요.');
+          return;
+        }
+      }
+      // ★ v39(구버전 폴백): 화면 모달을 못 쓰는 경우에만 대화로 묶음 물어보기
+      if (!cur.boxPlan && !cur.boxMode && !cur.bundleAsked && !openBundlePlanner) {
         const autoBoxes = autoSplitBoxes(cur.items);
         if (autoBoxes.length >= 2) {
           cur.awaitingBundle = true; cur.bundleAsked = true; orderDraftRef.current = cur;
@@ -4015,7 +4141,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   );
 }
 
-function JarvisButton({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onAppCommand, subscriptions }) {
+function JarvisButton({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onAppCommand, subscriptions, openBundlePlanner }) {
   const [sheetOpen, setSheetOpen] = React.useState(false);
   const [wakeActive, setWakeActive] = React.useState(false);
   const [toastMsg, setToastMsg] = React.useState('');
@@ -4149,6 +4275,7 @@ function JarvisButton({ orders, customers, products, tab, setTab, geminiKey, set
           vendors={vendors} createVoiceOrder={createVoiceOrder}
           onAppCommand={onAppCommand}
           subscriptions={subscriptions}
+          openBundlePlanner={openBundlePlanner}
           onClose={()=>{
             setSheetOpen(false);
             // ★ v7 Fix: ref 직접 true 후 startWakeListen
@@ -4362,6 +4489,20 @@ function App() {
     refreshProblemNote();
   }
   const noteUnresolved = noteList.filter((e) => e && !e.resolved).length;
+
+  // ★ v71: 묶음(박스) 확인 모달 — 음성 주문 등록 전에 묶는 방법을 화면에서 고르게 함
+  const [bundleModal, setBundleModal] = useState(null); // { name, classes, onChoose, onCancel }
+  function openBundlePlanner(items, name, cb) {
+    let classes = [];
+    try { classes = planBundleClasses(items || [], productMap); } catch (e) { classes = []; }
+    if (!classes.length) { if (cb) cb(null); return; }
+    setBundleModal({
+      name: name || "",
+      classes,
+      onChoose: (boxList) => { setBundleModal(null); if (cb) cb(boxList); },
+      onCancel: () => { setBundleModal(null); if (cb) cb(null); },
+    });
+  }
 
   // ★ v46: 내장 자가진단 실행 → 결과 모달 표시 (데이터 변경 없음)
   const [selfTestResult, setSelfTestResult] = useState(null);
@@ -6784,7 +6925,10 @@ function App() {
     const baseItems = vo.items.map((it) => ({ productId: it.productId || null, name: it.name || "", qty: Number(it.qty) || 1 }));
     const plan = vo.boxPlan || (vo.boxMode ? { mode: vo.boxMode } : null);
     let boxList;
-    if (plan && plan.mode === 'auto') {
+    if (Array.isArray(vo.boxList) && vo.boxList.length) {
+      // ★ v71: 묶음 확인 모달에서 사용자가 직접 고른 박스 구성 그대로 사용
+      boxList = vo.boxList.map((b) => ({ items: (b.items || []).map((it) => ({ productId: it.productId || null, name: it.name || "", qty: Number(it.qty) || 1 })) })).filter((b) => b.items.length);
+    } else if (plan && plan.mode === 'auto') {
       const b = splitIntoBoxes(baseItems, productMap);
       boxList = b.length ? b : [{ items: baseItems }];
     } else {
@@ -6825,7 +6969,7 @@ function App() {
         && orderRecipientName(o).replace(/\s/g, "") === nmNS && nmNS
         && (o.orderDate === today)
         && (!addrNS || !(o.recipient && o.recipient.address) || String(o.recipient.address).replace(/\s/g, "") === addrNS));
-      if (sameDay.length && total === 1 && !plan) {
+      if (sameDay.length && total === 1 && !plan && !(vo.boxList && vo.boxList.length)) {
         // 하나로 병합 (별개 주문으로 쪼개지 않음)
         const targetId = sameDay[0].id;
         return prev.map((o) => {
@@ -8289,6 +8433,15 @@ function App() {
           </div>
         )}
 
+        {bundleModal && (
+          <BundleConfirmModal
+            name={bundleModal.name}
+            classes={bundleModal.classes}
+            onCancel={bundleModal.onCancel}
+            onChoose={bundleModal.onChoose}
+          />
+        )}
+
         {memoryList !== null && (
           <div style={{ position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 300000, padding: 20 }} onClick={() => setMemoryList(null)}>
             <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 16, padding: "20px 18px", maxWidth: 380, width: "100%", maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" }}>
@@ -8631,6 +8784,7 @@ function App() {
             createVoiceOrder={createVoiceOrder}
             onAppCommand={runLocalVoiceCommand}
             subscriptions={subscriptions}
+            openBundlePlanner={openBundlePlanner}
           />
         )}
 
@@ -11906,6 +12060,73 @@ function sheetBtnStyle(bg, color) {
     width: "100%", padding: "12px 0", borderRadius: 10, border: bg === "#fff" ? "1px solid #E2E4DD" : "none",
     background: bg, color, fontWeight: 700, fontSize: 13, cursor: "pointer", marginBottom: 8,
   };
+}
+
+// ★ v71: 묶음(박스) 확인 모달 — 무게별로 묶는 방법을 골라 등록. 한 묶음 최대 4kg.
+function BundleConfirmModal({ name, classes, onCancel, onChoose }) {
+  const [sel, setSel] = React.useState(() => (classes || []).map((c) => {
+    const ri = (c.options || []).findIndex((o) => o.recommended);
+    return ri >= 0 ? ri : 0;
+  }));
+  const setOne = (ci, oi) => setSel((prev) => { const n = prev.slice(); n[ci] = oi; return n; });
+  const describeParcel = (px) => {
+    const by = {}; (px || []).forEach((u) => { const b = bdBaseName(u.label); by[b] = (by[b] || 0) + 1; });
+    return Object.keys(by).map((b) => `${b} ${by[b]}박스`).join(" + ");
+  };
+  const chosenParcels = (classes || []).flatMap((c, ci) => ((c.options[sel[ci]] || c.options[0]).parcels));
+  const totalBoxes = chosenParcels.length;
+  const weightName = (w) => (Number.isInteger(w) ? `${w}kg` : `${w}kg`);
+  const apply = () => {
+    const all = (classes || []).flatMap((c, ci) => ((c.options[sel[ci]] || c.options[0]).parcels));
+    onChoose(parcelsToBoxes(all));
+  };
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 320000, padding: 18 }} onClick={onCancel}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 16, padding: "18px 16px", maxWidth: 430, width: "100%", maxHeight: "88vh", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+          <div style={{ fontSize: 16, fontWeight: 700 }}>📦 묶음 배송 확인</div>
+          <span style={{ fontSize: 12, fontWeight: 700, color: "#2F6F4E", background: "#EAF5EC", padding: "3px 10px", borderRadius: 20 }}>총 {totalBoxes}박스</span>
+        </div>
+        <div style={{ fontSize: 11.5, color: "#888780", marginBottom: 10, lineHeight: 1.5 }}>
+          {name ? `${name} 님 주문. ` : ""}한 묶음 최대 4kg 기준으로 묶었어요. 묶는 방법을 고르고 등록하세요.
+        </div>
+        <div style={{ overflowY: "auto", flex: 1, borderTop: "1px solid #F1F2EC", paddingTop: 8 }}>
+          {(classes || []).map((c, ci) => (
+            <div key={ci} style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "#1B2430", marginBottom: 6 }}>
+                {weightName(c.weightKg)} 상품 <span style={{ fontSize: 11, fontWeight: 400, color: "#888780" }}>· {c.products.map((p) => `${bdBaseName(p.label)} ${p.qty}`).join(", ")} (한 묶음 {c.cap}박스까지)</span>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                {(c.options || []).map((o, oi) => {
+                  const on = sel[ci] === oi;
+                  return (
+                    <button key={oi} onClick={() => setOne(ci, oi)} style={{
+                      textAlign: "left", border: "1px solid " + (on ? "#2F6F4E" : "#E2E4DD"), background: on ? "#F0F7F1" : "#fff",
+                      borderRadius: 10, padding: "8px 11px", cursor: "pointer",
+                    }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                        <span style={{ width: 15, height: 15, borderRadius: "50%", border: "2px solid " + (on ? "#2F6F4E" : "#C7C9C0"), background: on ? "#2F6F4E" : "#fff", flexShrink: 0 }} />
+                        <span style={{ fontSize: 12.5, fontWeight: 700, color: "#1B2430" }}>{o.label}</span>
+                        {o.recommended ? <span style={{ fontSize: 10, fontWeight: 700, color: "#2F6F4E", background: "#EAF5EC", padding: "1px 6px", borderRadius: 8 }}>추천</span> : null}
+                        <span style={{ marginLeft: "auto", fontSize: 11, color: "#888780" }}>{o.parcels.length}박스</span>
+                      </div>
+                      <div style={{ fontSize: 11, color: "#6a6a63", marginTop: 4, paddingLeft: 22, lineHeight: 1.5 }}>
+                        {o.parcels.map((px, pi) => <div key={pi}>묶음 {pi + 1}: {describeParcel(px)}</div>)}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <button onClick={onCancel} style={{ flex: 1, border: "1px solid #E2E4DD", background: "#fff", color: "#5F5E5A", fontWeight: 700, fontSize: 13, borderRadius: 10, padding: "11px 0", cursor: "pointer" }}>취소</button>
+          <button onClick={apply} style={{ flex: 2, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 13, borderRadius: 10, padding: "11px 0", cursor: "pointer" }}>이대로 {totalBoxes}박스로 등록</button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ★ v70: 대화 학습노트 한 줄 — 대화 전체를 보여주고, 각 줄 밑 칸에서 직접 고치면 그게 학습 데이터가 됨
