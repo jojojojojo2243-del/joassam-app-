@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 68;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
+const APP_VERSION = 69;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -1505,7 +1505,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // ===== JARVIS AI ASSISTANT =====
-const APP_BUILD = "v68 (07-12 대화학습노트+검증)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const APP_BUILD = "v69 (07-12 대화전체저장)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
 const JARVIS_TAB_MAP = {
   goHome:'home', goOrders:'orders', goNew:'new',
   goCustomers:'customers', goProducts:'products',
@@ -1769,15 +1769,24 @@ function _saveProblemLog(list) {
   try { if (typeof localStorage !== "undefined") localStorage.setItem(PROBLEM_LOG_KEY, JSON.stringify(list)); } catch (e) {}
 }
 // user: 사용자가 한 말, ai: 조비서 답, kind: 'manual'|'fail'|'error'|'ai'
-function addProblemLog(user, ai, kind) {
+// turns: 대화 전체 흐름 [{role:'user'|'model', text}] (있으면 대화 전체를 저장)
+function addProblemLog(user, ai, kind, turns) {
   const u = String(user || "").trim();
-  if (!u) return null;
+  // 대화 전체(turns)를 정리 — 빈 줄 제거, 최대 40줄
+  let flow = [];
+  if (Array.isArray(turns)) {
+    flow = turns
+      .map((t) => ({ role: (t && t.role === "user") ? "user" : "model", text: String((t && t.text) || "").trim() }))
+      .filter((t) => t.text)
+      .slice(-40);
+  }
+  if (!u && !flow.length) return null;
   let list = getProblemLog();
   // 직전과 같은 발화면 중복 저장 안 함 (미해결 상태일 때)
   if (list.length && list[0].user === u && !list[0].resolved) return list[0].id;
   let stamp = 0;
   try { stamp = Date.now(); } catch (e) { stamp = list.length + 1; }
-  const entry = { id: "pl" + stamp + "_" + (++_problemLogSeq), ts: stamp, user: u, ai: String(ai || "").trim(), kind: kind || "manual", resolved: false, fix: "" };
+  const entry = { id: "pl" + stamp + "_" + (++_problemLogSeq), ts: stamp, user: u, ai: String(ai || "").trim(), turns: flow, kind: kind || "manual", resolved: false, fix: "" };
   list = [entry, ...list].slice(0, 100);
   _saveProblemLog(list);
   return entry.id;
@@ -1943,6 +1952,14 @@ function runSelfTests() {
     const resolved = resolveProblemLog(id, "산체수 → 채소") && getProblemLog().some((e) => e.id === id && e.resolved);
     const removed = removeProblemLog(id) && getProblemLog().length === before;
     return added && resolved && removed;
+  }, (g) => g === true);
+  T("학습노트: 대화 전체(turns) 저장", () => {
+    const flow = [{ role: "user", text: "안녕" }, { role: "model", text: "네" }, { role: "user", text: "산체수 두 개" }, { role: "model", text: "죄송해요" }, { role: "bad", text: "" }];
+    const id = addProblemLog("산체수 두 개", "죄송해요", "manual", flow);
+    const e = getProblemLog().find((x) => x.id === id);
+    const ok = e && Array.isArray(e.turns) && e.turns.length === 4 && e.turns[0].role === "user" && e.turns[3].role === "model";
+    removeProblemLog(id);
+    return ok;
   }, (g) => g === true);
   const passed = cases.filter((c) => c.ok).length;
   return { passed, failed: cases.length - passed, total: cases.length, cases };
@@ -3353,6 +3370,20 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     setHistory(trimmed);
   }
 
+  // ★ v68: 대화 전체 흐름 스냅샷 — 학습노트에 단문이 아니라 대화 전체를 저장하기 위함.
+  //  uText/aText를 주면(자동 저장) 아직 history에 안 들어간 현재 턴까지 붙임.
+  function snapshotTurns(uText, aText) {
+    const base = (historyRef.current || []).map((m) => ({
+      role: m.role === 'user' ? 'user' : 'model',
+      text: (m.parts && m.parts[0] && m.parts[0].text) || '',
+    }));
+    const out = base.slice();
+    const tail = out.length ? out[out.length - 1] : null;
+    if (uText && !(tail && tail.role === 'user' && tail.text === uText)) out.push({ role: 'user', text: uText });
+    if (aText) out.push({ role: 'model', text: aText });
+    return out.filter((t) => t && t.text);
+  }
+
   // ★ A2 Fix: 동시 실행 방지 (processingRef는 위 ref 선언부에서 정의)
   async function processUserSpeech(text) {
     if (!activeRef.current) return;
@@ -3490,7 +3521,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     if (!geminiKey) {
       processingRef.current = false;  // ★ BUG1 Fix: 조기 return 전 잠금 해제
       const t = '못 알아들었어요. "주문목록 보여줘", "고객관리 열어줘", "OO 검색"처럼 말씀해 주세요.';
-      try { addProblemLog(text, t, 'fail'); } catch (e) {}  // ★ v67: 못 알아들은 대화 학습노트 저장
+      try { addProblemLog(text, t, 'fail', snapshotTurns(text, t)); } catch (e) {}  // ★ v67/68: 못 알아들은 대화 전체 저장
       setLastAI(t); speakThenListen(t); return;
     }
 
@@ -3500,7 +3531,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       const aiText = r.text || '죄송해요, 다시 말씀해 주세요.';
       setLastAI(aiText);
       // ★ v67: 조비서가 제대로 답 못한(기본 사과문) 대화는 학습노트에 자동 저장
-      if (!r.text || aiText === '죄송해요, 다시 말씀해 주세요.') { try { addProblemLog(text, aiText, 'ai'); } catch (e) {} }
+      if (!r.text || aiText === '죄송해요, 다시 말씀해 주세요.') { try { addProblemLog(text, aiText, 'ai', snapshotTurns(text, aiText)); } catch (e) {} }
       // ★ A1 Fix: 모델 답변은 text만 저장 (action JSON 제거 → 자연스러운 대화 맥락)
       const updated = [...newHistory, { role: 'model', parts: [{ text: aiText }] }];
       // ★ B5 Fix: 대화 기록 최대 20개(10쌍)로 제한 → Gemini 토큰 한도 방지
@@ -3530,7 +3561,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       } else {
         const t = '오류가 발생했어요. 다시 말씀해 주세요.';
         setLastAI(t);
-        try { addProblemLog(text, t, 'error'); } catch (er) {}  // ★ v67: 오류난 대화 학습노트 저장
+        try { addProblemLog(text, t, 'error', snapshotTurns(text, t)); } catch (er) {}  // ★ v67/68: 오류난 대화 전체 저장
         setPhaseSync('idle');
         setTimeout(() => { if (activeRef.current && autoListenRef.current) beginListening(); }, 800);  // ★ v26: 눌러 말하기면 정지
       }
@@ -3914,7 +3945,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
               }}>🎤 {autoListen ? '다시 듣기' : '눌러서 말하기'}</button>
             {/* ★ v67: 방금 대화가 이상하면 학습노트에 저장 → 나중에 설정에서 글자로 정정·학습 */}
             {lastUser ? (
-              <button onClick={()=>{ try { addProblemLog(lastUser, lastAI, 'manual'); setNoteSaved(true); setTimeout(()=>setNoteSaved(false), 2200); } catch(e){} }}
+              <button onClick={()=>{ try { addProblemLog(lastUser, lastAI, 'manual', snapshotTurns(lastUser, lastAI)); setNoteSaved(true); setTimeout(()=>setNoteSaved(false), 2200); } catch(e){} }}
                 style={{
                   background: noteSaved ? 'rgba(255,193,7,0.35)' : 'rgba(255,255,255,0.06)',
                   border:'1px solid rgba(255,193,7,0.5)',
@@ -8185,7 +8216,7 @@ function App() {
                 <span style={{ fontSize: 12, fontWeight: 700, color: "#854F0B", background: "#FAEEDA", padding: "3px 10px", borderRadius: 20 }}>안 끝난 것 {noteUnresolved}개</span>
               </div>
               <div style={{ fontSize: 11.5, color: "#888780", marginBottom: 10, lineHeight: 1.5 }}>
-                조비서가 잘 못 알아들었거나 "이 대화 저장"을 누른 대화가 모여요. 시간 날 때 <b>잘못 들은 말</b>과 <b>올바른 뜻</b>을 적고 저장하면, 조비서가 그 말을 배워서 다음엔 더 잘 알아들어요.
+                조비서가 잘 못 알아들었거나 "이 대화 저장"을 누른 <b>대화 전체 흐름</b>이 그대로 모여요. 시간 날 때 <b>잘못 들은 말</b>과 <b>올바른 뜻</b>을 적고 저장하면, 조비서가 그 말을 배워서 다음엔 더 잘 알아들어요.
               </div>
               <div style={{ overflowY: "auto", flex: 1, borderTop: "1px solid #F1F2EC" }}>
                 {noteList.length === 0 ? (
@@ -11832,10 +11863,28 @@ function ProblemNoteRow({ entry, products, onSave, onDelete }) {
     <div style={{ padding: "11px 2px", borderBottom: "1px solid #F5F5F0", opacity: entry.resolved ? 0.6 : 1 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
         <span style={{ fontSize: 10.5, fontWeight: 700, color: kindColor, background: "#F4F3EE", padding: "2px 7px", borderRadius: 10 }}>{kindLabel}</span>
+        {(entry.turns && entry.turns.length > 2) ? <span style={{ fontSize: 10.5, color: "#888780" }}>대화 {entry.turns.length}줄</span> : null}
         {entry.resolved ? <span style={{ fontSize: 10.5, fontWeight: 700, color: "#2F6F4E" }}>✓ 정정 완료</span> : null}
       </div>
-      <div style={{ fontSize: 12.5, color: "#1B2430", marginBottom: 3 }}><b>👤</b> {entry.user}</div>
-      {entry.ai ? <div style={{ fontSize: 12, color: "#6a6a63", marginBottom: 6 }}><b>🤖</b> {entry.ai}</div> : null}
+      {/* ★ v68: 대화 전체 흐름 표시 (없으면 마지막 한 쌍만) */}
+      {(entry.turns && entry.turns.length) ? (
+        <div style={{ background: "#F8F8F4", border: "1px solid #EDEDE6", borderRadius: 10, padding: "8px 10px", marginBottom: 7, maxHeight: 190, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
+          {entry.turns.map((t, i) => (
+            <div key={i} style={{
+              alignSelf: t.role === "user" ? "flex-end" : "flex-start",
+              background: t.role === "user" ? "#E6F1FB" : "#EAF5EC",
+              color: "#1B2430", fontSize: 12, lineHeight: 1.45,
+              borderRadius: t.role === "user" ? "12px 12px 3px 12px" : "12px 12px 12px 3px",
+              padding: "5px 9px", maxWidth: "88%",
+            }}>{t.role === "user" ? "👤 " : "🤖 "}{t.text}</div>
+          ))}
+        </div>
+      ) : (
+        <div>
+          <div style={{ fontSize: 12.5, color: "#1B2430", marginBottom: 3 }}><b>👤</b> {entry.user}</div>
+          {entry.ai ? <div style={{ fontSize: 12, color: "#6a6a63", marginBottom: 6 }}><b>🤖</b> {entry.ai}</div> : null}
+        </div>
+      )}
       {entry.resolved ? (
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <div style={{ flex: 1, fontSize: 12, color: "#2F6F4E" }}>{entry.fix ? `정정: ${entry.fix}` : "정리됨"}</div>
