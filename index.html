@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 69;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
+const APP_VERSION = 70;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -1505,7 +1505,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // ===== JARVIS AI ASSISTANT =====
-const APP_BUILD = "v69 (07-12 대화전체저장)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const APP_BUILD = "v70 (07-12 줄별직접수정)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
 const JARVIS_TAB_MAP = {
   goHome:'home', goOrders:'orders', goNew:'new',
   goCustomers:'customers', goProducts:'products',
@@ -1809,6 +1809,43 @@ function resolveProblemLog(id, fixText) {
 function unresolvedProblemCount() {
   return getProblemLog().filter((e) => !e.resolved).length;
 }
+// ★ v70: 대화 줄을 직접 고치면 학습 데이터로 — 고친 대화 전체(turns)를 저장하고 원본은 보관.
+function resolveProblemLogEdited(id, editedTurns, fixText) {
+  const list = getProblemLog();
+  const e = list.find((x) => x.id === id);
+  if (!e) return false;
+  if (Array.isArray(editedTurns) && editedTurns.length) {
+    if (!e.origTurns) e.origTurns = e.turns;   // 원본 대화 보관(되돌리기용)
+    e.turns = editedTurns
+      .map((t) => ({ role: (t && t.role === "user") ? "user" : "model", text: String((t && t.text) || "").trim() }))
+      .filter((t) => t.text)
+      .slice(-40);
+  }
+  e.resolved = true;
+  e.fix = String(fixText || "");
+  _saveProblemLog(list);
+  return true;
+}
+// ★ v70: 내가 말한 줄(원본→고친 것)에서 바뀐 '낱말'만 안전하게 뽑아 별칭 학습 대상으로.
+//  같은 낱말 수일 때만 자리 맞춰 비교(수량·단위·숫자·비한글은 제외) → 오학습 방지.
+function extractAliasEdits(original, edited) {
+  const a = String(original || "").trim().split(/\s+/).filter(Boolean);
+  const b = String(edited || "").trim().split(/\s+/).filter(Boolean);
+  if (!a.length || a.length !== b.length) return [];
+  const isNum = (s) => /^\d+$/.test(s);
+  const isUnit = (s) => /(개|박스|봉지|봉|팩|kg|키로|킬로|묶음|세트|건|명|원|장|통|근|줄)$/.test(s);
+  const out = [];
+  for (let i = 0; i < a.length; i++) {
+    const from = a[i].replace(/[.,]/g, ""), to = b[i].replace(/[.,]/g, "");
+    if (from === to) continue;
+    const fromC = from.replace(/\s/g, ""), toC = to.replace(/\s/g, "");
+    if (fromC.length < 2 || toC.length < 2) continue;
+    if (isNum(fromC) || isNum(toC) || isUnit(fromC) || isUnit(toC)) continue;
+    if (!/[가-힣]/.test(fromC) || !/[가-힣]/.test(toC)) continue;
+    out.push({ from: fromC, to: toC });
+  }
+  return out;
+}
 
 // "'청겨'를 '청겨자'로 기억해" / "청겨는 청겨자로 저장해" / "청겨 청겨자로 외워" → { from, to }
 function parseTeachAlias(text) {
@@ -1952,6 +1989,17 @@ function runSelfTests() {
     const resolved = resolveProblemLog(id, "산체수 → 채소") && getProblemLog().some((e) => e.id === id && e.resolved);
     const removed = removeProblemLog(id) && getProblemLog().length === before;
     return added && resolved && removed;
+  }, (g) => g === true);
+  T("학습노트: 줄 수정→낱말 추출(산체수→채소)", () => {
+    const r = extractAliasEdits("산체수 두 개 주문", "채소 두 개 주문");
+    return r.length === 1 && r[0].from === "산체수" && r[0].to === "채소";
+  }, (g) => g === true);
+  T("학습노트: 수량/단위 변경은 학습 제외", () => {
+    const r = extractAliasEdits("채소 한 개", "채소 두 개");   // '한'→'두'는 1글자라 제외
+    return r.length === 0;
+  }, (g) => g === true);
+  T("학습노트: 낱말 수 다르면 학습 안 함", () => {
+    return extractAliasEdits("산체수 주문", "채소 두 개 주문").length === 0;
   }, (g) => g === true);
   T("학습노트: 대화 전체(turns) 저장", () => {
     const flow = [{ role: "user", text: "안녕" }, { role: "model", text: "네" }, { role: "user", text: "산체수 두 개" }, { role: "model", text: "죄송해요" }, { role: "bad", text: "" }];
@@ -4286,21 +4334,28 @@ function App() {
     try { setNoteList((typeof getProblemLog === "function") ? getProblemLog().slice() : []); } catch (e) { setNoteList([]); }
   }
   function openProblemNote() { refreshProblemNote(); setNoteOpen(true); setSideMenuOpen(false); }
-  // 정정 저장: misheard(잘못 들은 말) → correct(올바른 상품/뜻) 을 조비서에게 학습시키고 해결 표시
-  function saveProblemFix(id, misheard, correct) {
-    const m = String(misheard || "").replace(/\s/g, "").trim();
-    const c = String(correct || "").trim();
-    if (c) {
-      let stored = c.replace(/\s/g, "");
-      try {
-        const prod = (typeof fuzzyProductMatch === "function") ? fuzzyProductMatch(c, products, 0.55) : null;
-        if (prod) stored = prod.name.replace(new RegExp(WEIGHT_RE, "g"), "").replace(/\s/g, "");
-      } catch (e) {}
-      if (m && m.length >= 2 && stored.length >= 2 && m !== stored && typeof learnAlias === "function") learnAlias(m, stored);
-    }
-    if (typeof resolveProblemLog === "function") resolveProblemLog(id, (misheard ? misheard + " → " : "") + correct);
+  // ★ v70: 대화 줄을 직접 고쳐 저장 — 내가 말한 줄(원본→고친 것)에서 바뀐 낱말을 조비서가 학습.
+  //  editedTurns: [{ role, text(고친 것), orig(원본) }]
+  function saveProblemEdits(id, editedTurns) {
+    let learned = 0;
+    try {
+      (editedTurns || []).forEach((t) => {
+        if (!t || t.role !== "user") return;                 // 학습은 '내가 말한 줄'의 낱말 변경에서만
+        const edits = (typeof extractAliasEdits === "function") ? extractAliasEdits(t.orig, t.text) : [];
+        edits.forEach(({ from, to }) => {
+          let stored = to.replace(/\s/g, "");
+          try {
+            const prod = (typeof fuzzyProductMatch === "function") ? fuzzyProductMatch(to, products, 0.6) : null;
+            if (prod) stored = prod.name.replace(new RegExp(WEIGHT_RE, "g"), "").replace(/\s/g, "");
+          } catch (e) {}
+          if (from && stored && from !== stored && typeof learnAlias === "function" && learnAlias(from, stored)) learned++;
+        });
+      });
+    } catch (e) {}
+    const cleanTurns = (editedTurns || []).map((t) => ({ role: t.role, text: t.text }));
+    if (typeof resolveProblemLogEdited === "function") resolveProblemLogEdited(id, cleanTurns, learned ? `낱말 ${learned}개 학습` : "대화 정리");
     refreshProblemNote();
-    fireToast(c ? "정정한 말을 배웠어요 — 다음엔 더 잘 알아들어요" : "학습노트에서 정리했어요");
+    fireToast(learned ? `고친 대화 저장 · 낱말 ${learned}개 배웠어요` : "고친 대화를 저장했어요");
   }
   function deleteProblemNote(id) {
     if (typeof removeProblemLog === "function") removeProblemLog(id);
@@ -8216,7 +8271,7 @@ function App() {
                 <span style={{ fontSize: 12, fontWeight: 700, color: "#854F0B", background: "#FAEEDA", padding: "3px 10px", borderRadius: 20 }}>안 끝난 것 {noteUnresolved}개</span>
               </div>
               <div style={{ fontSize: 11.5, color: "#888780", marginBottom: 10, lineHeight: 1.5 }}>
-                조비서가 잘 못 알아들었거나 "이 대화 저장"을 누른 <b>대화 전체 흐름</b>이 그대로 모여요. 시간 날 때 <b>잘못 들은 말</b>과 <b>올바른 뜻</b>을 적고 저장하면, 조비서가 그 말을 배워서 다음엔 더 잘 알아들어요.
+                조비서가 잘 못 알아들었거나 "이 대화 저장"을 누른 <b>대화 전체 흐름</b>이 그대로 모여요. 각 줄 아래 칸에서 <b>내가 말한 것·조비서가 말한 것을 바르게 고쳐</b> 저장하면, 바뀐 낱말을 조비서가 배워서 다음엔 더 잘 알아들어요.
               </div>
               <div style={{ overflowY: "auto", flex: 1, borderTop: "1px solid #F1F2EC" }}>
                 {noteList.length === 0 ? (
@@ -8225,7 +8280,7 @@ function App() {
                   </div>
                 ) : (
                   noteList.map((e) => (
-                    <ProblemNoteRow key={e.id} entry={e} products={products} onSave={saveProblemFix} onDelete={deleteProblemNote} />
+                    <ProblemNoteRow key={e.id} entry={e} products={products} onSave={saveProblemEdits} onDelete={deleteProblemNote} />
                   ))
                 )}
               </div>
@@ -11853,60 +11908,54 @@ function sheetBtnStyle(bg, color) {
   };
 }
 
-// ★ v67: 대화 학습노트 한 줄 — 저장된 문제 대화를 보여주고, 잘못 들은 말→올바른 뜻을 적어 학습
+// ★ v70: 대화 학습노트 한 줄 — 대화 전체를 보여주고, 각 줄 밑 칸에서 직접 고치면 그게 학습 데이터가 됨
 function ProblemNoteRow({ entry, products, onSave, onDelete }) {
-  const [misheard, setMisheard] = React.useState("");
-  const [correct, setCorrect] = React.useState("");
+  // 대화 전체(turns). 예전 단문 항목은 user/ai로 합성.
+  const turns = (entry.turns && entry.turns.length)
+    ? entry.turns
+    : [{ role: "user", text: entry.user || "" }, { role: "model", text: entry.ai || "" }].filter((t) => t.text);
+  const [edits, setEdits] = React.useState(() => turns.map((t) => t.text));
+  const setOne = (i, val) => setEdits((prev) => { const n = prev.slice(); n[i] = val; return n; });
+  const changed = turns.some((t, i) => (edits[i] || "").trim() !== (t.text || "").trim());
   const kindLabel = { manual: "직접 저장", fail: "못 알아들음", error: "오류", ai: "답변 실패" }[entry.kind] || "저장됨";
   const kindColor = { manual: "#854F0B", fail: "#A32D2D", error: "#A32D2D", ai: "#6B5B00" }[entry.kind] || "#888780";
+  const doSave = () => onSave(entry.id, turns.map((t, i) => ({ role: t.role, text: (edits[i] != null ? edits[i] : t.text), orig: t.text })));
   return (
-    <div style={{ padding: "11px 2px", borderBottom: "1px solid #F5F5F0", opacity: entry.resolved ? 0.6 : 1 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 5 }}>
+    <div style={{ padding: "12px 2px", borderBottom: "1px solid #F5F5F0" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
         <span style={{ fontSize: 10.5, fontWeight: 700, color: kindColor, background: "#F4F3EE", padding: "2px 7px", borderRadius: 10 }}>{kindLabel}</span>
-        {(entry.turns && entry.turns.length > 2) ? <span style={{ fontSize: 10.5, color: "#888780" }}>대화 {entry.turns.length}줄</span> : null}
+        <span style={{ fontSize: 10.5, color: "#888780" }}>대화 {turns.length}줄</span>
         {entry.resolved ? <span style={{ fontSize: 10.5, fontWeight: 700, color: "#2F6F4E" }}>✓ 정정 완료</span> : null}
       </div>
-      {/* ★ v68: 대화 전체 흐름 표시 (없으면 마지막 한 쌍만) */}
-      {(entry.turns && entry.turns.length) ? (
-        <div style={{ background: "#F8F8F4", border: "1px solid #EDEDE6", borderRadius: 10, padding: "8px 10px", marginBottom: 7, maxHeight: 190, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
-          {entry.turns.map((t, i) => (
-            <div key={i} style={{
-              alignSelf: t.role === "user" ? "flex-end" : "flex-start",
-              background: t.role === "user" ? "#E6F1FB" : "#EAF5EC",
-              color: "#1B2430", fontSize: 12, lineHeight: 1.45,
-              borderRadius: t.role === "user" ? "12px 12px 3px 12px" : "12px 12px 12px 3px",
-              padding: "5px 9px", maxWidth: "88%",
-            }}>{t.role === "user" ? "👤 " : "🤖 "}{t.text}</div>
-          ))}
-        </div>
-      ) : (
-        <div>
-          <div style={{ fontSize: 12.5, color: "#1B2430", marginBottom: 3 }}><b>👤</b> {entry.user}</div>
-          {entry.ai ? <div style={{ fontSize: 12, color: "#6a6a63", marginBottom: 6 }}><b>🤖</b> {entry.ai}</div> : null}
-        </div>
-      )}
-      {entry.resolved ? (
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <div style={{ flex: 1, fontSize: 12, color: "#2F6F4E" }}>{entry.fix ? `정정: ${entry.fix}` : "정리됨"}</div>
-          <button onClick={() => onDelete(entry.id)} style={{ border: "1px solid #E2C4C4", background: "#fff", color: "#A32D2D", fontSize: 11.5, fontWeight: 700, borderRadius: 7, padding: "5px 10px", cursor: "pointer" }}>삭제</button>
-        </div>
-      ) : (
-        <div>
-          <div style={{ display: "flex", gap: 6, marginBottom: 6 }}>
-            <input value={misheard} onChange={(e) => setMisheard(e.target.value)} placeholder="잘못 들은 말 (예: 산체수)"
-              style={{ flex: 1, border: "1px solid #D3D1C7", borderRadius: 8, padding: "7px 9px", fontSize: 12.5 }} />
-            <input value={correct} onChange={(e) => setCorrect(e.target.value)} placeholder="올바른 뜻 (예: 채소)"
-              style={{ flex: 1, border: "1px solid #D3D1C7", borderRadius: 8, padding: "7px 9px", fontSize: 12.5 }} />
-          </div>
-          <div style={{ display: "flex", gap: 6 }}>
-            <button onClick={() => onSave(entry.id, misheard, correct)}
-              style={{ flex: 1, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 12, borderRadius: 8, padding: "8px 0", cursor: "pointer" }}>
-              {correct.trim() ? "학습 저장" : "정리하고 닫기"}
-            </button>
-            <button onClick={() => onDelete(entry.id)} style={{ border: "1px solid #E2C4C4", background: "#fff", color: "#A32D2D", fontSize: 11.5, fontWeight: 700, borderRadius: 8, padding: "8px 12px", cursor: "pointer" }}>삭제</button>
-          </div>
-        </div>
-      )}
+      {/* 대화 전체 흐름 — 각 줄(원본 말풍선) 밑에 고치는 칸 */}
+      <div style={{ maxHeight: 300, overflowY: "auto", display: "flex", flexDirection: "column", gap: 9, marginBottom: 8 }}>
+        {turns.map((t, i) => {
+          const mine = t.role === "user";
+          return (
+            <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", gap: 3 }}>
+              <div style={{
+                background: mine ? "#E6F1FB" : "#EAF5EC", color: "#1B2430", fontSize: 12, lineHeight: 1.4,
+                borderRadius: mine ? "12px 12px 3px 12px" : "12px 12px 12px 3px", padding: "5px 9px", maxWidth: "90%",
+              }}>{mine ? "👤 " : "🤖 "}{t.text}</div>
+              <input
+                value={edits[i] != null ? edits[i] : t.text}
+                onChange={(e) => setOne(i, e.target.value)}
+                placeholder={mine ? "내가 말한 것 바르게 고치기" : "조비서가 말한 것 바르게 고치기"}
+                style={{
+                  width: "94%", border: "1px solid " + (mine ? "#BBD8F0" : "#C7E1CC"), background: "#fff",
+                  borderRadius: 8, padding: "6px 9px", fontSize: 12.5, color: "#1B2430",
+                }} />
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ display: "flex", gap: 6 }}>
+        <button onClick={doSave}
+          style={{ flex: 1, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 12.5, borderRadius: 8, padding: "9px 0", cursor: "pointer" }}>
+          {changed ? "고친 내용 학습 저장" : "정리하고 닫기"}
+        </button>
+        <button onClick={() => onDelete(entry.id)} style={{ border: "1px solid #E2C4C4", background: "#fff", color: "#A32D2D", fontSize: 11.5, fontWeight: 700, borderRadius: 8, padding: "9px 14px", cursor: "pointer" }}>삭제</button>
+      </div>
     </div>
   );
 }
