@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 75;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
+const APP_VERSION = 79;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -687,8 +687,8 @@ function parseDate(text, todayDate){
   if(/내일|낼|명일/.test(t)){d.setDate(d.getDate()+1);return fmt(d);}
   if(/모레|모래/.test(t)){d.setDate(d.getDate()+2);return fmt(d);}
   if(/글피/.test(t)){d.setDate(d.getDate()+3);return fmt(d);}
-  m=t.match(/(\d{1,2})월(\d{1,2})일/); if(m){d.setMonth(+m[1]-1);d.setDate(+m[2]);return fmt(d);}
-  m=t.match(/(\d{1,2})\/(\d{1,2})/); if(m){d.setMonth(+m[1]-1);d.setDate(+m[2]);return fmt(d);}
+  m=t.match(/(\d{1,2})월(\d{1,2})일/); if(m){d.setDate(1);d.setMonth(+m[1]-1);d.setDate(+m[2]);return fmt(d);}
+  m=t.match(/(\d{1,2})\/(\d{1,2})/); if(m){d.setDate(1);d.setMonth(+m[1]-1);d.setDate(+m[2]);return fmt(d);}
   const wd={일:0,월:1,화:2,수:3,목:4,금:5,토:6};
   m=t.match(/([월화수목금토일])요일/); if(m){const tg=wd[m[1]];let a=(tg-d.getDay()+7)%7;if(a===0)a=7;d.setDate(d.getDate()+a);return fmt(d);}
   return null;
@@ -1037,6 +1037,13 @@ function needsBundleChoice(items, productMap) {
   return totalParcels >= 2 || hasChoice;
 }
 
+// ★ v76: 품목 실제 단가 — 저장된 it.price가 있으면 그대로, 없으면 업체는 도매가·일반은 소매가
+function effectiveItemPrice(it, p, isBusiness) {
+  if (it && it.price != null && it.price !== "") return Number(it.price) || 0;
+  if (!p) return 0;
+  return (isBusiness || p.channel === "business") ? (p.wholesalePrice || p.price || 0) : (p.price || 0);
+}
+
 // ★ v74: 거래명세서/정산서 매칭 헬퍼 (검색·정산 버그 수정)
 function invNormNS(s) { return String(s || "").replace(/\s/g, "").toLowerCase(); }
 // 거래명세서 검색: 업체명 공백·대소문자 무시 (예: "대솔수곡점"으로 "대솔 수곡점" 찾기)
@@ -1149,6 +1156,61 @@ function preprocessForOcr(file) {
   });
 }
 
+// ★ v79: 붙여넣은 주문 메시지에서 이름·주소를 함께 추출 (라벨 없어도).
+//  - 이름: 성씨로 시작하는 2~4글자를 '자기 줄 / 주소 앞 / 주소 끝(…2802호 송 창옥)' 위치에서만 인식 → 아파트명·동이름 오인 방지.
+//  - 주소: 광역시(인천·대전 등 '시' 없이)·앞 지역까지 포함하고, 이름·전화는 주소에서 제거.
+const KO_SURNAMES = new Set("김 이 박 최 정 강 조 윤 장 임 한 오 서 신 권 황 안 송 전 홍 유 고 문 양 손 배 백 허 남 심 노 하 곽 성 차 주 우 구 민 류 나 진 지 엄 채 원 천 방 공 현 함 변 염 여 추 도 소 석 선 설 마 길 연 위 표 명 기 반 왕 금 옥 육 인 맹 제 모 탁 국 어 은 편 용 예 봉 사 부 가 복 태 목 형 계 피 두 감 호 빈".split(" "));
+const ADDR_REGIONS = new Set("서울 부산 대구 인천 광주 대전 울산 세종 경기 강원 충북 충남 전북 전남 경북 경남 제주 서울시 부산시 대구시 인천시 광주시 대전시 울산시 서울특별시 경기도 강원도 충청북도 충청남도 전라북도 전라남도 경상북도 경상남도 제주도 제주특별자치도".split(" "));
+const NAME_PHONE_RE = /01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/g;
+function isAddrToken(tk) {
+  if (ADDR_REGIONS.has(tk)) return true;
+  if (tk.length >= 2 && /(시|도|군|구|읍|면|동|리|로|길|가|번지|번길|아파트|빌라|빌딩|타워|오피스텔|원룸|단지|상가)$/.test(tk)) return true;
+  if (/^\d/.test(tk)) return true;
+  if (/\d(동|호|층|가|번지|번|통|반)$/.test(tk)) return true;
+  if (/(아파트|빌라|오피스텔|맨션|하우스|타워|빌딩|단지)/.test(tk)) return true;
+  return false;
+}
+const isNameTok = (tk) => /^[가-힣]{2,4}$/.test(tk) && KO_SURNAMES.has(tk[0]) && !ADDR_REGIONS.has(tk);
+function parseNameAddr(text, products) {
+  const prod = new Set((products || []).map((p) => (p && p.name ? p.name.replace(/\s/g, "") : "")).filter(Boolean));
+  const isProdTok = (tk) => { const s = tk.replace(/\s/g, ""); for (const pn of prod) { if (pn.length >= 2 && (s.includes(pn) || pn.includes(s)) && s.length >= 2) return true; } return false; };
+  const lines = String(text || "").split("\n").map((l) => l.trim()).filter(Boolean);
+  const nameTokenSet = new Set();
+  let ownName = "", leadName = "", tailName = "";
+  const addrParts = [];
+  for (let line of lines) {
+    if (/(상품|주문내역|메시지|요청사항|메모)/.test(line)) continue;
+    if (/\d+\s*(개|박스|봉지|봉|팩|세트|kg|키로|킬로|근|망|단|포|상자)/.test(line)) continue;
+    let ln = line.replace(NAME_PHONE_RE, " ").replace(/(받는\s*분|보내는\s*분|주문자|이름|성함|연락처|전화|휴대폰|핸드폰)\s*[:：]?/g, " ").replace(/(사장님|대표님|고객님|님|씨)/g, " ").trim();
+    if (!ln) continue;
+    if (isProdTok(ln)) continue;
+    const toks = ln.split(/\s+/).filter(Boolean);
+    const hasAddr = toks.some(isAddrToken);
+    if (!hasAddr) {
+      const joined = toks.filter((t) => /^[가-힣]{1,4}$/.test(t) && !ADDR_REGIONS.has(t) && !isProdTok(t)).join("");
+      if (joined.length >= 2 && joined.length <= 4 && !ADDR_REGIONS.has(joined) && !ownName) ownName = joined;
+      continue;
+    }
+    const first = toks[0];
+    if (!leadName && isNameTok(first) && toks.slice(1).some(isAddrToken)) { leadName = first; nameTokenSet.add(first); }
+    if (!tailName) {
+      const tail = [];
+      for (let i = toks.length - 1; i >= 0; i--) {
+        const tk = toks[i];
+        if (isAddrToken(tk)) { if (tail.length) break; else continue; }
+        if (/^[가-힣]{1,3}$/.test(tk) && !ADDR_REGIONS.has(tk) && !isProdTok(tk)) { tail.unshift(tk); if (tail.join("").length >= 4) break; }
+        else if (tail.length) break; else break;
+      }
+      const j = tail.join("");
+      if (j.length >= 2 && j.length <= 4 && KO_SURNAMES.has(j[0])) { tailName = j; tail.forEach((x) => nameTokenSet.add(x)); }
+    }
+    addrParts.push(toks);
+  }
+  const name = ownName || tailName || leadName || "";
+  if (name && !nameTokenSet.size) nameTokenSet.add(name);
+  const address = addrParts.map((toks) => toks.filter((tk) => !nameTokenSet.has(tk)).join(" ")).join(" ").replace(/\s+/g, " ").trim();
+  return { name, address };
+}
 function parseOrderMessage(text, products) {
   const result = { senderName: "", senderPhone: "", recipName: "", recipPhone: "", address: "", reserveDate: "", deliveryMessage: "", items: [] };
   if (!text) return result;
@@ -1162,16 +1224,11 @@ function parseOrderMessage(text, products) {
   const senderPhoneM = text.match(/주문자\s*연락처\s*[:：]?\s*(01[016789][-\s]?\d{3,4}[-\s]?\d{4})/);
   const recipPhoneM = text.match(/받는\s*분\s*연락처\s*[:：]?\s*(01[016789][-\s]?\d{3,4}[-\s]?\d{4})/);
 
+  // ★ v79: 라벨이 없으면 이름+주소를 함께 지능형 추출
+  const na = parseNameAddr(text, products);
   let baseName = "";
   if (!senderNameM && !recipNameM && !genericNameM) {
-    const lines = text.split("\n").map((l) => l.trim()).filter(Boolean);
-    for (const line of lines) {
-      const m = line.match(/^([가-힣]{2,4})(?:\s|님|입니다|,|$)/);
-      if (m && !/주소|상품|연락처|전화|받는|보내는/.test(line)) {
-        baseName = m[1];
-        break;
-      }
-    }
+    baseName = na.name || "";
   } else {
     baseName = (genericNameM && genericNameM[1]) || "";
   }
@@ -1184,6 +1241,8 @@ function parseOrderMessage(text, products) {
   const addrLabelMatch = text.match(/(?:받는\s*분\s*)?주소\s*[:：]?\s*(.+)/);
   if (addrLabelMatch) {
     result.address = addrLabelMatch[1].split(/[,\n]/)[0].trim();
+  } else if (na.address) {
+    result.address = na.address;   // ★ v79: 광역시·앞지역 포함, 이름·전화 제거된 주소
   } else {
     const addrLineMatch = text.match(/[가-힣]+(?:시|도)\s?[가-힣]+(?:시|군|구)?\s?[가-힣0-9\-\s]+(?:동|로|길)[가-힣0-9\-\s]*/);
     if (addrLineMatch) result.address = addrLineMatch[0].trim();
@@ -1607,7 +1666,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // ===== JARVIS AI ASSISTANT =====
-const APP_BUILD = "v75 (07-13 음성주문명세서자동생성)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const APP_BUILD = "v79 (07-13 붙여넣기 이름주소인식)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
 const JARVIS_TAB_MAP = {
   goHome:'home', goOrders:'orders', goNew:'new',
   goCustomers:'customers', goProducts:'products',
@@ -1747,6 +1806,36 @@ function localParseVoiceCommand(rawText, ctx = {}) {
     return { action: "CONFIRM_DELIVERY", raw };
   }
 
+  // ★ v77 #2.56 송장번호 입력 — "하레하레 송장번호 1234567890", "대솔 운송장 6127..." → 송장 저장 + 발송완료
+  {
+    const invM = t.match(/(?:송장번호|송장|운송장|택배번호|운송번호)\s*([0-9-]{6,})/) || t.match(/([0-9]{9,})\s*(?:송장|운송장|번호)/);
+    if (invM) {
+      const nameHit = tryMatch(raw, personNames) || "";
+      return { action: "SET_INVOICE_NO", name: nameHit, invoiceNo: invM[1].replace(/-/g, ""), raw };
+    }
+  }
+
+  // ★ v77 #2.57 주문 상태 변경 — "OO 발송처리/발송완료", "OO 결제완료로", "OO 입금확인", "OO 발송준비"
+  if (/(발송처리|발송완료|발송했|출고|보냈어|보냈다|결제완료|결제확인|입금확인|입금완료|입금됐|입금받|발송준비|준비완료|입금대기로)/.test(t) && !/도착/.test(t)) {
+    let status = null;
+    if (/(발송처리|발송완료|발송했|출고|보냈)/.test(t)) status = "shipped";
+    else if (/(발송준비|준비완료)/.test(t)) status = "ready";
+    else if (/(결제완료|결제확인|입금확인|입금완료|입금됐|입금받)/.test(t)) status = "pending";
+    else if (/입금대기로/.test(t)) status = "waiting";
+    if (status) { const nameHit = tryMatch(raw, personNames) || ""; return { action: "SET_STATUS", name: nameHit, status, raw }; }
+  }
+
+  // ★ v77 #2.58 주문 통째로 삭제 — "OO 주문 삭제/취소", "OO 주문 전체 삭제" (상품명 없이 주문 전체)
+  {
+    const coreOf2 = (s) => String(s).replace(new RegExp(WEIGHT_RE, "g"), "").replace(/\s/g, "");
+    const hasProdInText = productNames.some((n) => { const c = coreOf2(n); return c && t.includes(c); });
+    if ((/(주문삭제|주문취소|주문전체삭제|전체삭제|주문지워|주문없애|오더삭제|오더취소|주문전체취소)/.test(t)
+      || ((/(삭제|취소|지워|없애)/.test(t)) && /주문/.test(t) && !hasProdInText))) {
+      const nameHit = tryMatch(raw, personNames) || "";
+      if (nameHit) return { action: "DELETE_ORDER", name: nameHit, raw };
+    }
+  }
+
   // #2.6 기존 주문 열어 수정 — "배솔수곡점 주문 수정", "하레하레 주문 고쳐줘/열어줘/바꿔줘"
   if (/(주문|오더).*(수정|고쳐|고칠|고치|바꿔|바꾸|변경|편집|열어|열자|불러|띄워)/.test(t)
       || /(수정|고쳐|고칠|편집)(해|하|해줘|해주세요)?$/.test(t)) {
@@ -1812,7 +1901,7 @@ function localParseVoiceCommand(rawText, ctx = {}) {
 // #3 상품명 오인식 자동 매칭 ("가피라"→"카이피라")
 /* 자주 잘못 들리는 발음 → 정식 상품 핵심명 (유사도로 못 잡는 하드 케이스 확실 교정). 필요시 계속 추가. */
 const PRODUCT_ALIASES = {
-  "채소": ["산체수", "산채수", "산채소", "산체소", "새채소", "새소", "채수", "체수", "쌈채", "쌈채소", "최소", "챗소", "상체수", "삼채수"],
+  "채소": ["산체수", "산채수", "산채소", "산체소", "새채소", "쌈채", "쌈채소", "상체수", "삼채수"],
   "카이피라": ["가피라", "카이빠라", "가이피라", "가이빠라", "카피라"],
   "루꼴라": ["루꼬라", "루콜라", "루꾸라", "루쿨라"],
   "로메인": ["로메인상추", "노메인"],
@@ -1936,6 +2025,8 @@ function extractAliasEdits(original, edited) {
   if (!a.length || a.length !== b.length) return [];
   const isNum = (s) => /^\d+$/.test(s);
   const isUnit = (s) => /(개|박스|봉지|봉|팩|kg|키로|킬로|묶음|세트|건|명|원|장|통|근|줄)$/.test(s);
+  // ★ v76: 한글 수량/수사(다섯→여섯 등)는 별칭이 아님 → 오학습 방지
+  const isKoQty = (s) => /^(한|두|세|네|다섯|여섯|일곱|여덟|아홉|열|열한|열두|스물|서른|마흔|쉰|예순|일흔|여든|아흔|하나|둘|셋|넷|반|몇|약간|조금|많이|더|덜)$/.test(s);
   const out = [];
   for (let i = 0; i < a.length; i++) {
     const from = a[i].replace(/[.,]/g, ""), to = b[i].replace(/[.,]/g, "");
@@ -1943,6 +2034,7 @@ function extractAliasEdits(original, edited) {
     const fromC = from.replace(/\s/g, ""), toC = to.replace(/\s/g, "");
     if (fromC.length < 2 || toC.length < 2) continue;
     if (isNum(fromC) || isNum(toC) || isUnit(fromC) || isUnit(toC)) continue;
+    if (isKoQty(fromC) || isKoQty(toC)) continue;
     if (!/[가-힣]/.test(fromC) || !/[가-힣]/.test(toC)) continue;
     out.push({ from: fromC, to: toC });
   }
@@ -1970,6 +2062,7 @@ function tokenizeContentWords(text) {
   const out = [];
   raw.forEach((tok) => {
     let w = stripParticle(tok).trim();
+    if (w.length < 2) w = String(tok).trim();       // ★ v76: 조사 떼서 1글자 되면 원래 낱말 유지 (사과·포도·오이 보존)
     if (w.length < 2) return;
     if (!/[가-힣]/.test(w)) return;                 // 한글 포함만
     if (/[0-9]/.test(w)) return;                     // 숫자 섞인 것 제외
@@ -1979,7 +2072,18 @@ function tokenizeContentWords(text) {
   });
   return out;
 }
-function bumpWordFreq(text) { const m = getWordFreq(); tokenizeContentWords(text).forEach((w) => { m[w] = (m[w] || 0) + 1; }); saveWordFreq(m); }
+function bumpWordFreq(text) {
+  const m = getWordFreq();
+  tokenizeContentWords(text).forEach((w) => { m[w] = (m[w] || 0) + 1; });
+  // ★ v76: 무한정 커지지 않게 상한 — 500개 넘으면 count 높은 순 상위 300개만 유지
+  const keys = Object.keys(m);
+  if (keys.length > 500) {
+    const kept = keys.sort((a, b) => m[b] - m[a]).slice(0, 300);
+    const nm = {}; kept.forEach((k) => { nm[k] = m[k]; });
+    saveWordFreq(nm); return;
+  }
+  saveWordFreq(m);
+}
 function wordCandidates(threshold) {
   const th = threshold || 3; const m = getWordFreq(); const ign = new Set(getIgnoredWords());
   return Object.keys(m).filter((w) => m[w] >= th && !ign.has(w)).map((w) => ({ word: w, count: m[w] })).sort((a, b) => b.count - a.count);
@@ -1998,8 +2102,9 @@ function parseTeachAlias(text) {
   const from = m[1].replace(/\s/g, "").trim();
   const to = m[2].replace(/\s+/g, " ").trim();
   if (!from || !to || from === to) return null;
-  // 수량/개수는 별칭이 아님 (오학습 방지)
-  if (/^\d+$/.test(from) || /^\d+\s*(개|박스|봉|팩|kg|키로|킬로)/.test(to)) return null;
+  // 수량/개수는 별칭이 아님 (오학습 방지) — ★ v76: from·to 양쪽 모두 숫자+단위 형태를 차단
+  const qtyLike = (s) => /^\d+$/.test(s) || /^\d+\s*(개|박스|봉지|봉|팩|세트|kg|키로|킬로|그램|근|망|단|포|상자|묶음)/.test(s);
+  if (qtyLike(from) || qtyLike(to)) return null;
   return { from, to };
 }
 function canonicalizeSpoken(q) {
@@ -2008,11 +2113,12 @@ function canonicalizeSpoken(q) {
   // ★ v41: 학습된 별칭을 먼저 참조 (사용자가 승인 저장한 발음/줄임말)
   const learned = getLearnedAliases();
   if (learned[s]) return learned[s];
+  // ★ v76: 부분일치(includes)는 3글자 이상 별칭에만 — "최소" 같은 2글자가 "최소한열개"에 잘못 걸리는 것 방지
   for (const k in learned) {
-    if (k && (s === k || s.includes(k) || ((typeof simJamo === "function") && simJamo(s, k) >= 0.85))) return learned[k];
+    if (k && (s === k || (k.length >= 3 && s.includes(k)) || ((typeof simJamo === "function") && simJamo(s, k) >= 0.85))) return learned[k];
   }
   for (const canon in PRODUCT_ALIASES) {
-    if (PRODUCT_ALIASES[canon].some((a) => s === a || s.includes(a) || ((typeof simJamo === "function") && simJamo(s, a) >= 0.82))) return canon;
+    if (PRODUCT_ALIASES[canon].some((a) => s === a || (a.length >= 3 && s.includes(a)) || ((typeof simJamo === "function") && simJamo(s, a) >= 0.82))) return canon;
   }
   return null;
 }
@@ -2134,6 +2240,15 @@ function runSelfTests() {
     return it.length === 1 && it[0].productId === "px" && it[0].qty === 2;
   }, (g) => g === true);
   T("음성: 주문 수정→EDIT_ORDER", () => lpv("대솔수곡점 주문 수정"), "EDIT_ORDER");
+  // ★ v77: 음성 연동 신규 액션
+  T("v77 발송완료→SET_STATUS", () => lpv("대솔수곡점 발송완료 처리"), "SET_STATUS");
+  T("v77 발송완료 status=shipped", () => localParseVoiceCommand("대솔수곡점 발송완료 처리", ctx).status, "shipped");
+  T("v77 결제완료→SET_STATUS", () => lpv("대솔수곡점 결제완료"), "SET_STATUS");
+  T("v77 결제완료 status=pending", () => localParseVoiceCommand("대솔수곡점 결제완료", ctx).status, "pending");
+  T("v77 송장번호→SET_INVOICE_NO", () => lpv("대솔수곡점 송장번호 1234567890"), "SET_INVOICE_NO");
+  T("v77 송장번호 값 추출", () => localParseVoiceCommand("대솔수곡점 송장번호 1234567890", ctx).invoiceNo, "1234567890");
+  T("v77 주문삭제→DELETE_ORDER", () => lpv("대솔수곡점 주문 삭제해줘"), "DELETE_ORDER");
+  T("v77 채소 빼기는 삭제아님(REMOVE)", () => lpv("대솔수곡점 채소 빼줘"), "REMOVE_FROM_ORDER");
   T("음성: 채소 빼줘→REMOVE", () => lpv("채소 빼줘"), "REMOVE_FROM_ORDER");
   T("음성: 되돌려→UNDO", () => lpv("되돌려"), "UNDO_LAST");
   T("음성: 한 박스로 묶어→REBUNDLE", () => lpv("한 박스로 묶어"), "REBUNDLE_ONE");
@@ -2154,6 +2269,24 @@ function runSelfTests() {
     const removed = removeProblemLog(id) && getProblemLog().length === before;
     return added && resolved && removed;
   }, (g) => g === true);
+  // ★ v79: 로컬 주문메시지 이름+주소 추출(비-AI 파서)
+  T("v79 주소끝 이름(송창옥)", () => parseNameAddr("경기 평택시 청원로 1290\n화성 석정 아파트 107동 2802호 송 창옥\n010 2498 1125", P).name, "송창옥");
+  T("v79 주소에 이름·전화 없음", () => { const a = parseNameAddr("경기 평택시 청원로 1290\n화성 석정 아파트 107동 2802호 송 창옥\n010 2498 1125", P).address; return !/송|창옥|010/.test(a) && a.includes("평택시"); }, (g) => g === true);
+  T("v79 한줄 이름(홍길동)", () => parseNameAddr("홍길동 010-1234-5678 서울시 강남구 테헤란로 123", P).name, "홍길동");
+  T("v79 광역시 주소(대전 인식)", () => parseNameAddr("박서준 010-2222-3333\n대전 유성구 대학로 50", P).address.includes("대전"), (g) => g === true);
+  T("v79 이름먼저(이순신)", () => parseNameAddr("이순신\n인천 남동구 구월동 123 롯데아파트 101동 202호\n01055556666", P).name, "이순신");
+  T("v79 지역만은 이름없음", () => parseNameAddr("경기 평택시 청원로 1290", P).name, "");
+  // ★ v76: 대규모 버그수정 회귀 방지
+  T("v76 날짜 월말롤오버 방지(9월1일)", () => parseDate("9월 1일 발송", new Date(2026, 6, 31)), "2026-09-01");
+  T("v76 조회날짜 월말롤오버 방지(2월5일)", () => resolveQueryDate("2월 5일 배송", new Date(2026, 6, 31)), "2026-02-05");
+  T("v76 최소한→채소 오인식 방지", () => canonicalizeSpoken("최소한열개는") !== "채소", (g) => g === true);
+  T("v76 산체수→채소 유지", () => canonicalizeSpoken("산체수"), "채소");
+  T("v76 다섯→여섯 학습 제외", () => extractAliasEdits("채소 다섯 개", "채소 여섯 개").length, 0);
+  T("v76 업체 도매가 합계", () => effectiveItemPrice({ productId: "p" }, { price: 10000, wholesalePrice: 7000 }, true), 7000);
+  T("v76 일반 소매가", () => effectiveItemPrice({ productId: "p" }, { price: 10000, wholesalePrice: 7000 }, false), 10000);
+  T("v76 저장단가 우선", () => effectiveItemPrice({ price: 5000 }, { price: 10000, wholesalePrice: 7000 }, true), 5000);
+  T("v76 토큰 사과 보존", () => tokenizeContentWords("사과 두 개 주문").includes("사과"), (g) => g === true);
+  T("v76 teach 2개→두개 거부", () => parseTeachAlias("'2개'를 '두개'로 기억해"), (g) => g === null);
   T("자주나온말: 명령어·단위·숫자 제외", () => tokenizeContentWords("주문 2키로 등록 해줘 3박스").length, 0);
   T("자주나온말: 조사 떼고 낱말 추출", () => tokenizeContentWords("루꼴라를 하나 넣어줘").includes("루꼴라"), (g) => g === true);
   T("자주나온말: 3회 반복→후보, 무시하면 제거", () => {
@@ -2400,8 +2533,8 @@ function resolveQueryDate(text, today) {
   if (/모레|모래/.test(t)) { base.setDate(base.getDate() + 2); return fmt(base); }
   if (/내일|낼|명일/.test(t)) { base.setDate(base.getDate() + 1); return fmt(base); }
   let m = t.match(/(\d{1,2})일전/); if (m) { base.setDate(base.getDate() - (+m[1])); return fmt(base); }
-  m = t.match(/(\d{1,2})월(\d{1,2})일/); if (m) { base.setMonth(+m[1] - 1); base.setDate(+m[2]); return fmt(base); }
-  m = t.match(/(\d{1,2})\/(\d{1,2})/); if (m) { base.setMonth(+m[1] - 1); base.setDate(+m[2]); return fmt(base); }
+  m = t.match(/(\d{1,2})월(\d{1,2})일/); if (m) { base.setDate(1); base.setMonth(+m[1] - 1); base.setDate(+m[2]); return fmt(base); }
+  m = t.match(/(\d{1,2})\/(\d{1,2})/); if (m) { base.setDate(1); base.setMonth(+m[1] - 1); base.setDate(+m[2]); return fmt(base); }
   const wd = { 일: 0, 월: 1, 화: 2, 수: 3, 목: 4, 금: 5, 토: 6 };
   m = t.match(/([월화수목금토일])요일/);
   if (m) {
@@ -3144,7 +3277,8 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       const n = (ctx.pending || 0) + (ctx.pendingPay || 0) + (ctx.ready || 0);
       return `미발송건은 입금대기 ${ctx.pending}건, 결제완료 ${ctx.pendingPay}건, 발송준비 ${ctx.ready}건 포함해서 총 ${n}건이에요`;
     }
-    if (/배송중/.test(t)) return `배송중(발송완료)은 ${ctx.shipped}건이에요`;
+    if (/배송완료|도착완료|도착한/.test(t)) return `배송완료(도착확인)는 ${ctx.delivered != null ? ctx.delivered : 0}건이에요`;
+    if (/배송중/.test(t)) return `배송중(발송했고 아직 도착확인 전)은 ${ctx.inTransit != null ? ctx.inTransit : ctx.shipped}건이에요`;
     if (/입금대기/.test(t)) return `입금 대기는 ${ctx.pending}건이에요`;
     if (/결제완료/.test(t)) return `결제 완료는 ${ctx.pendingPay}건이에요`;
     if (/발송준비/.test(t)) return `발송 준비는 ${ctx.ready}건이에요`;
@@ -3285,7 +3419,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     // "주문"이 있고 조회/목록/화면/수정 요청이 아니면 주문 시작 (AI가 이름·상품 해석)
     // ★ v38: 수정·편집·삭제·묶음 요청은 새 주문이 아니라 '기존 주문 편집'이므로 여기서 제외
     if (/주문/.test(t)
-        && !/보여|알려|정보|조회|내역|현황|몇|건|어디|얼마|상태|목록|리스트|검색|취소|화면|열어|폼|입력창|수정|고쳐|고칠|고치|바꿔|바꾸|변경|편집|삭제|빼|묶음|박스/.test(t)) return true;
+        && !/보여|알려|정보|조회|내역|현황|몇|건|어디|얼마|상태|목록|리스트|검색|취소|화면|열어|불러|폼|입력창|수정|고쳐|고칠|고치|바꿔|바꾸|변경|편집|삭제|빼|묶음|박스|통계|매출|정산|합계/.test(t)) return true;
     // ★ v40: "저번처럼/지난번처럼"에 등록된 고객·업체 이름이 함께 있으면 주문 시작 (고객 기억 주문)
     if (/저번처럼|지난번처럼|늘하던|평소처럼|하던대로/.test(t) && findKnownNameIn(text, customers, vendors, products)) return true;
     return false;
@@ -3647,7 +3781,8 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       const negative = /^(아니|아니요|아니오|없어|없음|없습|안남|안할|안해|괜찮|스킵|넘어가|나중에|필요없|노|놉|됐어|됐습)/.test(tt);
       const looksCmd = (typeof detectVoiceOrderIntent === 'function' && detectVoiceOrderIntent(text))
         || (typeof detectNavIntent === 'function' && detectNavIntent(text))
-        || /(주문목록|목록보여|보여줘|열어|검색|조회|얼마|몇건|몇개|등록해|삭제|취소|수정|배송|도착)/.test(tt);
+        // ★ v76: 조회/명령으로 들리는 말은 메모로 저장하지 않고 정상 처리로 넘김
+        || /(주문목록|목록|보여|열어|검색|조회|알려|얼마|몇건|몇개|몇명|재고|가격|정산|명세서|송장|배송|도착|발송|입금|결제|뭐부터|언제|어디|전화|주소|고객|업체|상품|매출|합계|통계|등록|삭제|취소|수정|바꿔|변경)/.test(tt);
       if (negative) {
         const m = '네, 메모 없이 마칠게요.';
         setLastAI(m); pushExchange(text, m); processingRef.current = false; speakThenListen(m); return;
@@ -3678,15 +3813,27 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       }
     }
 
+    // ★ v76: 주문 흐름 중 예외가 나도 마이크가 영구히 잠기지 않도록 항상 잠금 해제 (deadlock 방지)
+    const safeOrderTurn = (tx) => {
+      try {
+        Promise.resolve(handleOrderTurn(tx)).catch((e) => {
+          orderModeRef.current = false; orderDraftRef.current = null; processingRef.current = false;
+          try { const m = '주문 처리 중 문제가 생겼어요. 다시 말씀해 주세요.'; setLastAI(m); pushExchange(tx, m); speakThenListen(m); } catch (_) {}
+        });
+      } catch (e) {
+        orderModeRef.current = false; orderDraftRef.current = null; processingRef.current = false;
+      }
+    };
+
     // ★ v14: 음성 주문 대화 — 진행 중이거나 시작 명령이면 주문 흐름으로 (AI 없이)
     if (orderModeRef.current) {
       clearInterval(countdownRef.current); setRetryCountdown(0);
-      handleOrderTurn(text); return;
+      safeOrderTurn(text); return;
     }
     if (detectVoiceOrderIntent(text)) {
       orderModeRef.current = true; orderDraftRef.current = { items: [] };
       clearInterval(countdownRef.current); setRetryCountdown(0);
-      handleOrderTurn(text); return;
+      safeOrderTurn(text); return;
     }
 
     // ★ v38: 기존 주문 편집(수정/삭제/묶음) 의도는 앱 명령으로 먼저 처리 → 조회로 새지 않게
@@ -3698,7 +3845,11 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         || /(빼|삭제|제외|없애|지워)/.test(tNS)
         || /(되돌려|되돌리|방금전으로|방금거취소|방금꺼취소|방금취소|방금주문취소|방금등록취소|마지막주문취소|마지막취소|실수했어|잘못했어)/.test(tNS)
         || /(도착확인|도착했|도착처리|배송완료처리|배송완료로|받은걸로|받았다고)/.test(tNS) || (/도착/.test(tNS) && /확인/.test(tNS))
-        || /(한박스|한상자|하나로묶|하나로합|자동묶음|따로따로|따로보내|개별발송|낱개로|묶음수정|박스수정|박스편집|묶음편집)/.test(tNS);
+        || /(한박스|한상자|하나로묶|하나로합|자동묶음|따로따로|따로보내|개별발송|낱개로|묶음수정|박스수정|박스편집|묶음편집)/.test(tNS)
+        // ★ v77: 송장번호 입력·상태변경·주문 통째 삭제도 앱 명령으로 처리
+        || /(송장번호|송장|운송장|택배번호|운송번호)/.test(tNS)
+        || (/(발송처리|발송완료|발송했|출고|보냈|결제완료|결제확인|입금확인|입금완료|입금됐|발송준비|준비완료)/.test(tNS) && !/도착/.test(tNS))
+        || /(주문삭제|주문취소|주문전체삭제|전체삭제|주문지워|주문없애|오더삭제|오더취소|주문전체취소)/.test(tNS);
       if (editIntent && onAppCommand && onAppCommand(text)) {
         clearInterval(countdownRef.current); setRetryCountdown(0);
         const msg = '네, 처리했어요.';
@@ -3946,6 +4097,8 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     const pendingPay  = ords.filter(o => o.status === 'pending').length;
     const readyCount  = ords.filter(o => o.status === 'ready').length;
     const shippedCount = ords.filter(o => o.status === 'shipped').length;
+    const inTransitCount = ords.filter(o => o.status === 'shipped' && !o.deliveryConfirmed).length;   // ★ v76: 진짜 배송중(도착확인 전)
+    const deliveredCount = ords.filter(o => o.status === 'shipped' && o.deliveryConfirmed).length;    // ★ v76: 배송완료(도착확인)
     const productNames = prods.map(p => p.name).join(', ') || '없음';
     // 최근 5개 고객
     const recentCustomers = custs.slice(-5).map(c => c.name).join(', ') || '없음';
@@ -3971,6 +4124,8 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       pendingPay:       pendingPay,
       ready:            readyCount,
       shipped:          shippedCount,
+      inTransit:        inTransitCount,
+      delivered:        deliveredCount,
       customers:        custs.length,
       tab: {home:'홈대시보드',orders:'주문목록',new:'새주문입력',
              customers:'고객관리',products:'상품관리',subscriptions:'정기배송',
@@ -4577,11 +4732,17 @@ function App() {
       if (prod) stored = prod.name.replace(new RegExp(WEIGHT_RE, "g"), "").replace(/\s/g, "");
     } catch (e) {}
     const from = String(word || "").replace(/\s/g, "");
-    if (from && stored && from !== stored && typeof learnAlias === "function") learnAlias(from, stored);
-    if (typeof clearWordFreq === "function") clearWordFreq(word);
-    setMemoryList((prev) => { const next = (prev || []).filter((e) => e.from !== from); next.unshift({ from, to: stored }); return next; });
+    if (from && stored && from !== stored && typeof learnAlias === "function") {
+      learnAlias(from, stored);
+      setMemoryList((prev) => { const next = (prev || []).filter((e) => e.from !== from); next.unshift({ from, to: stored }); return next; });
+      if (typeof clearWordFreq === "function") clearWordFreq(word);
+      fireToast(`"${word}" → "${c}" 배웠어요`);
+    } else {
+      // ★ v76: 고친 말이 원래 말과 같으면(=맞는 말) 무시 처리해서 다시 후보로 안 뜨게
+      if (typeof ignoreWord === "function") ignoreWord(word);
+      fireToast(`"${word}"은(는) 그대로 두고 목록에서 정리했어요`);
+    }
     refreshMemoryCands();
-    fireToast(`"${word}" → "${c}" 배웠어요`);
   }
   // ★ v73: 후보 낱말 무시(삭제) — 다시 세도 후보로 안 올라옴
   function ignoreCandidate(word) {
@@ -4605,11 +4766,11 @@ function App() {
         if (!t || t.role !== "user") return;                 // 학습은 '내가 말한 줄'의 낱말 변경에서만
         const edits = (typeof extractAliasEdits === "function") ? extractAliasEdits(t.orig, t.text) : [];
         edits.forEach(({ from, to }) => {
-          let stored = to.replace(/\s/g, "");
-          try {
-            const prod = (typeof fuzzyProductMatch === "function") ? fuzzyProductMatch(to, products, 0.6) : null;
-            if (prod) stored = prod.name.replace(new RegExp(WEIGHT_RE, "g"), "").replace(/\s/g, "");
-          } catch (e) {}
+          // ★ v76: 고친 낱말이 '등록 상품'과 연결될 때만 학습 (이름·엉뚱한 낱말 오학습 방지)
+          let prod = null;
+          try { prod = (typeof fuzzyProductMatch === "function") ? fuzzyProductMatch(to, products, 0.6) : null; } catch (e) {}
+          if (!prod) return;
+          const stored = prod.name.replace(new RegExp(WEIGHT_RE, "g"), "").replace(/\s/g, "");
           if (from && stored && from !== stored && typeof learnAlias === "function" && learnAlias(from, stored)) learned++;
         });
       });
@@ -5222,7 +5383,11 @@ function App() {
             }).catch(() => {});
           } catch (e) {}
         })
-        .catch(() => {});
+        .catch((err) => {
+          // ★ v76: 저장 실패를 조용히 삼키지 않고 사용자에게 알림 (용량 초과·네트워크 등 데이터 유실 방지)
+          try { logDiag("save_failed", { msg: String((err && err.message) || err).slice(0, 140) }); } catch (e) {}
+          try { fireToast("⚠️ 저장 실패 — 인터넷 연결이나 저장 용량을 확인하세요. 화면을 닫지 말고 잠시 후 자동 재시도됩니다."); } catch (e) {}
+        });
     } else if (hasSharedStorage) {
       sharedSet("store-data", data);
     } else {
@@ -5468,13 +5633,14 @@ function App() {
   // ★ v38: 말한 이름으로 기존 주문 1건 찾기 (발송완료 포함, 가장 최근 것 우선). 못 찾으면 null.
   // ★ v42: 실수 복구 — 주문을 바꾸기 직전 상태를 1단계 저장. 이후 "되돌려"로 복원.
   function recordUndo(label) {
-    lastUndoRef.current = { label: label || "방금 작업", orders: orders };
+    lastUndoRef.current = { label: label || "방금 작업", orders: orders, invoices: invoices };   // ★ v76: 명세서도 함께 스냅샷
   }
   function undoLast() {
     const u = lastUndoRef.current;
     if (!u || !Array.isArray(u.orders)) { fireToast("되돌릴 작업이 없어요"); return false; }
     justSubmittedRef.current = true;   // 되돌리기로 인한 개수 변화는 '새 주문 알림'에서 제외
     setOrders(u.orders);
+    if (Array.isArray(u.invoices)) setInvoices(u.invoices);   // ★ v76: 자동 생성된 명세서도 함께 되돌림(고아 명세서 방지)
     lastUndoRef.current = null;
     fireToast(`↩️ ${u.label}을(를) 되돌렸어요`);
     return true;
@@ -5633,9 +5799,41 @@ function App() {
       case "UNDO_LAST":
         undoLast();   // ★ v42: 직전 주문 변경(등록·수정·삭제)을 1단계 되돌림
         break;
+      case "SET_STATUS": {
+        // ★ v77: 음성으로 주문 상태 변경 (입금대기/결제완료/발송준비/발송완료)
+        const target = findOrderBySpokenName(command.name);
+        if (!target) { setTab("orders"); if (command.name) setSearchQuery(command.name); fireToast(`${command.name || ""} 주문을 못 찾았어요 — 목록에서 골라 주세요`); break; }
+        recordUndo("주문 상태 변경");
+        const ids = target.batchId ? orders.filter((o) => o.batchId === target.batchId).map((o) => o.id) : [target.id];
+        const idset = new Set(ids);
+        setOrders((prev) => prev.map((o) => (idset.has(o.id) ? { ...o, status: command.status } : o)));
+        const label = { waiting: "입금대기", pending: "결제완료", ready: "발송준비", shipped: "발송완료" }[command.status] || command.status;
+        setTab("orders"); setSearchQuery(orderRecipientName(target)); setStatusFilter("all");
+        fireToast(`✅ ${orderRecipientName(target)} 주문 ${ids.length}건을 '${label}'로 바꿨어요`);
+        break;
+      }
+      case "SET_INVOICE_NO": {
+        // ★ v77: 음성으로 송장번호 입력 → 저장하고 발송완료 처리
+        const target = findOrderBySpokenName(command.name);
+        if (!target) { setTab("orders"); if (command.name) setSearchQuery(command.name); fireToast(`${command.name || ""} 주문을 못 찾았어요 — 목록에서 골라 주세요`); break; }
+        updateOrder(target.id, { invoiceNo: command.invoiceNo, status: "shipped" });   // updateOrder가 recordUndo 포함
+        setTab("orders"); setSearchQuery(orderRecipientName(target)); setStatusFilter("all");
+        fireToast(`📦 ${orderRecipientName(target)} 송장번호 ${command.invoiceNo} 저장하고 발송완료로 바꿨어요`);
+        break;
+      }
+      case "DELETE_ORDER": {
+        // ★ v77: 음성으로 주문 통째로 삭제 (확인 후)
+        const target = findOrderBySpokenName(command.name);
+        if (!target) { setTab("orders"); if (command.name) setSearchQuery(command.name); fireToast(`${command.name || ""} 주문을 못 찾았어요 — 목록에서 골라 주세요`); break; }
+        setTab("orders"); setSelectedOrderId(null); setSearchQuery(orderRecipientName(target));
+        askConfirm(`${orderRecipientName(target)} 주문을 삭제할까요?`, () => { deleteOrder(target.id); });
+        break;
+      }
       case "CONFIRM_DELIVERY": {
         // ★ v58: 음성 도착 확인 — 이름(+날짜)으로 발송완료 주문을 찾아 배송완료 처리
-        const dateISO = (typeof parseDate === "function") ? parseDate(command.raw || "", new Date()) : null;
+        // ★ v76: 도착확인은 '지난' 배송이므로 과거지향 날짜 파서(resolveQueryDate) 사용 — "월요일 도착확인"이 다음주로 새지 않게
+        const dateISO = (typeof resolveQueryDate === "function") ? resolveQueryDate(command.raw || "", new Date())
+          : ((typeof parseDate === "function") ? parseDate(command.raw || "", new Date()) : null);
         const { name, matches } = findDeliveryToConfirm(command.raw || "", orders, customers, vendors, dateISO);
         if (!name) { fireToast("누구 도착 확인인지 이름을 함께 말씀해 주세요 (예: 대솔본점 7월 2일 도착 확인)"); break; }
         if (!matches.length) {
@@ -5866,7 +6064,9 @@ function App() {
   // 배송확인 목록에서 체크한 항목들을 한 번에 "도착 확인함" 처리
   function confirmDeliveries(ids) {
     recordUndo("방금 도착 확인");   // ★ v58: "되돌려"로 도착확인 취소 가능
-    const stampIso = new Date().toISOString();
+    // ★ v76: 현지(KST) 기준 날짜·시각으로 저장 — UTC(toISOString)를 쓰면 새벽 확인이 하루 어긋남
+    const _now = new Date(); const _p = (n) => String(n).padStart(2, "0");
+    const stampIso = `${todayStr()}T${_p(_now.getHours())}:${_p(_now.getMinutes())}`;
     setOrders((prev) => prev.map((o) => (ids.includes(o.id) ? { ...o, deliveryConfirmed: true, deliveryConfirmedAt: stampIso } : o)));
   }
 
@@ -5910,7 +6110,7 @@ function App() {
   function orderTotal(order) {
     return (order.items || []).reduce((sum, it) => {
       const p = productMap[it.productId];
-      const price = p ? p.price : (it.price || 0);
+      const price = effectiveItemPrice(it, p, order && order.isBusiness);   // ★ v76: 업체는 도매가로 합계
       return sum + price * (it.qty || 0);
     }, 0);
   }
@@ -6461,9 +6661,9 @@ function App() {
       const p = productMap[it.productId];
       return {
         name: p ? p.name : (it.name || "상품"),
-        unit: p ? (p.unit || "kg") : "kg",
+        unit: p ? (p.unit || "kg") : (it.unit || "kg"),   // ★ v76: 규격 보존
         qty: it.qty,
-        price: it.price || (p ? (p.wholesalePrice || p.price) : 0),
+        price: effectiveItemPrice(it, p, true),   // ★ v76: 업체 명세서는 도매가 기준(저장 단가 우선)
       };
     });
     return {
@@ -6516,12 +6716,43 @@ function App() {
     return merged;
   }
 
-  // ★ v75: 기존 업체(거래처) 주문 중 거래명세서가 없는 것을 한 번에 만들어줌 (예전 음성 주문 소급 생성)
+  // ★ v76: 업체주문 명세서 생성 공통 — 해당 (업체+받는분+날짜) 그룹의 '모든' 주문(기존+새)으로
+  //  다시 계산해 명세서를 갱신. 같은 그룹 주문이 여러 번 들어와도 누락·중복 없이 정확한 합계가 됨.
+  //  opts.onlyMissing=true면 이미 명세서가 있는 그룹은 건드리지 않음(사용자 수정·메모 보존).
+  const invGroupKey = (o) => `${o.vendorId || ""}|${(o.recipient && o.recipient.name) || ""}|${o.orderDate || ""}`;
+  function regenGroupInvoices(bizOrders, opts) {
+    const only = opts && opts.onlyMissing;
+    const keys = new Set((bizOrders || []).filter((o) => o && o.vendorId).map(invGroupKey));
+    if (only) {
+      // ★ v78: 이미 명세서가 있으면(자동 groupKey든, 직접작성·업로드든) 그 그룹은 건너뜀 — 중복 생성 방지.
+      //  직접작성/업로드 명세서엔 groupKey가 없으므로 업체(id 또는 이름)+날짜로도 판단.
+      const vName = (vid) => { const v = (vendors || []).find((x) => x.id === vid); return v ? invNormNS(v.name) : ""; };
+      const have = new Set();
+      (invoices || []).forEach((inv) => {
+        if (inv.groupKey) have.add("gk:" + inv.groupKey);
+        const vk = inv.vendorId ? "v:" + inv.vendorId : "n:" + invNormNS(inv.vendorName);
+        if (inv.date) have.add(vk + "|" + inv.date);
+      });
+      Array.from(keys).forEach((k) => {
+        const parts = k.split("|"); const vid = parts[0]; const date = parts[2];
+        const present = have.has("gk:" + k) || have.has("v:" + vid + "|" + date) || (vName(vid) && have.has("n:" + vName(vid) + "|" + date));
+        if (present) keys.delete(k);
+      });
+    }
+    if (!keys.size) return [];
+    const seen = new Set();
+    const union = [...(bizOrders || []), ...(orders || []).filter((o) => o && o.vendorId)]
+      .filter((o) => { if (!o || seen.has(o.id)) return false; seen.add(o.id); return true; })
+      .filter((o) => keys.has(invGroupKey(o)));
+    return saveInvoicesGrouped(union);
+  }
+
+  // ★ v75: 기존 업체(거래처) 주문 중 거래명세서가 '없는' 것만 한 번에 만들어줌 (예전 음성 주문 소급 생성, 기존 명세서·수정은 보존)
   function backfillVendorInvoices() {
     const biz = (orders || []).filter((o) => o && o.vendorId);
     if (!biz.length) { fireToast("업체(거래처) 주문이 없어요"); return; }
-    saveInvoicesGrouped(biz);   // 같은 그룹키는 교체되므로 여러 번 눌러도 중복 안 생김
-    fireToast(`업체 주문 ${biz.length}건의 거래명세서를 정리했어요`);
+    const made = regenGroupInvoices(biz, { onlyMissing: true });
+    fireToast(made.length ? `빠졌던 거래명세서 ${made.length}건을 만들었어요` : "이미 모든 업체주문 명세서가 있어요");
   }
 
   // 업체 하나를 골라 기간(예: 6월 1일~6월 30일)을 정하면, 그 기간 동안의 거래명세서를
@@ -6531,8 +6762,11 @@ function App() {
     if (!startDate || !endDate) { fireToast("기간(시작일·종료일)을 선택해주세요"); return; }
     const vendor = vendors.find((v) => v.id === vendorId);
     const vName = vendor ? vendor.name : "거래처";
+    // ★ v78: 같은 groupKey(업체+받는분+날짜) 명세서가 둘 이상이면 최신 1장만 — 중복 합산(이중 정산) 방지
+    const _seenGK = new Set();
     const list = invoices
       .filter((inv) => invoiceVendorMatch(inv, vendor) && inv.date && inv.date >= startDate && inv.date <= endDate)
+      .filter((inv) => { if (!inv.groupKey) return true; if (_seenGK.has(inv.groupKey)) return false; _seenGK.add(inv.groupKey); return true; })
       .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
     if (list.length === 0) {
       fireToast(`${startDate} ~ ${endDate} 기간에 ${vName}의 거래명세서가 없어요`);
@@ -6672,7 +6906,7 @@ function App() {
       orderDate: inv.date,
       recipient: { name: inv.vendorName },
       sender: { name: inv.vendorName },
-      items: inv.items.map((it) => ({ productId: null, name: it.name, qty: it.qty, price: it.price, unit: it.unit })),
+      items: (inv.items || []).map((it) => ({ productId: null, name: it.name, qty: it.qty, price: it.price, unit: it.unit })),
     };
     generateInvoiceSheet(pseudoOrder);
   }
@@ -6785,21 +7019,25 @@ function App() {
     // 헤더 줄 전체 스타일
     for (let c = 0; c <= 32; c++) styleCell(HEAD, c, { bold: true, fill: "EAF1FB", sz: 9 });
 
-    // ===== 품목 행 (행 11~34, 최대 24개) =====
-    let total = 0;
+    // ===== 품목 행 (행 11~34, 화면 최대 24행) =====
+    // ★ v76: 합계는 24행 표시 제한과 무관하게 '모든' 품목을 합산 (품목이 25개 이상이어도 금액 정확)
+    let total = (order.items || []).reduce((s, it2) => { const p2 = productMap[it2.productId]; return s + effectiveItemPrice(it2, p2, order.isBusiness) * (Number(it2.qty) || 0); }, 0);
     const maxRows = 24;
+    // ★ v78: 품목이 24개를 넘으면 마지막 줄에 "외 N개 품목"으로 나머지를 합산 표시 → 보이는 줄 합이 총액과 일치(불일치 방지)
+    const allItems = order.items || [];
+    const overflow = allItems.length > maxRows;
+    const shown = overflow ? maxRows - 1 : Math.min(allItems.length, maxRows);
     for (let i = 0; i < maxRows; i++) {
       const r = HEAD + 1 + i;
-      const it = order.items[i];
       // 모든 칸 테두리
       for (let c = 0; c <= 32; c++) styleCell(r, c, { sz: 9 });
-      if (it) {
+      if (i < shown) {
+        const it = allItems[i];
         const p = productMap[it.productId];
         const nm = p ? p.name : (it.name || "상품");
-        const unit = p ? (p.unit || "kg") : (it.unit || "kg");   // ★ v74: 저장된 규격 반영(개·박스 등)
-        const price = p ? (p.wholesalePrice || p.price) : (it.price || 0);
-        const amount = price * it.qty;
-        total += amount;
+        const unit = p ? (p.unit || "kg") : (it.unit || "kg");   // ★ v74: 규격 반영
+        const price = effectiveItemPrice(it, p, order.isBusiness);   // ★ v76: 저장 단가 우선
+        const amount = price * (Number(it.qty) || 0);
         if (i === 0) { set(r, 0, Number(mm)); styleCell(r, 0, { sz: 9 }); set(r, 1, Number(dd)); styleCell(r, 1, { sz: 9 }); }
         set(r, 2, i + 1); styleCell(r, 2, { sz: 9 });
         set(r, 3, nm); styleCell(r, 3, { sz: 9, align: "center" });
@@ -6807,6 +7045,13 @@ function App() {
         set(r, 14, it.qty); styleCell(r, 14, { sz: 9, num: true });
         set(r, 16, price); styleCell(r, 16, { sz: 9, num: true, align: "right" });
         set(r, 21, amount); styleCell(r, 21, { sz: 9, num: true, align: "right" });
+      } else if (overflow && i === maxRows - 1) {
+        // 나머지 품목 롤업
+        const rest = allItems.slice(shown);
+        const restAmt = rest.reduce((s, it2) => { const p2 = productMap[it2.productId]; return s + effectiveItemPrice(it2, p2, order.isBusiness) * (Number(it2.qty) || 0); }, 0);
+        set(r, 2, i + 1); styleCell(r, 2, { sz: 9 });
+        set(r, 3, `외 ${rest.length}개 품목`); styleCell(r, 3, { sz: 9, align: "center" });
+        set(r, 21, restAmt); styleCell(r, 21, { sz: 9, num: true, align: "right" });
       }
     }
 
@@ -7111,6 +7356,7 @@ function App() {
       const sameDay = prev.filter((o) => o && o.status !== "shipped"
         && orderRecipientName(o).replace(/\s/g, "") === nmNS && nmNS
         && (o.orderDate === today)
+        && ((o.vendorId || "") === (vo.vendorId || ""))   // ★ v76/78: 업체 유형·같은 업체일 때만 병합(다른 업체·일반↔업체 섞임 방지)
         && (!addrNS || !(o.recipient && o.recipient.address) || String(o.recipient.address).replace(/\s/g, "") === addrNS));
       if (sameDay.length && total === 1 && !plan && !(vo.boxList && vo.boxList.length)) {
         // 하나로 병합 (별개 주문으로 쪼개지 않음)
@@ -7125,7 +7371,7 @@ function App() {
             if (idx >= 0) items[idx].qty = (Number(items[idx].qty) || 0) + ni.qty;   // 수량 합산
             else items.push({ ...ni });                                             // 새 품목 병합
           }
-          return { ...o, items };
+          return { ...o, items, manualBoxes: null };   // ★ v76: 품목이 바뀌었으니 수동 박스 해제 → 자동 재분할(추가품목 누락 방지)
         });
       }
       if (sameDay.length) {
@@ -7144,13 +7390,7 @@ function App() {
     //  같은 (업체+받는분+날짜) 그룹의 기존 업체주문 + 새 주문을 합쳐 명세서 1장으로 갱신(누락·누적 정확).
     try {
       const bizNew = newOrders.filter((o) => o.vendorId);
-      if (bizNew.length) {
-        const today2 = todayStr();
-        const gkey = (o) => `${o.vendorId}|${(o.recipient && o.recipient.name) || ""}|${o.orderDate || today2}`;
-        const keys = new Set(bizNew.map(gkey));
-        const sameGroup = (orders || []).filter((o) => o && o.vendorId && keys.has(gkey(o)));
-        saveInvoicesGrouped([...sameGroup, ...bizNew]);
-      }
+      if (bizNew.length) regenGroupInvoices(bizNew);   // ★ v76: 공통 로직으로 정확히 갱신
     } catch (e) {}
     return newOrders;
   }
@@ -7262,9 +7502,9 @@ function App() {
     const boxCount = newOrders.length;
     const bizOrders = newOrders.filter((o) => o.isBusiness);
     if (bizOrders.length > 0) {
-      // 박스로 쪼개진 업체 주문을 (업체+받는분)별로 합쳐 거래명세서 1장 생성
-      const merged = saveInvoicesGrouped(bizOrders);
-      try { generateInvoiceSheet(merged[0]); } catch (e) {}
+      // 박스로 쪼개진 업체 주문을 (업체+받는분)별로 합쳐 거래명세서 1장 생성 (기존 같은날 주문도 합산 — v76)
+      const merged = regenGroupInvoices(bizOrders);
+      try { if (merged && merged[0]) generateInvoiceSheet(merged[0]); } catch (e) {}
       fireToast(`업체 주문 등록(박스 ${boxCount}개) + 거래명세서를 생성했습니다`);
       setTab("vendorhub");
     } else {
@@ -7604,7 +7844,7 @@ function App() {
       // 엑셀에 업체 주문이 섞여 있으면, 새 주문 입력할 때와 똑같이 거래명세서를 자동 생성함
       // (박스로 여러 줄 나뉜 업체 주문은 업체+받는분별로 하나로 합쳐서 명세서 1장씩 생성)
       const bizOrders = newOrders.filter((o) => o.isBusiness);
-      if (bizOrders.length > 0) saveInvoicesGrouped(bizOrders);
+      if (bizOrders.length > 0) regenGroupInvoices(bizOrders);   // ★ v76: 같은 그룹 기존 주문도 합산
       fireToast(`엑셀에서 주문 ${newOrders.length}건을 등록했습니다${newVendors.length ? ` (신규 업체 ${newVendors.length}곳 자동 등록)` : ""}${bizOrders.length ? ` · 업체 거래명세서 자동 생성` : ""}`);
       const allAmbiguous = [...ambiguousVendors, ...ambiguousCustomers];
       if (allAmbiguous.length > 0) setAmbiguousReview(allAmbiguous);
@@ -8275,8 +8515,8 @@ function App() {
               onExportVendorChecked={() => {
                 const targets = orders.filter((o) => checkedIds.has(o.id) && o.isBusiness);
                 if (targets.length === 0) { fireToast("거래명세서를 만들 업체 주문을 체크해주세요"); return; }
-                const merged = saveInvoicesGrouped(targets);
-                merged.forEach((o) => { try { generateInvoiceSheet(o); } catch (e) {} });
+                const merged = regenGroupInvoices(targets);   // ★ v78: 같은 그룹 다른 주문도 합산(부분선택 저평가 방지)
+                (merged || []).forEach((o) => { try { generateInvoiceSheet(o); } catch (e) {} });
                 fireToast(`업체 주문 ${targets.length}건의 거래명세서를 생성·저장했습니다`);
               }}
               onPickCustomerForOrder={(c) => {
@@ -13053,7 +13293,7 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
             {(order.items || []).map((it, idx) => {
               const p = productMap[it.productId];
               const dispName = p ? p.name : (it.name || "상품");
-              const dispPrice = p ? p.price : (it.price || 0);
+              const dispPrice = effectiveItemPrice(it, p, order && order.isBusiness);   // ★ v76: 업체는 도매가
               const key = it.productId || it.name;
               return (
                 <div key={idx} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, marginBottom: 8, gap: 8 }}>
