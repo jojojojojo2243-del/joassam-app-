@@ -7,43 +7,24 @@
   "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
   "orientation": "portrait",
   "background_color": "#EDEEE8",
   "theme_color": "#2F6F4E",
-  "description": "신선한 농산물 주문을 간편하게 관리하는 앱",
+  "categories": ["business", "productivity"],
+  "description": "신선한 농산물 주문을 간편하게 관리하는 AI 주문관리 앱 (조비서 AI OS)",
   "icons": [
-    {
-      "src": "icon-192.png",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "icon-192.png",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "maskable"
-    },
-    {
-      "src": "icon-512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "icon-512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "maskable"
-    }
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "새 주문", "short_name": "주문", "url": "./index.html?tab=new", "icons": [{ "src": "icon-192.png", "sizes": "192x192" }] },
+    { "name": "오늘 할일", "short_name": "할일", "url": "./index.html?tab=home", "icons": [{ "src": "icon-192.png", "sizes": "192x192" }] }
   ],
   "share_target": {
     "action": "./index.html",
     "method": "GET",
-    "params": {
-      "title": "title",
-      "text": "text",
-      "url": "url"
-    }
+    "params": { "title": "title", "text": "text", "url": "url" }
   }
 }

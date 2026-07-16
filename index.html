@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 88;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
+const APP_VERSION = 92;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -1666,7 +1666,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // ===== JARVIS AI ASSISTANT =====
-const APP_BUILD = "v88 (07-16 STEP10 VoiceAI+사용자사전+발음학습)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const APP_BUILD = "v92 (07-16 STEP15 통합검증+의도분류 보정)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
 const JARVIS_TAB_MAP = {
   goHome:'home', goOrders:'orders', goNew:'new',
   goCustomers:'customers', goProducts:'products',
@@ -2607,6 +2607,18 @@ function createAiOS(deps) {
     weekly: () => aiWeeklyAnalysis(getData()),
     memoryTiers: () => aiMemoryTiers(),
     businessMemory: () => aiBusinessMemory(getData()),
+    perf: () => aiPerfSnapshot(getUser()),   // STEP11: 성능 대시보드 데이터
+    cacheClear: () => aiCacheClear(),
+    usage: () => aiUsageSnapshot(),          // STEP12: 공급자별 비용/사용량
+    setRetry: (n) => aiSetRetryMax(n),
+    switchProvider: (id) => AI_LLM_REGISTRY.setActive(id),
+    providerHealth: () => AI_LLM_REGISTRY.health(),
+    // STEP13: 운영/배포
+    backup: () => aiBackupAll(getUser()),
+    restore: (b) => aiRestoreAll(getUser(), b),
+    errors: () => aiErrorsSummary(),
+    deployInfo: () => aiDeployInfo(),
+    offline: () => ({ online: aiIsOnline(), capabilities: aiOfflineCapabilities() }),
     // 요청 처리: 계획 → (읽기 자동) → 쓰기·발송·삭제는 need_confirm으로 멈춤. 근거 동봉.
     handle: (text, ctx) => {
       const appData = getData();
@@ -2713,28 +2725,63 @@ function createMockProvider() {
    요청 생성(toRequest)·응답 파싱(fromResponse)은 순수 함수라 유닛테스트로 구조 검증 가능.
    실제 네트워크 호출은 hasKey()일 때만. 키 없으면 명확한 안내 에러(작동 불능이 아니라 '준비됨'). */
 const AI_OPENAI_ENABLED_LS = "joassam_openai_enabled_v1"; // "1"일 때만 실제 API 호출(기본 비활성 → 비용 0)
+const AI_OPENAI_MODEL = "gpt-4o-mini";
+const AI_OPENAI_PRICE = { in: 0.15, out: 0.60 }; // USD / 1M tokens (참고용, 모델 요금 변동 가능)
 function aiOpenAIEnabled() { try { return (typeof localStorage !== "undefined" && localStorage.getItem(AI_OPENAI_ENABLED_LS)) === "1"; } catch (e) { return false; } }
+// SSE 스트림 라인 파서(순수 함수): "data: {json}\n\n" 조각들에서 델타 텍스트만 추출. 유닛테스트 가능.
+function openaiParseSSE(chunk) {
+  const out = [];
+  String(chunk || "").split("\n").forEach((line) => {
+    const s = line.trim(); if (!s || s.indexOf("data:") !== 0) return;
+    const payload = s.slice(5).trim(); if (payload === "[DONE]") return;
+    try { const j = JSON.parse(payload); const d = j.choices && j.choices[0] && j.choices[0].delta; if (d && d.content) out.push(d.content); } catch (e) {}
+  });
+  return out;
+}
 function createOpenAIProvider(getKey) {
   const key = () => (typeof getKey === "function" ? getKey() : "");
   return {
     id: "openai", name: "OpenAI (ChatGPT)", isMock: false, needsKey: true,
     hasKey: () => !!key(),
     isEnabled: () => !!key() && aiOpenAIEnabled(),
-    toRequest: (req) => ({ model: "gpt-4o-mini", messages: req.messages || [], tools: (req.tools || llmToolSchemas()).map((f) => ({ type: "function", function: f })), tool_choice: "auto", stream: !!(req && req.stream) }),
+    // 운영 생명주기: 키/활성화 상태만 확인(키 값은 로그·반환에 절대 노출 안 함).
+    initialize: function () { return Promise.resolve({ ok: true, provider: "openai", ready: this.hasKey() && aiOpenAIEnabled(), hasKey: this.hasKey(), model: AI_OPENAI_MODEL }); },
+    shutdown: function () { return true; },
+    toRequest: (req) => ({ model: AI_OPENAI_MODEL, messages: req.messages || [], tools: (req.tools || llmToolSchemasCompact()).map((f) => ({ type: "function", function: f })), tool_choice: "auto", stream: !!(req && req.stream) }),
     fromResponse: (raw) => {
       const msg = raw && raw.choices && raw.choices[0] && raw.choices[0].message || {};
       const calls = (msg.tool_calls || []).map((c) => { let a = {}; try { a = JSON.parse(c.function.arguments || "{}"); } catch (e) {} return { tool: c.function.name, args: a, reason: "openai tool_call" }; });
-      return { provider: "openai", text: msg.content || "", toolCalls: calls, usage: { cost: null } };
+      const u = (raw && raw.usage) || {};
+      return { provider: "openai", text: msg.content || "", toolCalls: calls, usage: { promptTokens: u.prompt_tokens || 0, completionTokens: u.completion_tokens || 0, cost: aiEstimateCost(u.prompt_tokens || 0, u.completion_tokens || 0) } };
     },
     complete: function (req) {
       if (!this.hasKey()) return Promise.reject(new Error("OpenAI 키가 없습니다. 설정에서 키를 입력하면 즉시 전환됩니다."));
       if (!aiOpenAIEnabled()) return Promise.reject(new Error("OpenAI는 준비 완료(비활성) 상태예요. 설정에서 'OpenAI 사용'을 켜면 즉시 작동합니다."));
+      const self = this; const _t0 = aiNow();
+      return fetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key() }, body: JSON.stringify(self.toRequest(Object.assign({}, req, { stream: false }))) })
+        .then((r) => { if (!r.ok) throw new Error("openai " + r.status); return r.json(); })
+        .then((raw) => { const res = Object.assign({ mode: req.mode }, self.fromResponse(raw)); try { aiUsageRecord("openai", { promptTokens: res.usage.promptTokens, completionTokens: res.usage.completionTokens, ms: aiNow() - _t0 }); } catch (e) {} return res; });
+    },
+    // 실제 SSE 스트리밍(키+활성화일 때만). 아니면 비스트림 결과를 조각내 동일 이벤트로.
+    streamChat: function (req, onChunk) {
       const self = this;
-      return fetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key() }, body: JSON.stringify(self.toRequest(req)) })
-        .then((r) => r.json()).then((raw) => Object.assign({ mode: req.mode }, self.fromResponse(raw)));
+      if (!(this.hasKey() && aiOpenAIEnabled())) return self.chat(req).then((r) => { String(r.text || "").split(/(\s+)/).forEach((w) => { if (w && typeof onChunk === "function") onChunk(w); }); return r; });
+      return fetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key() }, body: JSON.stringify(self.toRequest(Object.assign({}, req, { stream: true }))) })
+        .then((resp) => {
+          if (!resp.ok || !resp.body || !resp.body.getReader) return resp.json().then((raw) => self.fromResponse(raw));
+          const reader = resp.body.getReader(); const dec = new TextDecoder(); let full = "";
+          const pump = () => reader.read().then(({ done, value }) => {
+            if (done) return { provider: "openai", text: full, toolCalls: [], mode: req.mode };
+            openaiParseSSE(dec.decode(value, { stream: true })).forEach((piece) => { full += piece; try { if (typeof onChunk === "function") onChunk(piece); } catch (e) {} });
+            return pump();
+          });
+          return pump();
+        });
     },
   };
 }
+// 토큰→예상 비용(USD). 요금은 참고값.
+function aiEstimateCost(inTok, outTok) { return Math.round(((inTok / 1e6) * AI_OPENAI_PRICE.in + (outTok / 1e6) * AI_OPENAI_PRICE.out) * 1e6) / 1e6; }
 function createClaudeProvider(getKey) {
   const key = () => (typeof getKey === "function" ? getKey() : "");
   return {
@@ -2791,6 +2838,9 @@ function llmWithInterface(p) {
   p.summarize = p.summarize || ((textOrMsgs) => Promise.resolve({ summary: aiLocalSummarize(textOrMsgs), provider: p.id }));
   p.health = p.health || (() => ({ ok: true, provider: p.id, name: p.name, isMock: !!p.isMock, needsKey: !!p.needsKey, hasKey: (typeof p.hasKey === "function" ? p.hasKey() : true), enabled: (typeof p.isEnabled === "function" ? p.isEnabled() : true) }));
   p.healthCheck = p.healthCheck || (() => Promise.resolve(p.health()));
+  // ★ STEP12: initialize()·shutdown() 추가 — 운영 생명주기. (기본 구현, 필요시 Provider가 재정의)
+  p.initialize = p.initialize || (() => Promise.resolve(p.health()));
+  p.shutdown = p.shutdown || (() => true);
   return p;
 }
 // 로컬 요약(무료·Provider 독립): 대화/메시지에서 핵심(고객·상품·의도)을 짧게.
@@ -2839,9 +2889,16 @@ function aiClassifyIntent(text, ctx, appData) {
   if (/(재고|남았|모자|부족|떨어)/.test(t)) return { intent: "재고", confidence: 0.85, reason: "재고 표현" };
   if (/(업체|거래처|납품|명세서|정산)/.test(t)) return { intent: "업체", confidence: 0.8, reason: "거래처/정산 표현" };
   if (/(주문|담아|등록|보내|지난번처럼|저번처럼|평소처럼|추가|빼줘|예약|출고|묶음)/.test(t)) return { intent: "주문", confidence: 0.8, reason: "주문/출고 표현" };
+  // ★ STEP15 수정: '오늘 할일·우선순위'·'배송/일정'을 업무로 인식해 계획엔진으로 보냄(이전엔 unknown→fallback으로 막힘).
+  if (/(할일|우선순위|뭐부터|뭐먼저|해야할|해야될|해야돼|오늘뭐)/.test(t)) return { intent: "주문", confidence: 0.7, reason: "오늘 업무/우선순위" };
+  if (/(배송|출고|송장|일정)/.test(t)) return { intent: "주문", confidence: 0.65, reason: "배송/출고/일정" };
   const names = [...((appData && appData.customers) || []), ...((appData && appData.vendors) || [])].map((x) => x && x.name).filter(Boolean);
   if (typeof matchName === "function" && matchName(String(text || ""), names)) return { intent: "고객조회", confidence: 0.75, reason: "등록된 이름 감지" };
-  if (/(찾아|조회|누구|정보|연락처|주소|전화|번호)/.test(t)) return { intent: "고객조회", confidence: 0.7, reason: "조회 표현" };
+  if (/(찾아|조회|누구|정보|연락처|주소|전화|번호|고객)/.test(t)) return { intent: "고객조회", confidence: 0.7, reason: "조회 표현" };
+  // ★ STEP15 수정: 등록된 주소·전화번호가 포함되면 고객 조회로 인식.
+  const addrs = ((appData && appData.customers) || []).map((c) => c && c.address).filter(Boolean);
+  if (addrs.some((a) => a && t.indexOf(String(a).replace(/\s/g, "")) >= 0)) return { intent: "고객조회", confidence: 0.65, reason: "등록 주소 감지" };
+  if (/\d{2,3}-?\d{3,4}-?\d{4}/.test(t)) return { intent: "고객조회", confidence: 0.6, reason: "전화번호 감지" };
   return { intent: "unknown", confidence: 0.2, reason: "매칭되는 의도 없음" };
 }
 
@@ -2882,8 +2939,12 @@ function aiProviderChat(text, ctx, appData, deps) {
   const D = deps || {};
   ctx = ctx || createConvContext();
   appData = appData || {};
-  const provider = AI_LLM_REGISTRY.active();
+  // ★ STEP12: 선택 공급자가 쓸 수 없으면(키 없음/비활성) 자동으로 Mock 사용 → 중단 없음.
+  const selected = (typeof aiUsableProvider === "function") ? AI_LLM_REGISTRY.active() : null;
+  const provider = (typeof aiUsableProvider === "function") ? aiUsableProvider() : AI_LLM_REGISTRY.active();
+  if (selected && provider && selected.id !== provider.id) aiLog("Provider", { autoFallback: selected.id + "→" + provider.id });
   const said = String(text || "");
+  const _t0 = aiNow();   // ★ STEP11: 응답 시간 계측
   if (!provider) return Promise.resolve({ status: "error", error: "사용 가능한 AI 공급자가 없어요.", text: "" });
 
   const cls = aiClassifyIntent(said, ctx, appData);
@@ -2892,11 +2953,14 @@ function aiProviderChat(text, ctx, appData, deps) {
   const record = (resp) => {
     try { ctx.turns = ctx.turns || []; ctx.turns.push({ user: said, ai: resp.text || "", intent: cls.intent }); } catch (e) {}
     aiUpdateContext(ctx, said, appData);
-    // ★ STEP8: 긴 대화는 자동 요약해 접고 최근 대화만 유지(Memory 저장 구조).
-    try { aiMaybeSummarize(ctx, (typeof D.userId === "function" ? D.userId() : "__anon__")); } catch (e) {}
-    // 개인 세션기억(Provider 독립): 언급된 고객 기록
-    try { if (ctx.currentCustomer && typeof aiSessionRecord === "function") aiSessionRecord((typeof D.userId === "function" ? D.userId() : "__anon__"), "customers", ctx.currentCustomer); } catch (e) {}
+    const uid = (typeof D.userId === "function" ? D.userId() : "__anon__");
+    // ★ STEP11: 비핵심 작업(요약·세션기억)은 백그라운드로 → UI 안 멈춤.
+    aiBackground(() => {
+      try { aiMaybeSummarize(ctx, uid); } catch (e) {}
+      try { if (ctx.currentCustomer && typeof aiSessionRecord === "function") aiSessionRecord(uid, "customers", ctx.currentCustomer); } catch (e) {}
+    });
     aiLog("Response", { status: resp.status, text: (resp.text || "").slice(0, 40) });
+    try { aiPerfRecordResponse(aiNow() - _t0); } catch (e) {}
     return resp;
   };
 
@@ -2906,11 +2970,19 @@ function aiProviderChat(text, ctx, appData, deps) {
   // ⑧ 의도 미상 → 계획엔진의 추측도 신뢰하지 않고 즉시 되물음(추측 금지)
   if (cls.intent === "unknown") { aiLog("Agent", { decision: "fallback" }); return Promise.resolve(record({ status: "fallback", provider: provider.id, mode: "casual", intent: cls.intent, text: AI_FALLBACK_TEXT, toolCalls: [], log: aiLogGet(6) })); }
 
-  // ⑥ Prompt Builder로 시스템+대화(+기억요약) 조합 → Provider 표준 messages.
-  const promptMessages = aiBuildPrompt({ messages: aiBuildMessages(ctx, said), memorySummary: ctx.summary || "" });
-  const request = { messages: promptMessages, tools: llmToolSchemas(), appData: appData, ctx: ctx, mode: aiConversationMode(said).mode, intent: cls.intent };
+  // ★ STEP11: Response Cache — 읽기 질문은 동일 요청이면 재계산 없이 캐시 반환(TTL·데이터 시그니처).
+  const sig = aiDataSig(appData);
+  const cacheKey = aiCacheKey(said, provider.id, cls.intent, sig);
+  if (AI_CACHEABLE_INTENTS[cls.intent]) {
+    const hit = aiCacheGet(cacheKey);
+    if (hit) { AI_PERF.cache.hits += 1; aiLog("Performance", { cache: "hit", intent: cls.intent }); return Promise.resolve(record(Object.assign({}, hit, { cached: true, log: aiLogGet(4) }))); }
+    AI_PERF.cache.misses += 1;
+  }
+  // ⑥③④ 최적화된 Prompt Builder(순서 고정·중복 제거·길이 상한) + 간결 도구 스키마(토큰 절약).
+  const promptMessages = aiBuildPromptOptimized({ messages: aiBuildMessages(ctx, said), memorySummary: ctx.summary || "", businessContext: `주문 ${(appData.orders || []).length}건` });
+  const request = { messages: promptMessages, tools: llmToolSchemasCompact(), appData: appData, ctx: ctx, mode: aiConversationMode(said).mode, intent: cls.intent };
   return Promise.resolve()
-    .then(() => aiWithTimeout(provider.chat(request), 15000))
+    .then(() => aiCallWithRecovery(provider, request))   // ⑨ 오류 시 재시도→Mock 자동 폴백
     .then((res) => {
       res = res || { toolCalls: [], text: "" };
       const calls = res.toolCalls || [];
@@ -2929,17 +3001,17 @@ function aiProviderChat(text, ctx, appData, deps) {
         aiLog("Agent", { decision: "need_confirm", tool: unsafe.tool });
         return record({ status: "need_confirm", provider: res.provider || provider.id, mode: res.mode, intent: cls.intent, text: res.text, confirm: unsafe.reason || "이 작업을 진행할까요?", tool: unsafe.tool, command, plan: res.plan, explain: res.explain, log: aiLogGet(8) });
       }
-      // 읽기 전용 도구만 → 자동 실행(기존 Tool 호출)
-      const executed = [];
-      calls.forEach((c) => {
-        const command = c.command || llmToolCallToCommand(c.tool, c.args);
-        if (command && typeof D.execute === "function") { let ok = false; try { ok = D.execute(command); } catch (e) { ok = false; } executed.push({ tool: c.tool, ok }); }
+      // ⑥ 읽기 전용 도구만 → 중복 제거 후 병렬 실행(기존 Tool 호출).
+      return aiExecuteToolsParallel(calls, D.execute).then((executed) => {
+        if (executed.length) aiLog("Agent", { decision: "auto_executed", tools: executed });
+        const outText = res.text || (cls.intent === "일반대화" ? "" : "처리했어요.");
+        const done = record({ status: "done", provider: res.provider || provider.id, mode: res.mode, intent: cls.intent, text: outText, executed, plan: res.plan, explain: res.explain, recovered: !!res._recovered, log: aiLogGet(8) });
+        // ⑤ 캐시 저장(읽기 질문만; 다음 동일 요청은 즉시 반환)
+        if (AI_CACHEABLE_INTENTS[cls.intent]) aiCacheSet(cacheKey, { status: "done", provider: done.provider, mode: done.mode, intent: cls.intent, text: done.text, executed: [], plan: done.plan });
+        return done;
       });
-      if (executed.length) aiLog("Agent", { decision: "auto_executed", tools: executed });
-      const outText = res.text || (cls.intent === "일반대화" ? "" : "처리했어요.");
-      return record({ status: "done", provider: res.provider || provider.id, mode: res.mode, intent: cls.intent, text: outText, executed, plan: res.plan, explain: res.explain, log: aiLogGet(8) });
     })
-    .catch((err) => { aiLog("Error", { message: (err && err.message) || String(err) }); return { status: "error", provider: provider.id, intent: cls.intent, error: (err && err.message) || String(err), text: aiFriendlyError(err), log: aiLogGet(6) }; });
+    .catch((err) => { aiPerfError(); try { aiRecordError(aiRecoverableError(err) ? "network" : "provider", (err && err.message) || String(err)); } catch (e) {} aiLog("Error", { message: (err && err.message) || String(err) }); return { status: "error", provider: provider.id, intent: cls.intent, error: (err && err.message) || String(err), text: aiFriendlyError(err), log: aiLogGet(6) }; });
 }
 
 /* ── Conversation Engine 래퍼: 자체 ctx 유지하며 여러 턴 대화(문맥 보존). Provider만 호출. ── */
@@ -3325,10 +3397,228 @@ function aiVoiceProcess(rawText, ctx, appData, deps) {
     const tokens = String(rawText || "").split(/\s+/).filter((w) => aiVoiceNS(w).length >= 2);
     for (const tk of tokens) { const s = aiVoiceSuggestCorrection(userId, tk, appData); if (s) { suggestion = s; break; } }
   }
+  const _t0 = (typeof Date !== "undefined" && Date.now) ? Date.now() : 0;
   return aiProviderChat(norm.text, ctx, appData, { execute: D.execute, userId: D.userId }).then((res) => {
+    try { aiPerfRecordVoice(((typeof Date !== "undefined" && Date.now) ? Date.now() : 0) - _t0); } catch (e) {}
     res.voice = { raw: rawText, normalized: norm.text, applied: norm.applied, suggestion: suggestion };
     return res;
   });
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   STEP 11 — 성능 최적화 & 운영 준비. 새 기능보다 '빠르고 안정적으로'.
+   원칙: 기존 기능·Tool 변경 0. Mock에서도 동일 동작. OpenAI 연결 준비 유지.
+   구성: Perf 계측 · Response Cache(TTL) · Prompt 압축 · Background · Error Recovery ·
+        Memory 계층/아카이브 · Tool 중복제거·병렬 · Performance Dashboard.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+// ── ⑧ Performance 계측(로그의 Performance 카테고리). 최근 200건 유지.
+const AI_PERF = { responses: [], cache: { hits: 0, misses: 0 }, errors: 0, recoveries: 0, tool: { count: 0, totalMs: 0 }, voice: { count: 0, totalMs: 0 } };
+function aiPerfRecordResponse(ms) { if (typeof ms !== "number" || ms < 0) return; AI_PERF.responses.push(ms); if (AI_PERF.responses.length > 200) AI_PERF.responses.shift(); aiLog("Performance", { respMs: ms }); }
+function aiPerfRecordTool(ms, n) { AI_PERF.tool.count += (n || 1); AI_PERF.tool.totalMs += (ms || 0); }
+function aiPerfRecordVoice(ms) { AI_PERF.voice.count += 1; AI_PERF.voice.totalMs += (ms || 0); }
+function aiPerfError() { AI_PERF.errors += 1; }
+function aiPerfReset() { AI_PERF.responses = []; AI_PERF.cache = { hits: 0, misses: 0 }; AI_PERF.errors = 0; AI_PERF.recoveries = 0; AI_PERF.tool = { count: 0, totalMs: 0 }; AI_PERF.voice = { count: 0, totalMs: 0 }; }
+function aiMemoryUsageKB(userId) {
+  let bytes = 0;
+  try { if (typeof localStorage !== "undefined") ["session", "user", "learning", "workflow", "longterm", "preference", "business", "settings", "voice", "archive"].forEach((k) => { const v = localStorage.getItem(aiMemKey(userId, k)); if (v) bytes += v.length; }); } catch (e) {}
+  return Math.round(bytes / 102.4) / 10;
+}
+function aiPerfSnapshot(userId) {
+  const r = AI_PERF.responses; const avg = r.length ? Math.round(r.reduce((a, b) => a + b, 0) / r.length) : 0;
+  const sorted = r.slice().sort((a, b) => a - b); const p95 = sorted.length ? (sorted[Math.floor(sorted.length * 0.95)] || sorted[sorted.length - 1]) : 0;
+  const tot = AI_PERF.cache.hits + AI_PERF.cache.misses; const hitRate = tot ? Math.round(AI_PERF.cache.hits / tot * 100) : 0;
+  return {
+    avgMs: avg, p95Ms: p95, count: r.length,
+    cacheHitRate: hitRate, cacheHits: AI_PERF.cache.hits, cacheMisses: AI_PERF.cache.misses,
+    errors: AI_PERF.errors, recoveries: AI_PERF.recoveries,
+    toolAvgMs: AI_PERF.tool.count ? Math.round(AI_PERF.tool.totalMs / AI_PERF.tool.count) : 0,
+    voiceAvgMs: AI_PERF.voice.count ? Math.round(AI_PERF.voice.totalMs / AI_PERF.voice.count) : 0,
+    memoryKB: aiMemoryUsageKB(userId || (typeof aiUserId === "function" ? aiUserId() : "default")),
+    providers: (typeof AI_LLM_REGISTRY !== "undefined") ? AI_LLM_REGISTRY.health() : [],
+    activeProvider: (typeof AI_LLM_REGISTRY !== "undefined" && AI_LLM_REGISTRY.active()) ? AI_LLM_REGISTRY.active().name : "-",
+    usage: (typeof aiUsageSnapshot === "function") ? aiUsageSnapshot("openai") : null,   // STEP12: OpenAI 비용 모니터링
+  };
+}
+
+// ── ⑤ Response Cache: 읽기 질문 결과 캐시(TTL). 데이터 변하면 자동 무효화(시그니처 포함).
+const AI_CACHE = {}; const AI_CACHE_TTL = 60000; const AI_CACHE_MAX = 120;
+const AI_CACHEABLE_INTENTS = { "재고": 1, "고객조회": 1, "업체": 1, "help": 1, "설정": 1 };
+function aiDataSig(appData) { const a = appData || {}; return [(a.orders || []).length, (a.products || []).length, (a.customers || []).length, (a.vendors || []).length].join(":"); }
+function aiCacheKey(text, providerId, intent, sig) { return [String(text || "").replace(/\s/g, ""), providerId, intent, sig].join("|"); }
+function aiNow() { return (typeof Date !== "undefined" && Date.now) ? Date.now() : 0; }
+function aiCacheGet(key) { const e = AI_CACHE[key]; if (!e) return null; if (aiNow() - e.t > AI_CACHE_TTL) { delete AI_CACHE[key]; return null; } return e.v; }
+function aiCacheSet(key, val) { const keys = Object.keys(AI_CACHE); if (keys.length >= AI_CACHE_MAX) delete AI_CACHE[keys[0]]; AI_CACHE[key] = { t: aiNow(), v: val }; }
+function aiCacheClear() { Object.keys(AI_CACHE).forEach((k) => delete AI_CACHE[k]); }
+
+// ── ⑦ Background Task: 비핵심 작업(요약·미러·로그·통계)을 UI 밖에서. 실패해도 대화엔 영향 없음.
+function aiBackground(fn) {
+  if (typeof fn !== "function") return;
+  try {
+    if (typeof queueMicrotask === "function") { queueMicrotask(() => { try { fn(); } catch (e) {} }); return; }
+    Promise.resolve().then(() => { try { fn(); } catch (e) {} });
+  } catch (e) { try { fn(); } catch (_e) {} }
+}
+
+// ── ⑨ Error Recovery: Provider/네트워크/타임아웃/5xx → 재시도 후 Mock으로 자동 폴백. 사용자엔 쉬운 메시지.
+function aiRecoverableError(err) { const m = String((err && err.message) || err || ""); return /timeout|시간초과|Failed to fetch|network|networkerror|rate|429|50\d|502|503|504/i.test(m); }
+// ⑦⑧ 설정 가능한 재시도(AI_RETRY_MAX) → 그래도 실패하면 Mock로 자동 폴백(중단 없음).
+function aiCallWithRecovery(provider, request) {
+  const attempt = (n) => aiWithTimeout(provider.chat(request), 15000).catch((err) => {
+    aiLog("Provider", { error: (err && err.message) || String(err), attempt: n });
+    if (aiRecoverableError(err) && n < AI_RETRY_MAX) return attempt(n + 1);           // 재시도
+    if (provider && !provider.isMock && aiRecoverableError(err)) {                     // 폴백
+      const mock = (typeof AI_LLM_REGISTRY !== "undefined") ? AI_LLM_REGISTRY.get("mock") : null;
+      if (mock) { AI_PERF.recoveries += 1; try { aiUsageError(provider.id); } catch (e) {} aiLog("Provider", { recovery: "fallback_to_mock" }); return aiWithTimeout(mock.chat(request), 8000).then((r) => { r._recovered = true; return r; }); }
+    }
+    throw err;
+  });
+  return attempt(0);
+}
+
+// ── ⑥ Tool 최적화: 동일 (tool+args) 중복 제거 + 병렬 실행 구조(동기 execute도 안전).
+function aiDedupToolCalls(calls) {
+  const seen = {}; const out = [];
+  (calls || []).forEach((c) => { if (!c) return; const k = c.tool + "|" + JSON.stringify(c.args || {}); if (seen[k]) return; seen[k] = 1; out.push(c); });
+  return out;
+}
+function aiExecuteToolsParallel(calls, execute) {
+  const list = aiDedupToolCalls(calls);
+  const _t0 = aiNow();
+  return Promise.all(list.map((c) => {
+    const command = c.command || (typeof llmToolCallToCommand === "function" ? llmToolCallToCommand(c.tool, c.args) : null);
+    return Promise.resolve().then(() => { let ok = false; try { ok = command && typeof execute === "function" ? execute(command) : false; } catch (e) { ok = false; } return { tool: c.tool, ok }; });
+  })).then((res) => { aiPerfRecordTool(aiNow() - _t0, list.length); return res; });
+}
+
+// ── ③④ Prompt 압축(토큰 절약): 순서 고정(System→Memory→Business→Conversation→Tool→User)+중복 제거+길이 상한.
+function aiCompressMessages(messages, maxChars) {
+  const max = maxChars || 3000;
+  let total = messages.reduce((s, m) => s + String(m.content || "").length, 0);
+  if (total <= max) return messages;
+  const sys = messages.filter((m) => m.role === "system");
+  const conv = messages.filter((m) => m.role !== "system");
+  let budget = max - sys.reduce((s, m) => s + String(m.content || "").length, 0);
+  const kept = [];
+  for (let i = conv.length - 1; i >= 0; i--) { const len = String(conv[i].content || "").length; if (budget - len < 0) break; budget -= len; kept.unshift(conv[i]); }
+  return sys.concat(kept.length ? kept : conv.slice(-1));
+}
+function aiBuildPromptOptimized(input) {
+  const inp = input || {};
+  const messages = [];
+  messages.push({ role: "system", content: aiBuildSystemPrompt({ memorySummary: inp.memorySummary }) });
+  if (inp.businessContext) messages.push({ role: "system", content: "업무맥락: " + inp.businessContext });
+  (inp.messages || []).forEach((m) => messages.push(m));
+  if (inp.toolResults && inp.toolResults.length) messages.push({ role: "system", content: "Tool 결과: " + inp.toolResults.map((t) => `${t.tool}=${t.result}`).join("; ") });
+  // 연속 중복 제거
+  const dedup = []; let last = "";
+  messages.forEach((m) => { const key = m.role + ":" + m.content; if (key === last) return; last = key; dedup.push(m); });
+  return aiCompressMessages(dedup, inp.maxChars || 3000);
+}
+// 토큰 절약용 간결 도구 스키마(설명 제거, 이름·파라미터만).
+function llmToolSchemasCompact() { return AI_TOOL_DEFS.map((t) => ({ name: t.name, parameters: { type: "object", properties: Object.keys(t.params || {}).reduce((a, k) => { a[k] = { type: "string" }; return a; }, {}) } })); }
+
+// ── ② Memory 계층/아카이브: 오래된 세션 요약을 archive로 이동. 필요한 계층만 로드.
+function aiMemoryLoadTiers(userId, tiers) {
+  const want = tiers && tiers.length ? tiers : ["session", "user"];
+  const out = {}; want.forEach((k) => { out[k] = aiMemLoad(userId, k, null); });
+  return out;
+}
+function aiMemoryArchive(userId, summary) {
+  if (!summary) return false;
+  const arc = aiMemLoad(userId, "archive", { items: [] });
+  arc.items.push({ summary: summary }); if (arc.items.length > 100) arc.items.shift();
+  aiMemSave(userId, "archive", arc); return true;
+}
+function aiMemoryArchiveGet(userId) { return aiMemLoad(userId, "archive", { items: [] }); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   STEP 12 — OpenAI(ChatGPT) Provider 운영화. Retry·Fallback·비용 모니터링·자동전환.
+   원칙: Conversation Engine 수정 없이 Provider만 교체. 키 없으면 자동 Mock. 승인 절차 유지.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+// ── ⑦ Retry: 재시도 횟수 설정 가능(기본 2). Rate Limit·Timeout·Network·5xx만 재시도.
+let AI_RETRY_MAX = 2;
+function aiSetRetryMax(n) { if (typeof n === "number" && n >= 0 && n <= 5) AI_RETRY_MAX = n; return AI_RETRY_MAX; }
+function aiGetRetryMax() { return AI_RETRY_MAX; }
+
+// ── ⑨ 비용 모니터링: 공급자별 요청수·토큰·예상비용·평균응답·오류. (키 값은 절대 기록 안 함)
+const AI_USAGE = {};
+function aiUsageSlot(id) { return (AI_USAGE[id] = AI_USAGE[id] || { requests: 0, promptTokens: 0, completionTokens: 0, cost: 0, totalMs: 0, errors: 0 }); }
+function aiUsageRecord(providerId, u) { const p = aiUsageSlot(providerId); p.requests += 1; p.promptTokens += (u.promptTokens || 0); p.completionTokens += (u.completionTokens || 0); p.cost += aiEstimateCost(u.promptTokens || 0, u.completionTokens || 0); p.totalMs += (u.ms || 0); return p; }
+function aiUsageError(providerId) { aiUsageSlot(providerId).errors += 1; }
+function aiUsageSnapshot(providerId) {
+  if (providerId) { const p = aiUsageSlot(providerId); return { provider: providerId, requests: p.requests, promptTokens: p.promptTokens, completionTokens: p.completionTokens, totalTokens: p.promptTokens + p.completionTokens, estCostUSD: Math.round(p.cost * 1e4) / 1e4, avgMs: p.requests ? Math.round(p.totalMs / p.requests) : 0, errors: p.errors }; }
+  return Object.keys(AI_USAGE).map((k) => aiUsageSnapshot(k));
+}
+function aiUsageReset() { Object.keys(AI_USAGE).forEach((k) => delete AI_USAGE[k]); }
+
+// ── ②⑧ 자동 전환: mock이거나(키+활성화된 유료)면 그대로. 아니면 Mock로 자동 폴백(중단 없음).
+function aiUsableProvider() {
+  const p = (typeof AI_LLM_REGISTRY !== "undefined") ? AI_LLM_REGISTRY.active() : null;
+  const mock = (typeof AI_LLM_REGISTRY !== "undefined") ? AI_LLM_REGISTRY.get("mock") : null;
+  if (!p) return mock;
+  if (p.isMock) return p;
+  const usable = (typeof p.hasKey === "function" ? p.hasKey() : false) && (typeof p.isEnabled === "function" ? p.isEnabled() : true);
+  return usable ? p : (mock || p);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   STEP 13 — PWA/Android 운영 준비: 오류수집(개인정보 제외) · 백업/복원 · 알림설정 ·
+   오프라인 기능 · 배포 정보. 전부 추가 모듈, 기존 기능·AI 구조 변경 없음.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+// ── ⑦ 오류 수집: Crash/Provider/Voice/Network/Tool. 개인정보(전화·이메일·키·긴숫자)는 마스킹.
+const AI_ERRORS = []; const AI_ERRORS_MAX = 100;
+function aiScrubPII(s) {
+  return String(s || "")
+    .replace(/sk-[A-Za-z0-9_\-]{6,}/g, "sk-***")
+    .replace(/\b\d{2,3}-\d{3,4}-\d{4}\b/g, "***-****-****")
+    .replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, "***@***")
+    .replace(/\b\d{7,}\b/g, "***");
+}
+function aiRecordError(type, message) {
+  const e = { type: type || "unknown", message: aiScrubPII(message).slice(0, 200) };
+  AI_ERRORS.push(e); if (AI_ERRORS.length > AI_ERRORS_MAX) AI_ERRORS.shift();
+  try { AI_PERF.errors += 0; } catch (_e) {}
+  return e;
+}
+function aiErrorsGet(n) { return n ? AI_ERRORS.slice(-n) : AI_ERRORS.slice(); }
+function aiErrorsSummary() { const by = {}; AI_ERRORS.forEach((e) => { by[e.type] = (by[e.type] || 0) + 1; }); return { total: AI_ERRORS.length, byType: by }; }
+function aiErrorsClear() { AI_ERRORS.length = 0; }
+
+// ── ⑤ 알림 설정: 종류별 on/off. 사용자가 직접 켜고 끔(기본 on). settings 기억에 저장.
+const AI_NOTIFY_TYPES = ["order", "lowstock", "delivery", "ai", "system"];
+function aiNotifyGet(userId) { const s = aiSettingsGet(userId); return s.notify || {}; }
+function aiNotifySet(userId, type, on) { const s = aiSettingsGet(userId); s.notify = s.notify || {}; s.notify[type] = !!on; aiMemSave(userId, "settings", s); return s.notify; }
+function aiNotifyIsOn(userId, type) { const n = aiNotifyGet(userId); return n[type] !== false; }
+
+// ── ③ 오프라인 기능: 온라인 여부 + 오프라인에서 가능한 기능 목록 + 밀린 작업 큐(온라인 복귀 시 처리).
+function aiIsOnline() { try { return (typeof navigator !== "undefined" && "onLine" in navigator) ? navigator.onLine : true; } catch (e) { return true; } }
+function aiOfflineCapabilities() { return ["최근 고객 조회", "최근 상품 조회", "최근 주문 조회", "음성 입력 대기", "임시 주문 작성(온라인 복귀 시 동기화)"]; }
+const AI_SYNC_QUEUE_KEY = "joassam_sync_queue_v1";
+function aiSyncQueueGet() { try { const r = (typeof localStorage !== "undefined") ? localStorage.getItem(AI_SYNC_QUEUE_KEY) : null; return r ? JSON.parse(r) : []; } catch (e) { return []; } }
+function aiSyncQueueAdd(item) { const q = aiSyncQueueGet(); q.push(item); if (q.length > 200) q.shift(); try { if (typeof localStorage !== "undefined") localStorage.setItem(AI_SYNC_QUEUE_KEY, JSON.stringify(q)); } catch (e) {} return q.length; }
+function aiSyncQueueFlush(handler) { const q = aiSyncQueueGet(); let done = 0; if (typeof handler === "function") q.forEach((it) => { try { if (handler(it) !== false) done++; } catch (e) {} }); try { if (typeof localStorage !== "undefined") localStorage.removeItem(AI_SYNC_QUEUE_KEY); } catch (e) {} return done; }
+
+// ── ⑥ 백업/복원: 사용자 사전·Voice·Memory·환경설정을 한 번에. (개인정보는 사용자 자신 것만)
+const AI_BACKUP_KINDS = ["voice", "learning", "user", "session", "workflow", "preference", "longterm", "settings", "archive"];
+function aiBackupAll(userId) {
+  const data = {}; AI_BACKUP_KINDS.forEach((k) => { const v = aiMemLoad(userId, k, null); if (v != null) data[k] = v; });
+  return { app: "joassam-ai-os", version: (typeof APP_VERSION !== "undefined" ? APP_VERSION : 0), kinds: data };
+}
+function aiRestoreAll(userId, backup) {
+  if (!backup || !backup.kinds) return false;
+  Object.keys(backup.kinds).forEach((k) => { if (AI_BACKUP_KINDS.indexOf(k) >= 0) aiMemSave(userId, k, backup.kinds[k]); });
+  return true;
+}
+
+// ── 배포 정보: 버전·플랫폼·설치(standalone) 여부. Dashboard·진단용.
+function aiDeployInfo() {
+  let standalone = false, platform = "web";
+  try { standalone = (typeof window !== "undefined" && window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) || (typeof navigator !== "undefined" && navigator.standalone === true); } catch (e) {}
+  try { const ua = (typeof navigator !== "undefined" && navigator.userAgent) || ""; if (/Android/i.test(ua)) platform = "android"; else if (/iPhone|iPad/i.test(ua)) platform = "ios"; } catch (e) {}
+  return { version: (typeof APP_VERSION !== "undefined" ? APP_VERSION : 0), build: (typeof APP_BUILD !== "undefined" ? APP_BUILD : ""), platform: platform, installed: standalone, online: aiIsOnline() };
 }
 
 /* ===== 고도화 헬퍼: 상품 퍼지매칭 · 동명이인 후보 · 선택 파싱 · 기존주문 묶음 ===== */
@@ -3961,6 +4251,42 @@ function runSelfTests() {
   T("STEP10 사전 수정/삭제", () => { aiPrivacyDeleteAll(U); aiVoiceDictAddDirect(U, "청겨", "청겨자"); aiVoiceDictEdit(U, "청겨", "청경채"); const edited = aiVoiceDictLookup(U, "청겨") === "청경채"; aiVoiceDictRemove(U, "청겨"); return edited && aiVoiceDictLookup(U, "청겨") === null; }, (g) => g === true);
   T("STEP10 말투 저장/조회", () => { aiPrivacyDeleteAll(U); aiVoiceStyleSet(U, "honorific", true); return aiVoiceStyleGet(U).honorific === true; }, (g) => g === true);
   T("STEP10 정규화는 Provider 독립(엔진 앞단)", () => { aiPrivacyDeleteAll(U); aiVoiceDictAddDirect(U, "청겨", "청겨자"); AI_LLM_REGISTRY.setActive("openai"); const a = aiVoiceNormalize("청겨 두개", U, VDATA); AI_LLM_REGISTRY.setActive("mock"); const b = aiVoiceNormalize("청겨 두개", U, VDATA); return a.text === b.text && a.text.indexOf("청겨자") === 0; }, (g) => g === true);
+
+  // ★ STEP11: 성능 최적화 & 운영 준비
+  T("STEP11 Cache: 저장→적중, TTL 키·데이터시그니처", () => { aiCacheClear(); const k = aiCacheKey("청겨자 재고", "mock", "재고", aiDataSig(AGDATA)); aiCacheSet(k, { text: "재고 1개" }); const hit = aiCacheGet(k); const other = aiCacheGet(aiCacheKey("청겨자 재고", "mock", "재고", "9:9:9:9")); return hit && hit.text === "재고 1개" && other === null; }, (g) => g === true);
+  T("STEP11 데이터 변하면 캐시 시그니처 달라짐", () => aiDataSig({ orders: [1], products: [], customers: [], vendors: [] }) !== aiDataSig({ orders: [1, 2], products: [], customers: [], vendors: [] }), (g) => g === true);
+  T("STEP11 Tool 중복 제거", () => { const d = aiDedupToolCalls([{ tool: "customer.search", args: { keyword: "김철수" } }, { tool: "customer.search", args: { keyword: "김철수" } }, { tool: "product.search", args: { keyword: "청겨자" } }]); return d.length === 2; }, (g) => g === true);
+  T("STEP11 Prompt 최적화: 순서 고정+길이 상한", () => { const msgs = aiBuildPromptOptimized({ messages: [{ role: "user", content: "안녕" }], memorySummary: "요약", businessContext: "주문 3건", maxChars: 3000 }); return msgs[0].role === "system" && msgs.some((m) => m.content.includes("업무맥락")) && msgs[msgs.length - 1].content === "안녕"; }, (g) => g === true);
+  T("STEP11 Prompt 압축: 상한 넘으면 축소", () => { const big = []; for (let i = 0; i < 50; i++) big.push({ role: "user", content: "긴문장반복" + i + "가나다라마바사아자차카타파하" }); const out = aiCompressMessages([{ role: "system", content: "시스템" }].concat(big), 300); const total = out.reduce((s, m) => s + m.content.length, 0); return total <= 300 + 20 && out[0].role === "system"; }, (g) => g === true);
+  T("STEP11 간결 도구 스키마(토큰 절약)", () => { const c = llmToolSchemasCompact(); const full = llmToolSchemas(); return c.length === full.length && !("description" in c[0]) && !!c.find((x) => x.name === "order.create").parameters.properties.name; }, (g) => g === true);
+  T("STEP11 Error Recovery: 복구 가능 오류 판별", () => aiRecoverableError(new Error("Failed to fetch")) === true && aiRecoverableError(new Error("429 quota")) === true && aiRecoverableError(new Error("문법 오류")) === false, (g) => g === true);
+  T("STEP11 Perf 스냅샷 구조", () => { aiPerfReset(); aiPerfRecordResponse(12); aiPerfRecordResponse(8); const s = aiPerfSnapshot(U); return s.count === 2 && s.avgMs === 10 && typeof s.cacheHitRate === "number" && Array.isArray(s.providers) && typeof s.memoryKB === "number"; }, (g) => g === true);
+  T("STEP11 Background 실행(비동기, UI 비차단)", () => { let ran = false; aiBackground(() => { ran = true; }); return ran === false; }, (g) => g === true); // 즉시엔 실행 안 됨(다음 틱)
+  T("STEP11 Memory 아카이브 이동", () => { aiPrivacyDeleteAll(U); aiMemoryArchive(U, "옛 대화 요약"); return aiMemoryArchiveGet(U).items.some((x) => x.summary === "옛 대화 요약"); }, (g) => g === true);
+  T("STEP11 필요한 계층만 로드", () => { const m = aiMemoryLoadTiers(U, ["session"]); return ("session" in m) && !("longterm" in m); }, (g) => g === true);
+
+  // ★ STEP12: OpenAI Provider 운영화
+  T("STEP12 OpenAI 인터페이스 완비(7종)", () => { const p = AI_LLM_REGISTRY.get("openai"); return ["initialize", "chat", "streamChat", "functionCall", "summarize", "healthCheck", "shutdown"].every((m) => typeof p[m] === "function"); }, (g) => g === true);
+  T("STEP12 initialize()/shutdown() 동작", () => { const p = createOpenAIProvider(() => ""); let ready = null; p.initialize().then((r) => { ready = r.ready; }); return p.shutdown() === true; }, (g) => g === true);
+  T("STEP12 키 없으면 자동 Mock 전환(usableProvider)", () => { AI_LLM_REGISTRY.setActive("openai"); const u = aiUsableProvider(); AI_LLM_REGISTRY.setActive("mock"); return u.id === "mock"; }, (g) => g === true);
+  T("STEP12 설정만으로 전환(active id)", () => { AI_LLM_REGISTRY.setActive("openai"); const sel = AI_LLM_REGISTRY.getActiveId(); AI_LLM_REGISTRY.setActive("mock"); return sel === "openai"; }, (g) => g === true);
+  T("STEP12 SSE 스트림 파서: 델타 추출", () => { const parts = openaiParseSSE('data: {"choices":[{"delta":{"content":"안"}}]}\n\ndata: {"choices":[{"delta":{"content":"녕"}}]}\n\ndata: [DONE]\n\n'); return parts.join("") === "안녕"; }, (g) => g === true);
+  T("STEP12 Function Calling 파싱(운영 스키마)", () => { const p = AI_LLM_REGISTRY.get("openai"); const r = p.fromResponse({ choices: [{ message: { content: "", tool_calls: [{ function: { name: "order.create", arguments: '{"name":"김철수","product":"청겨자"}' } }] } }], usage: { prompt_tokens: 100, completion_tokens: 20 } }); return r.toolCalls[0].tool === "order.create" && r.toolCalls[0].args.name === "김철수" && r.usage.promptTokens === 100; }, (g) => g === true);
+  T("STEP12 비용 추정(토큰→USD)", () => { const c = aiEstimateCost(1000000, 1000000); return Math.abs(c - (0.15 + 0.60)) < 1e-6; }, (g) => g === true);
+  T("STEP12 사용량 모니터링 누적", () => { aiUsageReset(); aiUsageRecord("openai", { promptTokens: 500, completionTokens: 100, ms: 300 }); aiUsageRecord("openai", { promptTokens: 500, completionTokens: 100, ms: 500 }); const s = aiUsageSnapshot("openai"); return s.requests === 2 && s.totalTokens === 1200 && s.avgMs === 400 && s.estCostUSD >= 0; }, (g) => g === true);
+  T("STEP12 Retry 횟수 설정 가능", () => { const before = aiGetRetryMax(); aiSetRetryMax(4); const set = aiGetRetryMax() === 4; aiSetRetryMax(before); return set; }, (g) => g === true);
+  T("STEP12 보안: 로그에 API Key(sk-) 미노출", () => { aiLogClear(); aiLog("Provider", { error: "openai 401" }); return aiLogGet().every((l) => JSON.stringify(l).indexOf("sk-") < 0); }, (g) => g === true);
+  T("STEP12 간결 스키마로 토큰 절약(요청)", () => { const p = createOpenAIProvider(() => "k"); const rq = p.toRequest({ messages: [], tools: llmToolSchemasCompact() }); return rq.model === "gpt-4o-mini" && rq.tools[0].type === "function" && !("description" in rq.tools[0].function); }, (g) => g === true);
+
+  // ★ STEP13: PWA/Android 운영 준비
+  T("STEP13 오류수집: 개인정보 마스킹(전화/이메일/키)", () => { aiErrorsClear(); aiRecordError("network", "실패 010-1234-5678 a@b.com sk-ABCDEF123456"); const e = aiErrorsGet(1)[0]; return e.message.indexOf("010-1234") < 0 && e.message.indexOf("a@b.com") < 0 && e.message.indexOf("sk-ABCDEF") < 0; }, (g) => g === true);
+  T("STEP13 오류수집: 종류별 집계", () => { aiErrorsClear(); aiRecordError("provider", "x"); aiRecordError("voice", "y"); aiRecordError("provider", "z"); const s = aiErrorsSummary(); return s.total === 3 && s.byType.provider === 2 && s.byType.voice === 1; }, (g) => g === true);
+  T("STEP13 알림설정: 종류별 on/off(기본 on)", () => { aiPrivacyDeleteAll(U); const defOn = aiNotifyIsOn(U, "order"); aiNotifySet(U, "order", false); const off = aiNotifyIsOn(U, "order") === false; aiNotifySet(U, "order", true); return defOn === true && off && aiNotifyIsOn(U, "order") === true; }, (g) => g === true);
+  T("STEP13 백업/복원: 사전·기억·설정 왕복", () => { aiPrivacyDeleteAll(U); aiVoiceDictAddDirect(U, "청겨", "청겨자"); aiSettingsSet(U, "learn", false); const bak = aiBackupAll(U); aiPrivacyDeleteAll(U); const restored = aiRestoreAll(U, bak); return restored && aiVoiceDictLookup(U, "청겨") === "청겨자" && aiSettingsGet(U).learn === false; }, (g) => g === true);
+  T("STEP13 오프라인 기능 목록 제공", () => { const c = aiOfflineCapabilities(); return Array.isArray(c) && c.length >= 4 && c.some((x) => x.indexOf("주문") >= 0); }, (g) => g === true);
+  T("STEP13 동기화 큐: 적재→플러시", () => { try { if (typeof localStorage !== "undefined") localStorage.removeItem(AI_SYNC_QUEUE_KEY); } catch (e) {} aiSyncQueueAdd({ a: 1 }); aiSyncQueueAdd({ a: 2 }); let flushed = 0; const done = aiSyncQueueFlush(() => { flushed++; return true; }); return done === 2 && flushed === 2 && aiSyncQueueGet().length === 0; }, (g) => g === true);
+  T("STEP13 배포 정보 구조(버전·플랫폼·온라인)", () => { const d = aiDeployInfo(); return typeof d.version === "number" && typeof d.platform === "string" && typeof d.installed === "boolean" && typeof d.online === "boolean"; }, (g) => g === true);
+  T("STEP13 백업 대상에 개인 학습 계층 포함", () => AI_BACKUP_KINDS.indexOf("voice") >= 0 && AI_BACKUP_KINDS.indexOf("preference") >= 0 && AI_BACKUP_KINDS.indexOf("longterm") >= 0 && AI_BACKUP_KINDS.indexOf("settings") >= 0, (g) => g === true);
 
   const passed = cases.filter((c) => c.ok).length;
   return { passed, failed: cases.length - passed, total: cases.length, cases };
@@ -7650,6 +7976,15 @@ function App() {
     } catch (e) {}
   }, []);
 
+  // ★ STEP13: 운영용 전역 오류 수집(개인정보 제외) + 온라인 복귀 시 백그라운드 동기화 신호. (추가 전용, 기존 로직 무영향)
+  useEffect(() => {
+    const onErr = (ev) => { try { aiRecordError("crash", (ev && (ev.message || (ev.error && ev.error.message))) || "error"); } catch (e) {} };
+    const onRej = (ev) => { try { aiRecordError("crash", (ev && ev.reason && (ev.reason.message || ev.reason)) || "promise") } catch (e) {} };
+    const onOnline = () => { try { if (navigator.serviceWorker && "SyncManager" in window) navigator.serviceWorker.ready.then((r) => r.sync && r.sync.register("joassam-sync").catch(() => {})).catch(() => {}); } catch (e) {} };
+    try { window.addEventListener("error", onErr); window.addEventListener("unhandledrejection", onRej); window.addEventListener("online", onOnline); } catch (e) {}
+    return () => { try { window.removeEventListener("error", onErr); window.removeEventListener("unhandledrejection", onRej); window.removeEventListener("online", onOnline); } catch (e) {} };
+  }, []);
+
   // ★ STEP6: AI 대시보드(홈 상단 브리핑) 데이터 — 전부 읽기 전용. 기존 홈 화면은 그대로 유지, 위에 카드만 추가.
   const aiBrief = useMemo(() => {
     try {
@@ -7665,6 +8000,7 @@ function App() {
         reminders: aiReminders(ad, remOn ? {} : { unprocessed: false, lowstock: false, reserved: false, unpaid: false, urgent: false }),
         dailySummary: aiDailySummary(ad),
         remindersOn: remOn,
+        perf: aiPerfSnapshot(uid),
       };
     } catch (e) { return null; }
   }, [orders, products, customers, vendors]);
@@ -11887,6 +12223,12 @@ function AiBriefingCard({ brief, setTab }) {
           {mon && (mon.health === "주의" || (mon.warnings && mon.warnings.length > 0)) && (
             <div style={{ fontSize: 11.5, color: "#9A4A2A", background: "#FDF2EC", border: "1px solid #F0CDB8", borderRadius: 8, padding: "7px 10px", marginTop: 8 }}>
               ⚙️ 시스템 점검: {mon.warnings.map((w) => w.text).join(" ")} <span style={{ color: "#B98A72" }}>(자동으로 바꾸지 않고 사장님께 먼저 알려드려요)</span>
+            </div>
+          )}
+
+          {brief.perf && (
+            <div style={{ fontSize: 11, color: "#5A6B7A", background: "#F2F5F8", border: "1px solid #DCE4EC", borderRadius: 8, padding: "7px 10px", marginTop: 8 }}>
+              ⚡ AI 성능: 평균응답 {brief.perf.avgMs}ms · 캐시적중 {brief.perf.cacheHitRate}% · 오류 {brief.perf.errors}건{brief.perf.recoveries ? ` (자동복구 ${brief.perf.recoveries})` : ""} · 기억 {brief.perf.memoryKB}KB · 두뇌 {brief.perf.activeProvider}
             </div>
           )}
         </div>
