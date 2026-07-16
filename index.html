@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 79;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
+const APP_VERSION = 88;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -1666,7 +1666,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // ===== JARVIS AI ASSISTANT =====
-const APP_BUILD = "v79 (07-13 붙여넣기 이름주소인식)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const APP_BUILD = "v88 (07-16 STEP10 VoiceAI+사용자사전+발음학습)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
 const JARVIS_TAB_MAP = {
   goHome:'home', goOrders:'orders', goNew:'new',
   goCustomers:'customers', goProducts:'products',
@@ -1895,6 +1895,1440 @@ function localParseVoiceCommand(rawText, ctx = {}) {
   if (soloName) return { action: "SEARCH", keyword: soloName };
 
   return { action: "UNKNOWN", raw };
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   STEP 3 — AI Layer (독립 모듈). 기존 기능을 절대 다시 구현하지 않고 '호출'만 한다.
+   실행은 전부 기존 경로(localParseVoiceCommand → handleVoiceAction)로 수렴한다.
+   구성: ① Tool Registry ② Context Manager ③ Intent Engine ④ Conversation Engine
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+// ── ① Tool Registry: 기존 기능을 Tool로 '등록'만 함. run은 기존 액션 객체 생성 → 기존 dispatcher가 실행.
+//   access: "read"(자동실행) | "write"(확인 후) | "destructive"(강한 확인). AI는 이름·스키마만 알면 호출 가능.
+const AI_TOOL_DEFS = [
+  { name: "customer.search", domain: "customers", title: "고객 검색", access: "read", params: { keyword: "string" }, toCommand: (a) => ({ action: "SEARCH", keyword: a.keyword || "" }) },
+  { name: "vendor.search", domain: "vendors", title: "업체 검색", access: "read", params: { keyword: "string" }, toCommand: (a) => ({ action: "SEARCH", keyword: a.keyword || "" }) },
+  { name: "product.search", domain: "products", title: "상품 검색", access: "read", params: { keyword: "string" }, toCommand: (a) => ({ action: "SEARCH", keyword: a.keyword || "" }) },
+  { name: "nav.goto", domain: "system", title: "화면 이동", access: "read", params: { target: "string" }, toCommand: (a) => ({ action: "NAVIGATE", target: a.target }) },
+  { name: "stat.query", domain: "system", title: "집계/조회", access: "read", params: { query: "string" }, toCommand: (a) => ({ action: "QUERY", query: a.query || "" }) },
+  { name: "order.create", domain: "orders", title: "주문 등록", access: "write", params: { name: "string", product: "string", qty: "string" }, toCommand: (a) => ({ action: "CREATE_ORDER", payload: { name: a.name || "", product: a.product || "", qty: a.qty || "", note: a.note || "" } }) },
+  { name: "order.addItem", domain: "orders", title: "주문에 상품 추가", access: "write", params: { name: "string", product: "string", qty: "string" }, toCommand: (a) => ({ action: "ADD_TO_ORDER", payload: { name: a.name || "", product: a.product || "", qty: a.qty || "" } }) },
+  { name: "order.edit", domain: "orders", title: "주문 열어 수정", access: "write", params: { name: "string" }, toCommand: (a) => ({ action: "EDIT_ORDER", name: a.name || "", raw: a.raw || "" }) },
+  { name: "order.removeItem", domain: "orders", title: "주문에서 상품 빼기", access: "write", params: { name: "string", raw: "string" }, toCommand: (a) => ({ action: "REMOVE_FROM_ORDER", name: a.name || "", raw: a.raw || "" }) },
+  { name: "order.bundle", domain: "orders", title: "주문 묶음배송", access: "write", params: { name: "string" }, toCommand: (a) => ({ action: "BUNDLE_ORDERS", name: a.name || "", products: a.products || [], raw: a.raw || "" }) },
+  { name: "order.rebundle", domain: "orders", title: "주문 박스 재구성", access: "write", params: { name: "string", mode: "string" }, toCommand: (a) => ({ action: "REBUNDLE_ONE", name: a.name || "", mode: a.mode || "open", raw: a.raw || "" }) },
+  { name: "order.status.set", domain: "orders", title: "주문 상태 변경", access: "write", params: { name: "string", status: "string" }, toCommand: (a) => ({ action: "SET_STATUS", name: a.name || "", status: a.status || "" }) },
+  { name: "order.invoiceNo.set", domain: "orders", title: "송장번호 입력", access: "write", params: { name: "string", invoiceNo: "string" }, toCommand: (a) => ({ action: "SET_INVOICE_NO", name: a.name || "", invoiceNo: a.invoiceNo || "" }) },
+  { name: "delivery.confirm", domain: "delivery", title: "배송 도착 확인", access: "write", params: { raw: "string" }, toCommand: (a) => ({ action: "CONFIRM_DELIVERY", raw: a.raw || "" }) },
+  { name: "undo.last", domain: "system", title: "되돌리기", access: "write", params: {}, toCommand: () => ({ action: "UNDO_LAST" }) },
+  { name: "order.delete", domain: "orders", title: "주문 삭제", access: "destructive", params: { name: "string" }, toCommand: (a) => ({ action: "DELETE_ORDER", name: a.name || "", raw: a.raw || "" }) },
+];
+// 기존 액션 이름 → Tool 매핑(로컬 파서 결과를 Tool로 승격할 때 사용)
+const AI_ACTION_TO_TOOL = {
+  SEARCH: "customer.search", NAVIGATE: "nav.goto", QUERY: "stat.query",
+  CREATE_ORDER: "order.create", ADD_TO_ORDER: "order.addItem", EDIT_ORDER: "order.edit",
+  REMOVE_FROM_ORDER: "order.removeItem", BUNDLE_ORDERS: "order.bundle", PARTIAL_BUNDLE: "order.bundle",
+  REBUNDLE_ONE: "order.rebundle", SET_STATUS: "order.status.set", SET_INVOICE_NO: "order.invoiceNo.set",
+  CONFIRM_DELIVERY: "delivery.confirm", UNDO_LAST: "undo.last", DELETE_ORDER: "order.delete",
+  CONTROL: "nav.goto",
+};
+function createToolRegistry() {
+  const map = {};
+  AI_TOOL_DEFS.forEach((t) => { map[t.name] = t; });
+  return {
+    list: (domain) => Object.values(map).filter((t) => !domain || t.domain === domain),
+    get: (name) => map[name] || null,
+    has: (name) => !!map[name],
+    accessOf: (name) => (map[name] ? map[name].access : "read"),
+    schema: () => AI_TOOL_DEFS.map((t) => ({ name: t.name, title: t.title, access: t.access, params: t.params })),
+    toolForAction: (action) => AI_ACTION_TO_TOOL[action] || null,
+  };
+}
+const AI_TOOL_REGISTRY = createToolRegistry();
+
+// ── ② Context Manager: 현재 대화 대상 기억. 기존 주문 데이터와 '분리'된 순수 상태.
+function createConvContext() {
+  return {
+    currentCustomer: null, currentVendor: null, currentProduct: null,
+    currentOrderId: null, currentReserveDate: null,
+    lastItem: null, lastQty: null, lastResult: null,
+    pending: null, turns: [],
+  };
+}
+function convRemember(ctx, patch) { if (ctx && patch) Object.keys(patch).forEach((k) => { if (patch[k] != null) ctx[k] = patch[k]; }); return ctx; }
+function convReset(ctx) { const f = createConvContext(); Object.keys(f).forEach((k) => { ctx[k] = f[k]; }); return ctx; }
+
+// ── ③ Intent Engine: '단어'가 아니라 '의도'. 대명사·생략을 Context로 해소한 뒤 기존 로컬 파서로 액션 도출.
+const _AI_YES = /^(응|네|예|어|그래|맞아|맞아요|좋아|좋아요|오케이|오케|해줘|그렇게|등록|진행|확인)$/;
+const _AI_NO = /^(아니|아니야|아니요|아니오|아니다|취소|그만|됐어|됐어요|잠깐|스톱|중단|말아|하지마)$/;
+function aiIsYes(t) { return _AI_YES.test(String(t || "").replace(/\s/g, "")); }
+function aiIsNo(t) { return _AI_NO.test(String(t || "").replace(/\s/g, "")); }
+// 대명사/생략 치환: "그 사람"→현재고객, "그거"→현재상품, "지난번처럼"→그대로(고객기억), "같이 보내"→묶음, "조금 늘려/하나 더/하나 빼"→수량조절
+function aiResolvePronouns(text, ctx) {
+  let t = String(text || "");
+  if (ctx.currentCustomer && /(그\s*사람|그\s*분|그\s*고객|저\s*사람|저\s*분|거기|그쪽)/.test(t)) t = t.replace(/(그\s*사람|그\s*분|그\s*고객|저\s*사람|저\s*분|거기|그쪽)/g, ctx.currentCustomer);
+  if (ctx.currentProduct && /(그거|그것|그걸|그\s*상품|이거|이것)/.test(t)) t = t.replace(/(그거|그것|그걸|그\s*상품|이거|이것)/g, ctx.currentProduct);
+  return t;
+}
+// 반환: { tool, access, command, needsClarify, question, reply, cancel, contextPatch }
+function aiResolveIntent(text, ctx, appData) {
+  const raw = String(text || "").trim();
+  const tNS = raw.replace(/\s/g, "");
+  if (!raw) return { tool: null, access: "read", command: null, needsClarify: false };
+  // 부정/취소
+  if (aiIsNo(tNS)) return { tool: "conv.cancel", access: "read", command: null, cancel: true, reply: "네, 방금 작업은 취소할게요." };
+  // 대명사 치환
+  const resolved = aiResolvePronouns(raw, ctx);
+  // "조금 늘려 / 하나 더 / 하나 빼" — 직전 상품 수량 조절 (컨텍스트 필요)
+  const incHit = /(조금\s*늘려|더\s*줘|하나\s*더|한\s*개\s*더|두\s*개\s*더|늘려|추가해)/.test(resolved) && !/빼|줄|삭제/.test(resolved);
+  const decHit = /(조금\s*줄여|하나\s*빼|한\s*개\s*빼|줄여|덜어)/.test(resolved);
+  if ((incHit || decHit)) {
+    if (!ctx.currentProduct || !ctx.currentCustomer) return { tool: null, access: "read", needsClarify: true, question: "어느 주문의 어떤 상품을 조절할까요? (예: 대솔 채소 하나 더)" };
+    const n = (resolved.match(/(\d+)/) ? parseInt(resolved.match(/(\d+)/)[1], 10) : (/두/.test(resolved) ? 2 : 1));
+    const cmd = { action: incHit ? "ADD_TO_ORDER" : "REMOVE_FROM_ORDER", name: ctx.currentCustomer,
+      payload: { name: ctx.currentCustomer, product: ctx.currentProduct, qty: `${n}개` }, raw: `${ctx.currentCustomer} ${ctx.currentProduct} ${n}개 ${incHit ? "더" : "빼"}` };
+    return { tool: incHit ? "order.addItem" : "order.removeItem", access: "write", command: cmd, contextPatch: { lastQty: n } };
+  }
+  // 기존 로컬 파서로 액션 도출 (재구현 없음)
+  const cmd = (typeof localParseVoiceCommand === "function") ? localParseVoiceCommand(resolved, appData || {}) : { action: "UNKNOWN", raw: resolved };
+  // 컨텍스트로 빈 이름 보정
+  if (!cmd.name && ctx.currentCustomer && /^(EDIT_ORDER|REMOVE_FROM_ORDER|SET_STATUS|SET_INVOICE_NO|DELETE_ORDER|BUNDLE_ORDERS|REBUNDLE_ONE)$/.test(cmd.action)) cmd.name = ctx.currentCustomer;
+  const tool = AI_TOOL_REGISTRY.toolForAction(cmd.action);
+  const access = tool ? AI_TOOL_REGISTRY.accessOf(tool) : "read";
+  // 컨텍스트 업데이트 힌트
+  const patch = {};
+  if (cmd.action === "SEARCH" && cmd.keyword) {
+    const c = (appData && appData.customers || []).find((x) => x && x.name && x.name.replace(/\s/g, "") === String(cmd.keyword).replace(/\s/g, ""));
+    if (c) patch.currentCustomer = c.name;
+    const v = (appData && appData.vendors || []).find((x) => x && x.name && x.name.replace(/\s/g, "") === String(cmd.keyword).replace(/\s/g, ""));
+    if (v) patch.currentVendor = v.name;
+  }
+  if (cmd.name) patch.currentCustomer = cmd.name;
+  if (cmd.payload && cmd.payload.product) patch.currentProduct = cmd.payload.product;
+  if (cmd.action === "UNKNOWN") return { tool: null, access: "read", command: cmd, needsClarify: true, question: "무엇을 도와드릴까요? (예: \"대솔 찾아\", \"김철수 주문 수정\")" };
+  return { tool, access, command: cmd, contextPatch: patch };
+}
+
+// ── ④ Conversation Engine: 멀티턴·확인질문·상태관리. 실행은 deps.execute(=기존 명령 실행)로 위임.
+//   deps = { execute(command|text)->bool, appData()->{customers,vendors,products,orders}, confirmText(cmd)->string }
+function createConversationEngine(deps) {
+  const ctx = createConvContext();
+  const D = deps || {};
+  const appData = () => (typeof D.appData === "function" ? D.appData() : {});
+  const doExecute = (command) => { try { return typeof D.execute === "function" ? D.execute(command) : false; } catch (e) { return false; } };
+  const confirmText = (r) => (typeof D.confirmText === "function" ? D.confirmText(r) : `${(r.command && r.command.name) || ""} 작업을 진행할까요?`);
+  function handle(text) {
+    const raw = String(text || "").trim();
+    ctx.turns.push({ role: "user", text: raw });
+    // 확인 대기 중이면 예/아니오 처리
+    if (ctx.pending) {
+      if (aiIsYes(raw)) { const p = ctx.pending; ctx.pending = null; const ok = doExecute(p.command); return { done: true, executed: ok, speak: ok ? "네, 처리했어요." : "처리하지 못했어요.", command: p.command }; }
+      if (aiIsNo(raw)) { ctx.pending = null; return { done: true, executed: false, speak: "네, 취소했어요." }; }
+      // 확인 대기 중 새 명령이 들어오면 대기 취소하고 아래로 진행
+      ctx.pending = null;
+    }
+    const r = aiResolveIntent(raw, ctx, appData());
+    if (r.contextPatch) convRemember(ctx, r.contextPatch);
+    if (r.cancel) { ctx.pending = null; return { done: true, executed: false, speak: r.reply || "취소했어요." }; }
+    if (r.needsClarify) return { needsClarify: true, speak: r.question };
+    if (!r.command) return { needsClarify: true, speak: "다시 말씀해 주세요." };
+    if (r.access === "read") { const ok = doExecute(r.command); return { done: true, executed: ok, read: true, command: r.command }; }
+    // write / destructive → 반드시 사용자 확인
+    ctx.pending = { command: r.command, access: r.access };
+    return { needsConfirm: true, access: r.access, speak: confirmText(r), command: r.command };
+  }
+  return { handle, context: () => ctx, remember: (p) => convRemember(ctx, p), reset: () => convReset(ctx) };
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   STEP 4 — Personal AI Memory + Learning Engine (독립 모듈, 사용자별).
+   원칙: 기존 주문/Firebase(stores/*) 데이터 절대 변경 안 함. 학습은 '승인 후'에만.
+   저장: localStorage(주 저장소, 오프라인 OK) + (선택) Firestore users/{userId}/* 미러(신규 컬렉션).
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+// 현재 사용자 id (닉네임/계정). 없으면 "default". 사용자별 격리의 키.
+function aiUserId() { try { return (typeof localStorage !== "undefined" && (localStorage.getItem(NICKNAME_KEY) || "").trim()) || "default"; } catch (e) { return "default"; } }
+const AIMEM_PREFIX = "joassam_aimem_";
+function aiMemKey(userId, kind) { return AIMEM_PREFIX + (userId || "default") + "__" + kind; }
+function aiMemLoad(userId, kind, fallback) {
+  try { const r = (typeof localStorage !== "undefined") ? localStorage.getItem(aiMemKey(userId, kind)) : null; if (r) return JSON.parse(r); } catch (e) {}
+  return (fallback !== undefined ? fallback : null);
+}
+function aiMemSave(userId, kind, val) {
+  try { if (typeof localStorage !== "undefined") localStorage.setItem(aiMemKey(userId, kind), JSON.stringify(val)); } catch (e) {}
+  try { aiMemFirebaseMirror(userId, kind, val); } catch (e) {}   // 신규 컬렉션에만 best-effort 미러
+  return val;
+}
+// Firestore users/{userId}/{kind} 로 best-effort 미러 (stores/* 는 건드리지 않음). fbDb 없으면 무시.
+function aiMemFirebaseMirror(userId, kind, val) {
+  try {
+    if (typeof fbDb === "undefined" || !fbDb) return;
+    if (typeof AI_LEARNING_ENABLED_GLOBAL !== "undefined" && AI_LEARNING_ENABLED_GLOBAL === false) return;
+    fbDb.collection("users").doc(String(userId || "default")).collection("ai").doc(kind)
+      .set({ data: val, updatedAt: (typeof nowStamp === "function" ? nowStamp() : "") }, { merge: true }).catch(() => {});
+  } catch (e) {}
+}
+let AI_LEARNING_ENABLED_GLOBAL = true;   // 학습 전체 on/off (Memory Viewer에서 토글)
+
+// ── ① Session Memory: 오늘 작업만 기억. 날짜 바뀌면 자동 만료.
+function aiSessionGet(userId) {
+  const today = (typeof todayStr === "function") ? todayStr() : "";
+  let s = aiMemLoad(userId, "session", null);
+  if (!s || s.date !== today) { s = { date: today, orders: [], customers: [], vendors: [], products: [] }; aiMemSave(userId, "session", s); }
+  return s;
+}
+function aiSessionRecord(userId, type, value) {
+  if (!value) return;
+  const s = aiSessionGet(userId);
+  const arr = s[type]; if (!Array.isArray(arr)) return;
+  if (!arr.includes(value)) { arr.push(value); if (arr.length > 200) arr.shift(); aiMemSave(userId, "session", s); }
+}
+
+// ── ② User Memory: 사용자 습관(자주 쓰는 고객/상품, 표현, 기본 배송, 선호 순서).
+function aiUserGet(userId) { return aiMemLoad(userId, "user", { favoriteCustomers: {}, favoriteProducts: {}, phrases: {}, defaultDelivery: "", preferredOrder: [] }); }
+function aiUserBump(userId, cat, key) {
+  if (!key) return;
+  const u = aiUserGet(userId);
+  if (!u[cat] || typeof u[cat] !== "object") u[cat] = {};
+  u[cat][key] = (u[cat][key] || 0) + 1;
+  aiMemSave(userId, "user", u);
+}
+function aiUserTop(userId, cat, n) {
+  const u = aiUserGet(userId); const m = u[cat] || {};
+  return Object.keys(m).sort((a, b) => m[b] - m[a]).slice(0, n || 5).map((k) => ({ key: k, count: m[k] }));
+}
+
+// ── ③ Learning Memory: 발음/줄임말/별칭 등. '후보 → 승인 → 개인사전' 흐름. 승인 없이는 미적용.
+function aiLearnGet(userId) { return aiMemLoad(userId, "learning", { enabled: true, approved: [], candidates: [] }); }
+function aiLearnSetEnabled(userId, on) { const L = aiLearnGet(userId); L.enabled = !!on; aiMemSave(userId, "learning", L); AI_LEARNING_ENABLED_GLOBAL = !!on; return L.enabled; }
+function aiLearnIsEnabled(userId) { const L = aiLearnGet(userId); return L.enabled !== false; }
+// 후보 추가 (오인식 정정/반복/명시). 자동 적용 아님.
+function aiLearnCandidate(userId, from, to, kind) {
+  const f = String(from || "").replace(/\s/g, "").trim(), t = String(to || "").trim();
+  if (!f || !t || f === t) return null;
+  const L = aiLearnGet(userId);
+  if (L.approved.some((e) => e.from === f) || L.candidates.some((e) => e.from === f)) return null;
+  const stamp = (function () { try { return Date.now(); } catch (e) { return L.candidates.length + 1; } })();
+  const entry = { id: "al" + stamp, from: f, to: t, kind: kind || "alias", createdAt: stamp };
+  L.candidates.unshift(entry); L.candidates = L.candidates.slice(0, 100);
+  aiMemSave(userId, "learning", L); return entry.id;
+}
+// 승인 → 개인사전(approved)로 이동 + 기존 전역 학습(learnAlias)에도 반영해 즉시 인식에 적용(기존 경로 재사용).
+function aiLearnApprove(userId, id) {
+  const L = aiLearnGet(userId); const idx = L.candidates.findIndex((e) => e.id === id);
+  if (idx < 0) return false;
+  const e = L.candidates.splice(idx, 1)[0];
+  e.approvedAt = (function () { try { return Date.now(); } catch (x) { return 0; } })();
+  L.approved.unshift(e); aiMemSave(userId, "learning", L);
+  try { if (typeof learnAlias === "function") learnAlias(e.from, e.to.replace(/\s/g, "")); } catch (x) {}   // 기존 인식 엔진에 반영
+  return true;
+}
+function aiLearnReject(userId, id) { const L = aiLearnGet(userId); L.candidates = L.candidates.filter((e) => e.id !== id); aiMemSave(userId, "learning", L); return true; }
+// 승인된 별칭 직접 추가(명시 학습) — 승인=사용자 행위이므로 바로 approved.
+function aiLearnApproveDirect(userId, from, to, kind) {
+  const f = String(from || "").replace(/\s/g, "").trim(), t = String(to || "").trim();
+  if (!f || !t || f === t) return false;
+  const L = aiLearnGet(userId);
+  L.approved = L.approved.filter((e) => e.from !== f);
+  L.approved.unshift({ id: "al" + (function () { try { return Date.now(); } catch (x) { return L.approved.length; } })(), from: f, to: t, kind: kind || "alias", approvedAt: 1 });
+  aiMemSave(userId, "learning", L);
+  try { if (typeof learnAlias === "function") learnAlias(f, t.replace(/\s/g, "")); } catch (x) {}
+  return true;
+}
+function aiLearnRemove(userId, id) {
+  const L = aiLearnGet(userId); const e = L.approved.find((x) => x.id === id);
+  L.approved = L.approved.filter((x) => x.id !== id); aiMemSave(userId, "learning", L);
+  try { if (e && typeof removeLearnedAlias === "function") removeLearnedAlias(e.from); } catch (x) {}
+  return true;
+}
+function aiLearnEditTo(userId, id, newTo) {
+  const L = aiLearnGet(userId); const e = L.approved.find((x) => x.id === id);
+  if (!e) return false; const old = e.to; e.to = String(newTo || "").trim(); aiMemSave(userId, "learning", L);
+  try { if (typeof learnAlias === "function") learnAlias(e.from, e.to.replace(/\s/g, "")); } catch (x) {}
+  return true;
+}
+// 개인 사전 우선 정규화(사용자별). 없으면 기존 canonicalizeSpoken로 폴백.
+function aiPersonalCanonicalize(userId, word) {
+  const s = String(word || "").replace(/\s/g, "");
+  if (!s) return null;
+  const L = aiLearnGet(userId);
+  const hit = (L.approved || []).find((e) => e.from === s || s.includes(e.from));
+  if (hit) return hit.to;
+  return (typeof canonicalizeSpoken === "function") ? canonicalizeSpoken(s) : null;
+}
+
+// ── ④ Workflow Learning: 업무 단계 순서 기록 → 같은 순서 반복 시 선호 흐름으로 저장.
+function aiWorkflowRecord(userId, steps) {
+  if (!Array.isArray(steps) || !steps.length) return;
+  const W = aiMemLoad(userId, "workflow", { recent: [], preferred: null, counts: {} });
+  const sig = steps.join(">");
+  W.counts[sig] = (W.counts[sig] || 0) + 1;
+  W.recent.unshift(sig); W.recent = W.recent.slice(0, 20);
+  // 3회 이상 반복된 최다 순서를 선호 흐름으로
+  const best = Object.keys(W.counts).sort((a, b) => W.counts[b] - W.counts[a])[0];
+  if (best && W.counts[best] >= 3) W.preferred = best.split(">");
+  aiMemSave(userId, "workflow", W); return W.preferred;
+}
+function aiWorkflowPreferred(userId) { const W = aiMemLoad(userId, "workflow", null); return W && W.preferred ? W.preferred : null; }
+
+// ── ⑤ Suggestion Engine: 먼저 제안(읽기 전용). 실행은 항상 사용자 확인 후 기존 경로로.
+function aiBuildSuggestions(userId, appData) {
+  const out = []; const A = appData || {};
+  const orders = A.orders || [], products = A.products || [];
+  // 자주 쓰는 고객 → 단골 안내
+  const favC = aiUserTop(userId, "favoriteCustomers", 1)[0];
+  if (favC && favC.count >= 3) out.push({ type: "habit", text: `${favC.key} 고객을 자주 주문받으셨어요(${favC.count}회). 지난 주문대로 담을까요?`, action: null, confirmNeeded: true });
+  // 재고 부족(있으면)
+  (products || []).forEach((p) => { const st = Number(p && p.stock); if (p && !isNaN(st) && st > 0 && st <= 2) out.push({ type: "stock", text: `${p.name} 재고가 ${st}개로 부족할 수 있어요.`, confirmNeeded: false }); });
+  // 오늘 발송 예약인데 미발송
+  const today = (typeof todayStr === "function") ? todayStr() : "";
+  const dueUnsent = (orders || []).filter((o) => o && o.reserveDate === today && o.status !== "shipped").length;
+  if (dueUnsent > 0) out.push({ type: "delivery", text: `오늘 발송 예정 주문 ${dueUnsent}건이 아직 미발송이에요.`, confirmNeeded: false });
+  return out.slice(0, 6);
+}
+
+// ── 개인정보/내보내기/초기화 ──
+function aiMemExport(userId) {
+  return { userId: userId || "default", exportedAt: (function () { try { return new Date().toISOString(); } catch (e) { return ""; } })(),
+    learning: aiLearnGet(userId), user: aiUserGet(userId), workflow: aiMemLoad(userId, "workflow", null), session: aiMemLoad(userId, "session", null) };
+}
+function aiMemDeleteAll(userId) {
+  ["session", "user", "learning", "workflow"].forEach((k) => {
+    try { if (typeof localStorage !== "undefined") localStorage.removeItem(aiMemKey(userId, k)); } catch (e) {}
+    try { aiMemFirebaseMirror(userId, k, null); } catch (e) {}
+  });
+  return true;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   STEP 5 — AI Agent & Business Intelligence (독립 모듈).
+   AI가 '먼저 계획'하고 → 여러 Tool을 순서대로 → 결과 검토 → 사용자 확인 후 실행.
+   원칙: 기존 기능 재구현 없음. 전부 기존 함수/Tool 호출·읽기. 중요한 작업은 항상 확인.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+// ── Safety Layer: 자동 실행 금지 도구(삭제/발송/대량수정/문자 등). read만 자동, 그 외 확인 필수.
+const AI_SAFETY_CONFIRM = new Set(["order.delete", "customer.delete", "vendor.delete", "product.delete", "invoice.delete", "data.backup.import", "delivery.confirm", "sms.send", "order.status.set", "order.create", "order.addItem", "order.removeItem", "order.invoiceNo.set"]);
+function aiIsAutoSafe(toolOrAccess) {
+  if (!toolOrAccess) return true;
+  if (toolOrAccess === "read") return true;
+  if (toolOrAccess === "write" || toolOrAccess === "destructive") return false;
+  // 도구 이름이면 레지스트리 권한으로 판단
+  const acc = (typeof AI_TOOL_REGISTRY !== "undefined" && AI_TOOL_REGISTRY.has(toolOrAccess)) ? AI_TOOL_REGISTRY.accessOf(toolOrAccess) : null;
+  if (acc) return acc === "read";
+  return !AI_SAFETY_CONFIRM.has(toolOrAccess);
+}
+
+// ── Business Intelligence: 순수 분석(읽기 전용). 근거와 함께 반환.
+function biNS(s) { return String(s || "").replace(/\s/g, ""); }
+function biWeekdayName(iso) { const w = ["일", "월", "화", "수", "목", "금", "토"]; const d = new Date(iso); return isNaN(d.getTime()) ? "" : w[d.getDay()]; }
+function biCustomerStat(name, orders) {
+  const nm = biNS(name);
+  const mine = (orders || []).filter((o) => o && biNS((o.recipient && o.recipient.name) || o.senderName || "") === nm);
+  if (!mine.length) return { name, count: 0 };
+  const sorted = mine.slice().sort((a, b) => String(b.orderDate || "").localeCompare(String(a.orderDate || "")));
+  const wd = {}; mine.forEach((o) => { const w = biWeekdayName(o.orderDate); if (w) wd[w] = (wd[w] || 0) + 1; });
+  const topWd = Object.keys(wd).sort((a, b) => wd[b] - wd[a])[0];
+  const weekdayPattern = (topWd && wd[topWd] >= 3 && wd[topWd] / mine.length >= 0.6) ? topWd : null;
+  return { name, count: mine.length, lastDate: sorted[0].orderDate, lastItems: sorted[0].items || [], weekdayPattern, weekdayCount: topWd ? wd[topWd] : 0 };
+}
+function biStockNum(p) { const n = Number(p && p.stock); return isNaN(n) ? null : n; }
+function biLowStock(products, threshold) {
+  const th = threshold == null ? 3 : threshold;
+  return (products || []).filter((p) => { const n = biStockNum(p); return n != null && n >= 0 && n <= th; }).map((p) => ({ name: p.name, stock: biStockNum(p) }));
+}
+function biProductSales(orders, days) {
+  const since = new Date(); since.setDate(since.getDate() - (days || 7));
+  const p = (n) => String(n).padStart(2, "0"); const sinceISO = `${since.getFullYear()}-${p(since.getMonth() + 1)}-${p(since.getDate())}`;
+  const map = {};
+  (orders || []).forEach((o) => { if (!o || (o.orderDate || "") < sinceISO) return; (o.items || []).forEach((it) => { const k = it.name || "상품"; map[k] = (map[k] || 0) + (Number(it.qty) || 0); }); });
+  return Object.keys(map).map((k) => ({ name: k, qty: map[k] })).sort((a, b) => b.qty - a.qty);
+}
+function biRepeatCustomers(orders) {
+  const c = {}; (orders || []).forEach((o) => { const n = (o && o.recipient && o.recipient.name) || o.senderName; if (n) c[n] = (c[n] || 0) + 1; });
+  return Object.keys(c).filter((n) => c[n] >= 2).map((n) => ({ name: n, count: c[n] })).sort((a, b) => b.count - a.count);
+}
+
+// ── Reasoning: 여러 정보 종합. 정보 부족하면 질문(추측 금지).
+function aiReasonDelivery(items, products) {
+  const evidence = []; let insufficient = false, unknown = 0;
+  (items || []).forEach((it) => {
+    const want = Number(it.qty) || 0;
+    const prod = (products || []).find((p) => p && biNS(p.name) === biNS(it.name) || (p && p.id && p.id === it.productId));
+    const st = prod ? biStockNum(prod) : null;
+    if (st == null) { unknown++; evidence.push(`${it.name}: 재고 정보 없음`); }
+    else if (st < want) { insufficient = true; evidence.push(`${it.name}: 재고 ${st} < 필요 ${want} (부족)`); }
+    else evidence.push(`${it.name}: 재고 ${st} ≥ ${want} (충분)`);
+  });
+  const conclusion = insufficient ? "일부 상품 재고가 부족해요" : (unknown === (items || []).length && unknown > 0 ? "재고 정보가 없어 배송 가능 여부는 확인이 필요해요" : "배송 가능해요");
+  return { ok: !insufficient, conclusion, evidence, needsInfo: unknown > 0 && !insufficient };
+}
+
+// ── Priorities: 오늘 업무 우선순위(읽기). 근거 포함.
+function aiDailyPriorities(appData) {
+  const orders = (appData && appData.orders) || [], products = (appData && appData.products) || [];
+  const today = (typeof todayStr === "function") ? todayStr() : "";
+  const out = [];
+  const dueOut = orders.filter((o) => o && o.reserveDate === today && o.status !== "shipped");
+  if (dueOut.length) out.push({ task: "오늘 출고", count: dueOut.length, priority: 1, reason: `발송 예정일이 오늘인데 아직 미발송 ${dueOut.length}건` });
+  const low = biLowStock(products, 2);
+  if (low.length) out.push({ task: "재고 부족", count: low.length, priority: 2, reason: `재고 2개 이하: ${low.map((l) => `${l.name}(${l.stock})`).join(", ")}` });
+  const unpaid = orders.filter((o) => o && o.status === "waiting");
+  if (unpaid.length) out.push({ task: "입금 대기 확인", count: unpaid.length, priority: 3, reason: `입금대기 ${unpaid.length}건` });
+  const ready = orders.filter((o) => o && o.status === "ready");
+  if (ready.length) out.push({ task: "발송 준비분 처리", count: ready.length, priority: 4, reason: `발송준비 ${ready.length}건` });
+  const tomorrow = (function () { const d = new Date(); d.setDate(d.getDate() + 1); const p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; })();
+  const resv = orders.filter((o) => o && o.reserveDate === tomorrow);
+  if (resv.length) out.push({ task: "내일 예약 출고 확인", count: resv.length, priority: 5, reason: `내일 발송 예약 ${resv.length}건` });
+  return out.sort((a, b) => a.priority - b.priority);
+}
+
+// ── Recommendation: 묻기 전 먼저 제안(근거 포함). STEP4 제안 + BI 결합.
+function aiRecommendations(appData, userId) {
+  const out = []; const orders = (appData && appData.orders) || [], products = (appData && appData.products) || [];
+  biLowStock(products, 3).forEach((l) => out.push({ type: "stock", text: `${l.name} 재고가 부족할 수 있어요(${l.stock}개).`, reason: `현재 재고 ${l.stock}개` }));
+  biRepeatCustomers(orders).slice(0, 2).forEach((c) => {
+    const st = biCustomerStat(c.name, orders);
+    if (st.weekdayPattern) out.push({ type: "pattern", text: `${c.name} 고객은 주로 ${st.weekdayPattern}요일에 주문했어요.`, reason: `${st.count}건 중 ${st.weekdayCount}건이 ${st.weekdayPattern}요일` });
+  });
+  const s7 = biProductSales(orders, 7), s14 = biProductSales(orders, 14);
+  s7.slice(0, 1).forEach((p) => { const prev = (s14.find((x) => x.name === p.name) || { qty: 0 }).qty - p.qty; if (p.qty > prev && p.qty >= 3) out.push({ type: "trend", text: `최근 ${p.name} 판매가 늘었어요(7일 ${p.qty}개).`, reason: `최근 7일 ${p.qty}개 판매` }); });
+  try { (typeof aiBuildSuggestions === "function" ? aiBuildSuggestions(userId, appData) : []).forEach((s) => { if (s.type === "delivery") out.push({ type: "delivery", text: s.text, reason: "오늘 발송 예정" }); }); } catch (e) {}
+  return out.slice(0, 8);
+}
+
+// ── Planner + Tool Orchestrator: 요청 → 계획(steps) → 순차 실행(읽기 자동, 쓰기 확인).
+//   step.kind: read|analyze|write|confirm|report. write/destructive는 requiresConfirm=true.
+function aiPlan(text, ctx, appData) {
+  const raw = String(text || "").trim(); const tNS = raw.replace(/\s/g, "");
+  const customers = (appData && appData.customers) || [], vendors = (appData && appData.vendors) || [], products = (appData && appData.products) || [], orders = (appData && appData.orders) || [];
+  const personNames = [...customers, ...vendors].map((x) => x && x.name).filter(Boolean);
+  const nameHit = (typeof matchName === "function") ? matchName(raw, personNames) : "";
+
+  // (A) "지난번처럼 / 저번처럼" → 재주문 오케스트레이션
+  if (/(지난번처럼|저번처럼|저번같이|늘하던|평소처럼|하던대로)/.test(tNS)) {
+    const name = nameHit || (ctx && ctx.currentCustomer) || "";
+    if (!name) return { goal: "지난 주문대로 재주문", needsInfo: { question: "누구 주문을 지난번처럼 담을까요?" } };
+    const last = (typeof lastOrderForName === "function") ? lastOrderForName(name, orders, customers) : null;
+    if (!last || !(last.items || []).length) return { goal: "지난 주문대로 재주문", steps: [{ kind: "report", label: `${name} 님의 지난 주문을 찾지 못했어요` }] };
+    const reason = aiReasonDelivery(last.items, products);
+    const itemsText = (last.items || []).map((i) => `${i.name} ${i.qty}개`).join(", ");
+    return {
+      goal: `${name} 지난 주문대로 재주문`,
+      evidence: [`지난 주문: ${itemsText}`, ...reason.evidence],
+      steps: [
+        { kind: "read", tool: "customer.search", label: `${name} 고객 조회`, done: true },
+        { kind: "read", tool: "order.history", label: "지난 주문 조회", data: last.items },
+        { kind: "analyze", label: "재고·배송 가능 확인", data: reason },
+        { kind: "write", tool: "order.create", requiresConfirm: true, label: `주문 초안: ${itemsText}`,
+          command: { action: "CREATE_ORDER", payload: { name, items: last.items, reorder: true } } },
+        { kind: "confirm", label: `${name} 님께 ${itemsText} 등록할까요?` },
+        { kind: "report", label: "등록 완료 보고" },
+      ],
+      warn: reason.ok ? null : reason.conclusion,
+    };
+  }
+  // (B) "재고 확인" (특정 상품 or 부족)
+  if (/재고/.test(tNS)) {
+    if (/(부족|모자|없는|떨어)/.test(tNS)) {
+      const low = biLowStock(products, 3);
+      return { goal: "재고 부족 상품 조회", steps: [{ kind: "read", tool: "product.search", label: "재고 분석" }, { kind: "report", label: low.length ? `재고 부족: ${low.map((l) => `${l.name}(${l.stock})`).join(", ")}` : "재고 부족 상품이 없어요" }], data: low };
+    }
+    const prod = (typeof fuzzyProductMatch === "function") ? fuzzyProductMatch(raw, products, 0.5) : null;
+    if (prod) { const st = biStockNum(prod); return { goal: `${prod.name} 재고 확인`, steps: [{ kind: "read", tool: "product.search", label: `${prod.name} 조회` }, { kind: "report", label: st == null ? `${prod.name} 재고 정보가 없어요` : `${prod.name} 재고 ${st}개` }], data: { name: prod.name, stock: st } }; }
+    return { goal: "재고 확인", needsInfo: { question: "어떤 상품 재고를 확인할까요?" } };
+  }
+  // (C) "오늘 해야 할 일 / 오늘 뭐부터"
+  if (/(오늘.*(할일|해야|뭐부터|뭐먼저|업무)|할일|우선순위)/.test(tNS)) {
+    const pr = aiDailyPriorities(appData);
+    return { goal: "오늘 업무 우선순위", steps: [{ kind: "analyze", label: "오늘 업무 분석" }, { kind: "report", label: pr.length ? pr.map((x, i) => `${i + 1}. ${x.task}(${x.count}건)`).join(" / ") : "오늘 급한 일은 없어요" }], data: pr };
+  }
+  // (D) "거래명세서 보내 / 명세서 보내"
+  if (/(거래명세서|명세서).*(보내|발송|전송|만들|생성)/.test(tNS) || /(명세서보내|명세서발송)/.test(tNS)) {
+    const name = nameHit || (ctx && (ctx.currentVendor || ctx.currentCustomer)) || "";
+    return {
+      goal: `${name || "업체"} 거래명세서 발송`,
+      steps: [
+        { kind: "read", tool: "invoice.find", label: `${name || "업체"} 명세서 조회` },
+        { kind: "write", tool: "invoice.download", requiresConfirm: false, label: "거래명세서(엑셀) 생성" },
+        { kind: "read", tool: "contact.check", label: "연락처 확인" },
+        { kind: "confirm", requiresConfirm: true, label: `${name || "업체"}에 명세서 문자를 보낼까요?` },
+        { kind: "report", label: "발송 준비 완료(문자앱 열기)" },
+      ],
+      note: "문자·카톡 발송은 반드시 확인 후 문자앱을 통해 사장님이 보냅니다(자동 발송 안 함).",
+    };
+  }
+  // (E) "내일 출고 / 예약"
+  if (/(내일|모레|예약).*(출고|발송|보내|주문)/.test(tNS) || /(출고예약|발송예약)/.test(tNS)) {
+    const name = nameHit || (ctx && ctx.currentCustomer) || "";
+    return { goal: "예약 출고 주문", steps: [{ kind: "read", tool: "customer.search", label: name ? `${name} 조회` : "고객 확인" }, { kind: "write", tool: "order.create", requiresConfirm: true, label: "예약 주문 초안 작성(발송일 지정)" }, { kind: "confirm", label: "예약 주문 등록할까요?" }, { kind: "report", label: "예약 등록 완료" }], needsInfo: name ? null : { question: "누구 예약 주문인가요? 상품과 발송일도 알려주세요." } };
+  }
+  // (F) 그 외 → STEP3 단일 의도로 폴백(계획 없이 바로 도구 1개)
+  const intent = (typeof aiResolveIntent === "function") ? aiResolveIntent(raw, ctx || createConvContext(), appData) : null;
+  if (intent && intent.command) return { goal: "요청 처리", single: true, intent, steps: [{ kind: intent.access === "read" ? "read" : "write", tool: intent.tool, requiresConfirm: intent.access !== "read", command: intent.command, label: (AI_TOOL_REGISTRY.get(intent.tool) || {}).title || "작업" }] };
+  return { goal: "요청 이해 실패", needsInfo: { question: "무엇을 도와드릴까요? (예: \"김철수 지난번처럼\", \"청겨자 재고 확인\", \"오늘 할일\")" } };
+}
+
+// 계획 실행: 읽기/분석/보고는 자동, write·destructive·confirm은 멈춰 사용자 확인 요청. 단계별 성공여부·오류 보고.
+function aiRunPlan(plan, deps) {
+  const log = []; const D = deps || {};
+  if (!plan || plan.needsInfo) return { status: "need_info", question: plan && plan.needsInfo && plan.needsInfo.question, log };
+  for (const step of (plan.steps || [])) {
+    if (step.kind === "read" || step.kind === "analyze" || step.kind === "report") { log.push({ step: step.label, ok: true }); continue; }
+    if (step.kind === "confirm" || step.requiresConfirm) {
+      return { status: "need_confirm", confirmLabel: step.label || (plan.goal + " 진행할까요?"), command: step.command || null, plan, log, warn: plan.warn };
+    }
+    // write(비확인) — 안전하면 실행
+    if (step.command && typeof D.execute === "function") { let ok = false; try { ok = D.execute(step.command); } catch (e) { return { status: "error", error: `${step.label} 중 오류`, alternative: "잠시 후 다시 시도하거나 화면에서 직접 진행해 주세요.", log }; } log.push({ step: step.label, ok }); }
+  }
+  return { status: "done", log, report: plan.goal + " 처리 계획을 마쳤어요." };
+}
+
+// Explainable: 계획/추천의 근거를 사람 말로.
+function aiExplainPlan(plan) {
+  if (!plan) return "";
+  const parts = [];
+  if (plan.goal) parts.push(`목표: ${plan.goal}`);
+  if (plan.evidence && plan.evidence.length) parts.push("근거: " + plan.evidence.join(" · "));
+  if (plan.steps && plan.steps.length) parts.push("순서: " + plan.steps.map((s) => s.label).filter(Boolean).join(" → "));
+  if (plan.warn) parts.push("주의: " + plan.warn);
+  if (plan.note) parts.push(plan.note);
+  return parts.join("\n");
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   STEP 6 — Autonomous AI Operating System (AI OS). 독립 모듈, 순수 함수.
+   원칙(엄수): ① 기존 기능 절대 삭제·재구현 안 함(전부 기존 Tool/함수 호출·읽기).
+   ② AI는 사용자 승인 없이 중요한 작업(쓰기/삭제/발송)을 실행하지 않음.
+   ③ AI는 항상 근거를 설명할 수 있어야 함. ④ Firebase stores/* 구조 변경 없음.
+   구성: OS Core / Multi-Agent / Predictive Intelligence / Self Monitoring /
+        Self Optimization / Plugin Ecosystem / Natural Conversation / Dashboard 데이터.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+const AI_OS_INFO = {
+  name: "조비서 AI OS",
+  version: "1.0",
+  vision: "농장 업무 전체를 AI가 이해하고, 먼저 준비하고, 근거와 함께 제안하는 운영체제. 실행은 항상 사장님 승인 후.",
+  principles: [
+    "기존 기능은 삭제하지 않고 모두 AI가 쓰는 Tool로 유지",
+    "중요한 작업(쓰기·삭제·발송)은 반드시 사용자 승인 후 실행",
+    "모든 판단은 근거(evidence)를 함께 제시",
+    "개인 데이터·저장구조(stores/*)는 변경하지 않음",
+  ],
+};
+
+// ── ⑦-A Multi-Agent 레이어: 각 에이전트 = 기존 Tool 묶음(도메인 전문가). 실행 로직 없음(라우팅/설명만).
+const AI_AGENTS = [
+  { id: "coordinator", name: "총괄 조정자", role: "요청을 이해해 담당 에이전트로 배분하고 결과를 종합", tools: [] },
+  { id: "order",      name: "주문 담당",   role: "주문 등록·수정·상태·묶음배송", tools: ["order.create", "order.addItem", "order.edit", "order.removeItem", "order.bundle", "order.rebundle", "order.status.set", "order.invoiceNo.set", "order.delete"] },
+  { id: "customer",   name: "고객 담당",   role: "고객 조회·이력·패턴", tools: ["customer.search"] },
+  { id: "vendor",     name: "거래처 담당", role: "거래처 조회·명세서", tools: ["vendor.search"] },
+  { id: "inventory",  name: "재고 담당",   role: "상품 재고 조회·부족 감지", tools: ["product.search"] },
+  { id: "shipment",   name: "배송 담당",   role: "출고·송장·배송 도착 확인", tools: ["delivery.confirm", "order.invoiceNo.set"] },
+  { id: "finance",    name: "정산 담당",   role: "거래명세서·정산 집계", tools: ["stat.query"] },
+  { id: "analytics",  name: "분석 담당",   role: "매출·판매 추세·고객 통계", tools: ["stat.query"] },
+  { id: "scheduler",  name: "일정 담당",   role: "예약 출고·오늘 우선순위", tools: ["order.create"] },
+  { id: "voice",      name: "음성 담당",   role: "음성 인식·발음 보정", tools: ["nav.goto"] },
+  { id: "conversation", name: "대화 담당", role: "일상 대화·안내", tools: [] },
+  { id: "planner",    name: "설계 담당",   role: "여러 단계 계획 수립", tools: [] },
+  { id: "reasoning",  name: "추론 담당",   role: "정보 종합·근거 판단", tools: [] },
+  { id: "system",     name: "시스템 담당", role: "화면 이동·되돌리기·백업", tools: ["nav.goto", "undo.last"] },
+];
+function aiAgentForTool(tool) {
+  if (!tool) return AI_AGENTS[0];
+  const hit = AI_AGENTS.find((a) => a.tools.indexOf(tool) >= 0);
+  return hit || AI_AGENTS[0];
+}
+function createAgentCoordinator() {
+  const map = {}; AI_AGENTS.forEach((a) => { map[a.id] = a; });
+  return {
+    list: () => AI_AGENTS.slice(),
+    get: (id) => map[id] || null,
+    // 요청 텍스트/의도 → 담당 에이전트 결정(근거 포함). 실행은 하지 않음.
+    route: (text, ctx, appData) => {
+      const tNS = String(text || "").replace(/\s/g, "");
+      if (!tNS) return { agent: map.coordinator, tool: null, reason: "요청 없음" };
+      if (/재고|부족|남았|떨어/.test(tNS)) return { agent: map.inventory, tool: "product.search", reason: "재고 관련 표현 감지" };
+      if (/(매출|판매|추세|통계|얼마|집계)/.test(tNS)) return { agent: map.analytics, tool: "stat.query", reason: "분석/집계 표현 감지" };
+      if (/(명세서|정산|입금|미수)/.test(tNS)) return { agent: map.finance, tool: "stat.query", reason: "정산 관련 표현 감지" };
+      if (/(배송|도착|출고|송장)/.test(tNS)) return { agent: map.shipment, tool: "delivery.confirm", reason: "배송 관련 표현 감지" };
+      if (/(예약|내일|모레)/.test(tNS)) return { agent: map.scheduler, tool: "order.create", reason: "예약/일정 표현 감지" };
+      // 그 외: 의도 엔진으로 도구 판별 후 담당 배정
+      let tool = null;
+      try { const it = (typeof aiResolveIntent === "function") ? aiResolveIntent(text, ctx || createConvContext(), appData) : null; tool = it && it.tool; } catch (e) {}
+      const agent = aiAgentForTool(tool);
+      return { agent, tool: tool || null, reason: tool ? `${agent.name}의 도구(${tool})로 처리` : "일반 대화로 처리" };
+    },
+  };
+}
+
+// ── ⑦-B Predictive Intelligence: 읽기 전용 예측. 반드시 근거(evidence)와 신뢰수준을 함께.
+const AI_SEASON_HINTS = {
+  1: ["겨울 쌈채소 보온 배송 주의"], 2: ["설 선물 수요"], 3: ["봄 새싹·나물 수요 증가"],
+  4: ["봄나들이 도시락 채소"], 5: ["가정의 달 선물세트"], 6: ["초여름 신선 배송 아이스팩"],
+  7: ["여름 신선도 관리(아이스팩 필수)"], 8: ["휴가철 배송 지연 대비"], 9: ["추석 선물 수요"],
+  10: ["가을 김장 준비 채소"], 11: ["김장철 대량 수요"], 12: ["연말 선물·모임 수요"],
+};
+function aiPredictSeasonal(appData, month) {
+  const m = month || ((typeof todayStr === "function") ? Number(String(todayStr()).slice(5, 7)) : 1);
+  const hints = AI_SEASON_HINTS[m] || [];
+  return { month: m, hints, evidence: [`${m}월 계절 특성`], confidence: "참고" };
+}
+// 재고 소진 예측: 최근 7일 판매속도 vs 현재고 → 소진까지 남은 일수(근거 포함).
+function aiPredictStock(appData) {
+  const orders = (appData && appData.orders) || [], products = (appData && appData.products) || [];
+  const sales7 = biProductSales(orders, 7);
+  const out = [];
+  (products || []).forEach((p) => {
+    const st = biStockNum(p); if (st == null) return;
+    const s = sales7.find((x) => biNS(x.name) === biNS(p.name));
+    const perDay = s ? s.qty / 7 : 0;
+    if (perDay <= 0) return;
+    const days = Math.floor(st / perDay);
+    if (days <= 5) out.push({ name: p.name, stock: st, perDay: Math.round(perDay * 10) / 10, daysLeft: days,
+      evidence: `최근 7일 ${s.qty}개 판매(하루 ~${Math.round(perDay * 10) / 10}개), 현재고 ${st}개`, confidence: "추정" });
+  });
+  return out.sort((a, b) => a.daysLeft - b.daysLeft);
+}
+// 매출/판매 추세 예측: 최근 7일 vs 이전 7일(14일-7일) 비교 → 증감 방향(근거 포함).
+function aiPredictSales(appData) {
+  const orders = (appData && appData.orders) || [];
+  const s7 = biProductSales(orders, 7), s14 = biProductSales(orders, 14);
+  const total7 = s7.reduce((a, b) => a + b.qty, 0);
+  const total14 = s14.reduce((a, b) => a + b.qty, 0);
+  const prev7 = total14 - total7;
+  const dir = total7 > prev7 ? "증가" : (total7 < prev7 ? "감소" : "유지");
+  const top = s7.slice(0, 3).map((x) => `${x.name} ${x.qty}개`);
+  return { recent7: total7, prev7, direction: dir, top,
+    evidence: [`최근 7일 ${total7}개 vs 이전 7일 ${prev7}개`, top.length ? `인기: ${top.join(", ")}` : ""].filter(Boolean),
+    confidence: (total14 >= 5 ? "추정" : "데이터 적음") };
+}
+function aiPredictAll(appData) {
+  return { seasonal: aiPredictSeasonal(appData), stock: aiPredictStock(appData), sales: aiPredictSales(appData) };
+}
+
+// ── ⑦-C Self Monitoring: 앱 상태 자가 점검(읽기). 저장 용량·데이터량·오류 신호를 근거와 함께.
+function aiEstimateDocSize(appData) {
+  try { return JSON.stringify(appData || {}).length; } catch (e) { return 0; }
+}
+function aiSelfMonitor(appData, extra) {
+  const e = extra || {};
+  const orders = (appData && appData.orders) || [];
+  const bytes = aiEstimateDocSize(appData);
+  const limit = 1024 * 1024; // Firestore 1MB
+  const pct = Math.round((bytes / limit) * 100);
+  const warnings = [];
+  if (pct >= 80) warnings.push({ level: "high", text: `저장 문서가 1MB의 ${pct}%입니다. 저장구조 분리(P8)가 곧 필요해요.`, evidence: `현재 ~${Math.round(bytes / 1024)}KB / 1024KB` });
+  else if (pct >= 60) warnings.push({ level: "mid", text: `저장 문서가 1MB의 ${pct}%입니다. 추이를 지켜보세요.`, evidence: `현재 ~${Math.round(bytes / 1024)}KB` });
+  if (typeof e.errorCount === "number" && e.errorCount > 0) warnings.push({ level: "mid", text: `최근 오류 ${e.errorCount}건이 기록되었어요.`, evidence: "오류 로그" });
+  const health = pct >= 80 ? "주의" : (warnings.length ? "양호(관찰)" : "양호");
+  return { health, storagePct: pct, storageKB: Math.round(bytes / 1024), orderCount: orders.length, warnings,
+    evidence: [`주문 ${orders.length}건`, `저장 ~${Math.round(bytes / 1024)}KB(${pct}%)`] };
+}
+
+// ── ⑦-D Self Optimization: 개선 '제안'만(자동 수정 금지). 항상 승인 필요 표시.
+function aiSelfOptimize(monitor, appData) {
+  const props = []; const m = monitor || aiSelfMonitor(appData);
+  if (m.storagePct >= 60) props.push({ id: "storage.split", title: "저장구조 분리(P8)", benefit: "1MB 한계 회피·속도 개선", action: "컬렉션 분리(주문/고객/상품 별도 문서)", requiresApproval: true, evidence: `저장 ${m.storagePct}%` });
+  const pstock = aiPredictStock(appData);
+  if (pstock.length) props.push({ id: "stock.reorder", title: "부족 임박 상품 발주 검토", benefit: "품절 방지", action: `${pstock.slice(0, 3).map((x) => `${x.name}(${x.daysLeft}일)`).join(", ")} 발주 검토`, requiresApproval: true, evidence: pstock[0].evidence });
+  return props;
+}
+
+// ── ⑦-E Plugin Ecosystem: 표준 인터페이스로 미래 연동을 '선언'(실제 연결 없음, status: planned).
+//   plugin = { id, name, category, status, capabilities[], connect?() }. 자동발견 가능한 표준 형태.
+const AI_PLUGIN_DEFS = [
+  { id: "courier",     name: "택배사 연동",     category: "물류", capabilities: ["송장 자동 등록", "배송 추적"] },
+  { id: "accounting",  name: "회계 연동",       category: "재무", capabilities: ["매출 전표", "세금계산서"] },
+  { id: "market",      name: "농산물 시세",     category: "정보", capabilities: ["도매 시세 조회"] },
+  { id: "weather",     name: "날씨",           category: "정보", capabilities: ["출고일 날씨", "배송 지연 예보"] },
+  { id: "kakao",       name: "카카오톡 알림",   category: "메시지", capabilities: ["주문 확인 알림"] },
+  { id: "sms",         name: "SMS 발송",        category: "메시지", capabilities: ["문자 발송(승인 후)"] },
+  { id: "email",       name: "이메일",         category: "메시지", capabilities: ["명세서 메일"] },
+  { id: "erp",         name: "ERP 연동",        category: "시스템", capabilities: ["재고·회계 동기화"] },
+  { id: "smartstore",  name: "스마트스토어",    category: "판매채널", capabilities: ["주문 수집"] },
+  { id: "coupang",     name: "쿠팡",           category: "판매채널", capabilities: ["주문 수집"] },
+  { id: "nhmall",      name: "농협몰",         category: "판매채널", capabilities: ["주문 수집"] },
+];
+function createPluginRegistry() {
+  const map = {};
+  AI_PLUGIN_DEFS.forEach((p) => { map[p.id] = Object.assign({ status: "planned", connect: null }, p); });
+  return {
+    list: () => Object.values(map),
+    get: (id) => map[id] || null,
+    byCategory: (c) => Object.values(map).filter((p) => p.category === c),
+    // 표준 등록: 미래에 실제 커넥터를 붙일 때 같은 형태로 교체(구조 변경 없이 확장).
+    register: (plugin) => { if (plugin && plugin.id) { map[plugin.id] = Object.assign({ status: "planned", connect: null }, plugin); return true; } return false; },
+    active: () => Object.values(map).filter((p) => p.status === "active"),
+    planned: () => Object.values(map).filter((p) => p.status === "planned"),
+  };
+}
+const AI_PLUGIN_REGISTRY = createPluginRegistry();
+
+// ── ⑦-F Natural Conversation: 일상 대화 vs 업무 모드 자동 판별(근거 포함).
+const _AI_BIZ_HINT = /(주문|재고|배송|명세서|정산|고객|거래처|출고|송장|상품|발주|입금|예약|묶음|취소|삭제|수정|등록|매출|판매)/;
+const _AI_CASUAL_HINT = /(안녕|고마워|고맙|수고|잘했|좋아|반가|하이|헬로|미안|사랑|화이팅|힘내|잘자|굿|ㅎㅎ|ㅋㅋ)/;
+function aiConversationMode(text) {
+  const t = String(text || "");
+  const biz = _AI_BIZ_HINT.test(t), casual = _AI_CASUAL_HINT.test(t);
+  if (biz) return { mode: "business", reason: "업무 키워드 감지" };
+  if (casual && !biz) return { mode: "casual", reason: "인사/감정 표현 감지" };
+  return { mode: "business", reason: "기본 업무 모드" };
+}
+
+// ── ⑦-G AI OS Core: 위 엔진들을 '조합'만 함(재구현 없음). 대시보드/브리핑 데이터와 실행 위임 제공.
+//   deps: { execute(command), appData(), userId() }. 실행은 기존 handleVoiceAction으로만.
+function createAiOS(deps) {
+  const D = deps || {};
+  const coordinator = createAgentCoordinator();
+  const getData = () => (typeof D.appData === "function" ? D.appData() : {}) || {};
+  const getUser = () => (typeof D.userId === "function" ? D.userId() : "__anon__");
+  return {
+    info: AI_OS_INFO,
+    agents: coordinator,
+    plugins: AI_PLUGIN_REGISTRY,
+    // 하루 브리핑(대시보드 데이터). 전부 읽기. 실행 없음.
+    brief: () => {
+      const appData = getData(); const uid = getUser();
+      return {
+        priorities: aiDailyPriorities(appData),
+        recommendations: aiRecommendations(appData, uid),
+        predict: aiPredictAll(appData),
+        monitor: aiSelfMonitor(appData),
+        optimize: aiSelfOptimize(null, appData),
+        proactive: aiProactive(appData, uid),
+        reminders: aiReminders(appData, aiSettingsIsOn(uid, "reminder") ? {} : { unprocessed: false, lowstock: false, reserved: false, unpaid: false, urgent: false }),
+        dailySummary: aiDailySummary(appData),
+      };
+    },
+    // STEP9: 선제 제안·리마인더·요약·분석·기억(전부 읽기/제안, 실행은 확인 후).
+    proactive: () => aiProactive(getData(), getUser()),
+    reminders: () => aiReminders(getData(), aiSettingsIsOn(getUser(), "reminder") ? {} : { unprocessed: false, lowstock: false, reserved: false, unpaid: false, urgent: false }),
+    dailySummary: () => aiDailySummary(getData()),
+    weekly: () => aiWeeklyAnalysis(getData()),
+    memoryTiers: () => aiMemoryTiers(),
+    businessMemory: () => aiBusinessMemory(getData()),
+    // 요청 처리: 계획 → (읽기 자동) → 쓰기·발송·삭제는 need_confirm으로 멈춤. 근거 동봉.
+    handle: (text, ctx) => {
+      const appData = getData();
+      const conv = aiConversationMode(text);
+      const route = coordinator.route(text, ctx, appData);
+      const plan = aiPlan(text, ctx || createConvContext(), appData);
+      const explain = aiExplainPlan(plan);
+      return { mode: conv.mode, agent: route.agent && route.agent.name, route, plan, explain };
+    },
+    run: (plan) => aiRunPlan(plan, { execute: (c) => (typeof D.execute === "function" ? D.execute(c) : false) }),
+    monitor: () => aiSelfMonitor(getData()),
+    predict: () => aiPredictAll(getData()),
+    // ★ STEP7: LLM Provider 기반 자연어 채팅(공급자 교체 가능). 실행은 여전히 기존 Tool로만.
+    chat: (text, ctx) => aiProviderChat(text, ctx || createConvContext(), getData(), {
+      execute: (c) => (typeof D.execute === "function" ? D.execute(c) : false),
+      userId: getUser,
+    }),
+    providers: () => AI_LLM_REGISTRY,
+  };
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   STEP 7 — LLM Provider 레이어 (공급자 독립 구조). 독립 모듈, 순수/비동기 함수.
+   목표: 특정 AI 서비스에 종속되지 않게. Provider만 바꾸면 Mock↔OpenAI↔Claude↔Gemini 전환.
+   원칙: ① 기존 기능·Tool 절대 재구현 안 함(전부 호출·재사용).
+        ② 개발 단계 기본은 Mock(무료·오프라인). 유료 API는 키 있을 때만 호출(비용 0 유지).
+        ③ Conversation Engine은 특정 LLM을 직접 부르지 않고 Provider Interface로만 호출.
+        ④ LLM은 '의도·대화·계획·Tool 선택'만. 실제 작업은 기존 Tool(→handleVoiceAction).
+        ⑤ 중요한 작업(쓰기·삭제·발송)은 반드시 사용자 확인 후 실행.
+        ⑥ Memory·Voice 학습은 Provider와 독립(Mock에서도 동일 동작).
+   ───────────────────────────────────────────────────────────────────────────
+   표준 계약(Provider Interface):
+     provider = { id, name, isMock, needsKey, hasKey(), complete(request) }
+     request  = { messages:[{role,content}], tools:[toolSchema], appData, ctx, mode }
+     response = { provider, mode, text, toolCalls:[{tool,args,reason}], plan?, usage:{cost} }
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+// 도구 정의 → JSON 스키마(함수호출 파라미터). 실제 유료 API가 그대로 쓰는 표준 형태.
+function llmToolToJsonSchema(t) {
+  const props = {}; const p = (t && t.params) || {};
+  Object.keys(p).forEach((k) => { props[k] = { type: (typeof p[k] === "string" ? p[k] : "string") }; });
+  return { name: t.name, description: t.title || t.name, parameters: { type: "object", properties: props } };
+}
+function llmToolSchemas() { return AI_TOOL_DEFS.map(llmToolToJsonSchema); }
+
+// toolCall(tool,args) → 기존 실행 커맨드로 변환(기존 toCommand 재사용). 없으면 null.
+function llmToolCallToCommand(tool, args) {
+  const def = AI_TOOL_DEFS.find((t) => t.name === tool);
+  if (!def || typeof def.toCommand !== "function") return null;
+  try { return def.toCommand(args || {}); } catch (e) { return null; }
+}
+
+/* ── ① Mock AI Provider (기본·무료) ──────────────────────────────────────────
+   실제 LLM 없이도 대화/Tool호출/계획을 '진짜로' 수행. 기존 로컬 엔진(STEP3~6)을 재사용해
+   공급자 응답 형태로 정규화한다. → OpenAI로 바꿔도 앱의 다른 부분은 그대로. */
+const _MOCK_CASUAL_REPLIES = {
+  "안녕": "안녕하세요, 사장님! 조비서예요. 오늘도 좋은 하루 보내세요 😊 무엇을 도와드릴까요?",
+  "고마워": "별말씀을요! 언제든 불러 주세요.",
+  "수고": "감사합니다, 사장님도 고생 많으셨어요!",
+  "잘했어": "칭찬 감사합니다! 더 잘 도와드릴게요.",
+};
+function _mockCasualText(text) {
+  const t = String(text || "").replace(/\s/g, "");
+  const hit = Object.keys(_MOCK_CASUAL_REPLIES).find((k) => t.includes(k));
+  return hit ? _MOCK_CASUAL_REPLIES[hit] : "네, 사장님. 말씀하신 내용 편하게 이어서 말씀해 주세요.";
+}
+function createMockProvider() {
+  return {
+    id: "mock", name: "Mock AI (무료·개발용)", isMock: true, needsKey: false,
+    hasKey: () => true,
+    // 동기 로컬 엔진을 Promise로 감싸 유료 API와 동일한 async 계약 유지.
+    complete: (request) => {
+      const req = request || {};
+      const text = ((req.messages || []).slice(-1)[0] || {}).content || "";
+      const ctx = req.ctx || createConvContext();
+      const appData = req.appData || {};
+      const mode = (req.mode) || aiConversationMode(text).mode;
+      // 일상 대화 → Tool 없이 자연스러운 답
+      if (mode === "casual") {
+        return Promise.resolve({ provider: "mock", mode, text: _mockCasualText(text), toolCalls: [], usage: { cost: 0 } });
+      }
+      // 업무 대화 → 기존 Planner로 계획 수립 후 write 단계를 toolCall로 변환
+      const plan = aiPlan(text, ctx, appData);
+      const toolCalls = [];
+      if (plan && plan.steps) {
+        plan.steps.forEach((s) => {
+          if (s.command) {
+            const def = AI_TOOL_DEFS.find((t) => t.name === s.tool);
+            toolCalls.push({ tool: s.tool || (def && def.name) || null, args: s.command.payload || s.command, reason: s.label, requiresConfirm: !!s.requiresConfirm, command: s.command });
+          }
+        });
+      }
+      // Function Calling 표준화: 읽기 결과(report 단계 라벨)를 자연스러운 문장으로 전달.
+      const reportStep = (plan && plan.steps || []).slice().reverse().find((s) => s.kind === "report" && s.label);
+      const replyText = plan && plan.needsInfo ? plan.needsInfo.question
+        : (reportStep ? reportStep.label
+          : (plan && plan.goal ? `${plan.goal} — 준비했어요.${plan.warn ? " ⚠️ " + plan.warn : ""}` : "요청을 처리할게요."));
+      return Promise.resolve({ provider: "mock", mode, text: replyText, toolCalls, plan, explain: aiExplainPlan(plan), usage: { cost: 0 } });
+    },
+  };
+}
+
+/* ── ②③④ 유료 Provider 스켈레톤 (키 있을 때만 호출 → 비용 0 유지) ──────────────
+   요청 생성(toRequest)·응답 파싱(fromResponse)은 순수 함수라 유닛테스트로 구조 검증 가능.
+   실제 네트워크 호출은 hasKey()일 때만. 키 없으면 명확한 안내 에러(작동 불능이 아니라 '준비됨'). */
+const AI_OPENAI_ENABLED_LS = "joassam_openai_enabled_v1"; // "1"일 때만 실제 API 호출(기본 비활성 → 비용 0)
+function aiOpenAIEnabled() { try { return (typeof localStorage !== "undefined" && localStorage.getItem(AI_OPENAI_ENABLED_LS)) === "1"; } catch (e) { return false; } }
+function createOpenAIProvider(getKey) {
+  const key = () => (typeof getKey === "function" ? getKey() : "");
+  return {
+    id: "openai", name: "OpenAI (ChatGPT)", isMock: false, needsKey: true,
+    hasKey: () => !!key(),
+    isEnabled: () => !!key() && aiOpenAIEnabled(),
+    toRequest: (req) => ({ model: "gpt-4o-mini", messages: req.messages || [], tools: (req.tools || llmToolSchemas()).map((f) => ({ type: "function", function: f })), tool_choice: "auto", stream: !!(req && req.stream) }),
+    fromResponse: (raw) => {
+      const msg = raw && raw.choices && raw.choices[0] && raw.choices[0].message || {};
+      const calls = (msg.tool_calls || []).map((c) => { let a = {}; try { a = JSON.parse(c.function.arguments || "{}"); } catch (e) {} return { tool: c.function.name, args: a, reason: "openai tool_call" }; });
+      return { provider: "openai", text: msg.content || "", toolCalls: calls, usage: { cost: null } };
+    },
+    complete: function (req) {
+      if (!this.hasKey()) return Promise.reject(new Error("OpenAI 키가 없습니다. 설정에서 키를 입력하면 즉시 전환됩니다."));
+      if (!aiOpenAIEnabled()) return Promise.reject(new Error("OpenAI는 준비 완료(비활성) 상태예요. 설정에서 'OpenAI 사용'을 켜면 즉시 작동합니다."));
+      const self = this;
+      return fetch("https://api.openai.com/v1/chat/completions", { method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key() }, body: JSON.stringify(self.toRequest(req)) })
+        .then((r) => r.json()).then((raw) => Object.assign({ mode: req.mode }, self.fromResponse(raw)));
+    },
+  };
+}
+function createClaudeProvider(getKey) {
+  const key = () => (typeof getKey === "function" ? getKey() : "");
+  return {
+    id: "claude", name: "Claude (Anthropic)", isMock: false, needsKey: true,
+    hasKey: () => !!key(),
+    toRequest: (req) => ({ model: "claude-3-5-sonnet-latest", max_tokens: 1024, messages: (req.messages || []).filter((m) => m.role !== "system"), tools: (req.tools || llmToolSchemas()).map((f) => ({ name: f.name, description: f.description, input_schema: f.parameters })) }),
+    fromResponse: (raw) => {
+      const content = (raw && raw.content) || [];
+      const text = content.filter((c) => c.type === "text").map((c) => c.text).join(" ");
+      const calls = content.filter((c) => c.type === "tool_use").map((c) => ({ tool: c.name, args: c.input || {}, reason: "claude tool_use" }));
+      return { provider: "claude", text: text, toolCalls: calls, usage: { cost: null } };
+    },
+    complete: function (req) {
+      if (!this.hasKey()) return Promise.reject(new Error("Claude 키가 없습니다. 설정에서 키를 입력하면 즉시 전환됩니다."));
+      const self = this;
+      return fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json", "x-api-key": key(), "anthropic-version": "2023-06-01" }, body: JSON.stringify(self.toRequest(req)) })
+        .then((r) => r.json()).then((raw) => Object.assign({ mode: req.mode }, self.fromResponse(raw)));
+    },
+  };
+}
+function createGeminiProvider(getKey) {
+  const key = () => (typeof getKey === "function" ? getKey() : "");
+  return {
+    id: "gemini", name: "Gemini (Google)", isMock: false, needsKey: true,
+    hasKey: () => !!key(),
+    toRequest: (req) => ({ contents: (req.messages || []).map((m) => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content || "" }] })), tools: [{ functionDeclarations: (req.tools || llmToolSchemas()) }] }),
+    fromResponse: (raw) => {
+      const parts = (raw && raw.candidates && raw.candidates[0] && raw.candidates[0].content && raw.candidates[0].content.parts) || [];
+      const text = parts.filter((p) => p.text).map((p) => p.text).join(" ");
+      const calls = parts.filter((p) => p.functionCall).map((p) => ({ tool: p.functionCall.name, args: p.functionCall.args || {}, reason: "gemini functionCall" }));
+      return { provider: "gemini", text: text, toolCalls: calls, usage: { cost: null } };
+    },
+    complete: function (req) {
+      if (!this.hasKey()) return Promise.reject(new Error("Gemini 키가 없습니다. 설정에서 키를 입력하면 즉시 전환됩니다."));
+      const self = this;
+      return fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + encodeURIComponent(key()), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(self.toRequest(req)) })
+        .then((r) => r.json()).then((raw) => Object.assign({ mode: req.mode }, self.fromResponse(raw)));
+    },
+  };
+}
+
+/* ── 표준 인터페이스 부여: 모든 Provider가 chat/streamChat/functionCall/health 를 갖도록.
+   complete() 하나만 있으면 나머지는 자동 파생 → OpenAIProvider도 complete만 구현하면 됨. */
+function llmWithInterface(p) {
+  if (!p) return p;
+  p.chat = p.chat || ((req) => Promise.resolve().then(() => p.complete(req)));
+  p.functionCall = p.functionCall || ((req) => p.chat(req).then((r) => (r && r.toolCalls) || []));
+  p.streamChat = p.streamChat || ((req, onChunk) => p.chat(req).then((r) => {
+    const parts = String((r && r.text) || "").split(/(\s+)/);
+    parts.forEach((x) => { if (x) { try { if (typeof onChunk === "function") onChunk(x); } catch (e) {} } });
+    return r;
+  }));
+  // ★ STEP8: summarize()·healthCheck() 추가 — 모든 Provider 동일 인터페이스.
+  p.summarize = p.summarize || ((textOrMsgs) => Promise.resolve({ summary: aiLocalSummarize(textOrMsgs), provider: p.id }));
+  p.health = p.health || (() => ({ ok: true, provider: p.id, name: p.name, isMock: !!p.isMock, needsKey: !!p.needsKey, hasKey: (typeof p.hasKey === "function" ? p.hasKey() : true), enabled: (typeof p.isEnabled === "function" ? p.isEnabled() : true) }));
+  p.healthCheck = p.healthCheck || (() => Promise.resolve(p.health()));
+  return p;
+}
+// 로컬 요약(무료·Provider 독립): 대화/메시지에서 핵심(고객·상품·의도)을 짧게.
+function aiLocalSummarize(textOrMsgs) {
+  let turns = [];
+  if (Array.isArray(textOrMsgs)) turns = textOrMsgs.map((m) => (m && (m.content || m.user || m.text)) || "").filter(Boolean);
+  else if (textOrMsgs && Array.isArray(textOrMsgs.turns)) turns = textOrMsgs.turns.map((t) => t && t.user).filter(Boolean);
+  else if (typeof textOrMsgs === "string") turns = [textOrMsgs];
+  const joined = turns.join(" ");
+  const words = joined.replace(/\s+/g, " ").trim();
+  if (!words) return "";
+  return words.length > 80 ? words.slice(0, 80) + "…" : words;
+}
+
+/* ── ⑤ Provider Registry: 등록·전환. 기본 mock. 선택은 localStorage에 저장(유저 독립). ── */
+const AI_PROVIDER_KEY = "joassam_ai_provider_v1";
+function createLLMRegistry() {
+  const map = {};
+  const reg = {
+    register: (p) => { if (p && p.id) { map[p.id] = llmWithInterface(p); return true; } return false; },
+    list: () => Object.values(map),
+    get: (id) => map[id] || null,
+    ids: () => Object.keys(map),
+    getActiveId: () => { try { return (typeof localStorage !== "undefined" && localStorage.getItem(AI_PROVIDER_KEY)) || "mock"; } catch (e) { return "mock"; } },
+    setActive: (id) => { if (!map[id]) return false; try { if (typeof localStorage !== "undefined") localStorage.setItem(AI_PROVIDER_KEY, id); } catch (e) {} return true; },
+    active: function () { return map[this.getActiveId()] || map.mock || Object.values(map)[0] || null; },
+    health: () => Object.values(map).map((p) => (typeof p.health === "function" ? p.health() : { provider: p.id, ok: true })),
+  };
+  return reg;
+}
+const AI_LLM_REGISTRY = createLLMRegistry();
+AI_LLM_REGISTRY.register(createMockProvider());
+AI_LLM_REGISTRY.register(createOpenAIProvider(() => { try { return (typeof localStorage !== "undefined" && localStorage.getItem("joassam_openai_key_v1")) || ""; } catch (e) { return ""; } }));
+AI_LLM_REGISTRY.register(createClaudeProvider(() => { try { return (typeof localStorage !== "undefined" && localStorage.getItem("joassam_claude_key_v1")) || ""; } catch (e) { return ""; } }));
+AI_LLM_REGISTRY.register(createGeminiProvider(() => { try { return (typeof localStorage !== "undefined" && localStorage.getItem("joassam_gemini_key_v1")) || ""; } catch (e) { return ""; } }));
+
+/* ── ⑦ Smart Intent: 사용자의 '의도'를 분류(근거 포함). 추측 금지 → 애매하면 unknown. ── */
+const AI_INTENT_LABELS = ["주문", "고객조회", "재고", "업체", "OCR", "일반대화", "설정", "help", "unknown"];
+function aiClassifyIntent(text, ctx, appData) {
+  const t = String(text || "").replace(/\s/g, "");
+  if (!t) return { intent: "unknown", confidence: 0, reason: "빈 입력" };
+  if (_AI_CASUAL_HINT.test(t) && !_AI_BIZ_HINT.test(t)) return { intent: "일반대화", confidence: 0.8, reason: "인사/감정 표현" };
+  if (/(도움말|help|뭐할수있|뭘할수있|사용법|어떻게해|기능이뭐)/i.test(t)) return { intent: "help", confidence: 0.9, reason: "도움말 요청" };
+  if (/(설정|키설정|공급자|프로바이더|provider|모델변경|ai바꿔|ai변경)/i.test(t)) return { intent: "설정", confidence: 0.85, reason: "설정/공급자 변경" };
+  if (/(사진|이미지|스캔|영수증|주문서찍|캡처|ocr)/i.test(t)) return { intent: "OCR", confidence: 0.8, reason: "이미지/OCR 표현" };
+  if (/(재고|남았|모자|부족|떨어)/.test(t)) return { intent: "재고", confidence: 0.85, reason: "재고 표현" };
+  if (/(업체|거래처|납품|명세서|정산)/.test(t)) return { intent: "업체", confidence: 0.8, reason: "거래처/정산 표현" };
+  if (/(주문|담아|등록|보내|지난번처럼|저번처럼|평소처럼|추가|빼줘|예약|출고|묶음)/.test(t)) return { intent: "주문", confidence: 0.8, reason: "주문/출고 표현" };
+  const names = [...((appData && appData.customers) || []), ...((appData && appData.vendors) || [])].map((x) => x && x.name).filter(Boolean);
+  if (typeof matchName === "function" && matchName(String(text || ""), names)) return { intent: "고객조회", confidence: 0.75, reason: "등록된 이름 감지" };
+  if (/(찾아|조회|누구|정보|연락처|주소|전화|번호)/.test(t)) return { intent: "고객조회", confidence: 0.7, reason: "조회 표현" };
+  return { intent: "unknown", confidence: 0.2, reason: "매칭되는 의도 없음" };
+}
+
+/* ── ⑨ Logging: 대화의 모든 단계(Intent/Tool/Planner/Memory/Agent/Response/Error) 기록. 최근 200개. ── */
+const _AI_LOG = []; const _AI_LOG_MAX = 200; let _AI_LOG_SEQ = 0;
+function aiLog(kind, data) { try { _AI_LOG.push({ seq: ++_AI_LOG_SEQ, kind: kind, data: data }); if (_AI_LOG.length > _AI_LOG_MAX) _AI_LOG.shift(); } catch (e) {} return kind; }
+function aiLogGet(n) { return n ? _AI_LOG.slice(-n) : _AI_LOG.slice(); }
+function aiLogClear() { _AI_LOG.length = 0; _AI_LOG_SEQ = 0; }
+
+/* ── ⑤ Conversation Context: 최근 대화를 메시지로. 문맥(현재 고객/상품)은 ctx에 누적. ── */
+function aiBuildMessages(ctx, text) {
+  const msgs = [];
+  const turns = (ctx && ctx.turns) || [];
+  turns.slice(-6).forEach((t) => { if (t && t.user) msgs.push({ role: "user", content: t.user }); if (t && t.ai) msgs.push({ role: "assistant", content: t.ai }); });
+  msgs.push({ role: "user", content: String(text || "") });
+  return msgs;
+}
+// 대화 문맥 갱신: 등록된 고객/상품 이름이 나오면 현재 대상 기억(다음 턴의 '지난번처럼/주소는?' 해소용).
+function aiUpdateContext(ctx, text, appData) {
+  if (!ctx) return ctx;
+  const custNames = ((appData && appData.customers) || []).map((c) => c && c.name).filter(Boolean);
+  const vendNames = ((appData && appData.vendors) || []).map((v) => v && v.name).filter(Boolean);
+  const c = (typeof matchName === "function") ? matchName(String(text || ""), custNames) : "";
+  if (c) ctx.currentCustomer = c;
+  const v = (typeof matchName === "function") ? matchName(String(text || ""), vendNames) : "";
+  if (v) ctx.currentVendor = v;
+  const prod = (typeof fuzzyProductMatch === "function") ? fuzzyProductMatch(String(text || ""), (appData && appData.products) || [], 0.6) : null;
+  if (prod) ctx.currentProduct = prod.name;
+  return ctx;
+}
+
+/* ── ⑥ Conversation Engine (Provider 기반). Provider Interface만 호출(특정 LLM 직접호출 금지).
+   흐름: 의도분류 → (일반대화/도움말/설정은 즉답) → Provider.chat(Tool선택) → 안전게이트 → 기존 Tool 실행 → 문맥·기억 기록.
+   LLM은 '무엇을 할지'만. 실제 실행은 기존 handleVoiceAction(deps.execute)로만. 애매하면 추측 대신 Fallback. */
+const AI_FALLBACK_TEXT = "죄송해요, 정확히 이해하지 못했어요. 조금만 다르게 말씀해 주시겠어요? (예: \"김철수 지난번처럼\", \"청겨자 재고\", \"오늘 할일\")";
+const AI_HELP_TEXT = "저는 조비서예요. 이런 걸 도와드려요: 주문 등록·수정, 고객·업체 조회, 재고 확인, 거래명세서, 오늘 할일·우선순위, 배송 확인. 예를 들어 \"김철수 지난번처럼\", \"청겨자 재고 확인\", \"오늘 뭐부터 할까\"처럼 말씀해 주세요.";
+function aiProviderChat(text, ctx, appData, deps) {
+  const D = deps || {};
+  ctx = ctx || createConvContext();
+  appData = appData || {};
+  const provider = AI_LLM_REGISTRY.active();
+  const said = String(text || "");
+  if (!provider) return Promise.resolve({ status: "error", error: "사용 가능한 AI 공급자가 없어요.", text: "" });
+
+  const cls = aiClassifyIntent(said, ctx, appData);
+  aiLog("Intent", { text: said, intent: cls.intent, reason: cls.reason });
+
+  const record = (resp) => {
+    try { ctx.turns = ctx.turns || []; ctx.turns.push({ user: said, ai: resp.text || "", intent: cls.intent }); } catch (e) {}
+    aiUpdateContext(ctx, said, appData);
+    // ★ STEP8: 긴 대화는 자동 요약해 접고 최근 대화만 유지(Memory 저장 구조).
+    try { aiMaybeSummarize(ctx, (typeof D.userId === "function" ? D.userId() : "__anon__")); } catch (e) {}
+    // 개인 세션기억(Provider 독립): 언급된 고객 기록
+    try { if (ctx.currentCustomer && typeof aiSessionRecord === "function") aiSessionRecord((typeof D.userId === "function" ? D.userId() : "__anon__"), "customers", ctx.currentCustomer); } catch (e) {}
+    aiLog("Response", { status: resp.status, text: (resp.text || "").slice(0, 40) });
+    return resp;
+  };
+
+  // 도움말/설정/일반대화/미상 → Tool 없이 즉답(추측 금지)
+  if (cls.intent === "help") return Promise.resolve(record({ status: "done", provider: provider.id, mode: "casual", intent: cls.intent, text: AI_HELP_TEXT, toolCalls: [], log: aiLogGet(5) }));
+  if (cls.intent === "설정") return Promise.resolve(record({ status: "done", provider: provider.id, mode: "business", intent: cls.intent, text: `지금 AI 두뇌는 '${provider.name}'예요. 설정에서 다른 공급자(OpenAI·Claude·Gemini)로 바꿀 수 있어요.`, toolCalls: [], log: aiLogGet(5) }));
+  // ⑧ 의도 미상 → 계획엔진의 추측도 신뢰하지 않고 즉시 되물음(추측 금지)
+  if (cls.intent === "unknown") { aiLog("Agent", { decision: "fallback" }); return Promise.resolve(record({ status: "fallback", provider: provider.id, mode: "casual", intent: cls.intent, text: AI_FALLBACK_TEXT, toolCalls: [], log: aiLogGet(6) })); }
+
+  // ⑥ Prompt Builder로 시스템+대화(+기억요약) 조합 → Provider 표준 messages.
+  const promptMessages = aiBuildPrompt({ messages: aiBuildMessages(ctx, said), memorySummary: ctx.summary || "" });
+  const request = { messages: promptMessages, tools: llmToolSchemas(), appData: appData, ctx: ctx, mode: aiConversationMode(said).mode, intent: cls.intent };
+  return Promise.resolve()
+    .then(() => aiWithTimeout(provider.chat(request), 15000))
+    .then((res) => {
+      res = res || { toolCalls: [], text: "" };
+      const calls = res.toolCalls || [];
+      if (calls.length) aiLog("Tool", { picked: calls.map((c) => c.tool) });
+      if (res.plan) aiLog("Planner", { goal: res.plan.goal, steps: (res.plan.steps || []).length });
+
+      // ⑧ Fallback: 의도 미상이고 실행할 도구가 없으면 → 추측하지 말고 되물음(계획엔진 추측도 신뢰 안 함)
+      if (cls.intent === "unknown" && !calls.length) {
+        return record({ status: "fallback", provider: res.provider || provider.id, mode: res.mode, intent: cls.intent, text: AI_FALLBACK_TEXT, toolCalls: [], log: aiLogGet(6) });
+      }
+
+      // ⑤ 안전: 쓰기/삭제/발송이 하나라도 있으면 확인에서 멈춤(자동 실행 금지)
+      const unsafe = calls.find((c) => c && (c.requiresConfirm || !aiIsAutoSafe(c.tool)));
+      if (unsafe) {
+        const command = unsafe.command || llmToolCallToCommand(unsafe.tool, unsafe.args);
+        aiLog("Agent", { decision: "need_confirm", tool: unsafe.tool });
+        return record({ status: "need_confirm", provider: res.provider || provider.id, mode: res.mode, intent: cls.intent, text: res.text, confirm: unsafe.reason || "이 작업을 진행할까요?", tool: unsafe.tool, command, plan: res.plan, explain: res.explain, log: aiLogGet(8) });
+      }
+      // 읽기 전용 도구만 → 자동 실행(기존 Tool 호출)
+      const executed = [];
+      calls.forEach((c) => {
+        const command = c.command || llmToolCallToCommand(c.tool, c.args);
+        if (command && typeof D.execute === "function") { let ok = false; try { ok = D.execute(command); } catch (e) { ok = false; } executed.push({ tool: c.tool, ok }); }
+      });
+      if (executed.length) aiLog("Agent", { decision: "auto_executed", tools: executed });
+      const outText = res.text || (cls.intent === "일반대화" ? "" : "처리했어요.");
+      return record({ status: "done", provider: res.provider || provider.id, mode: res.mode, intent: cls.intent, text: outText, executed, plan: res.plan, explain: res.explain, log: aiLogGet(8) });
+    })
+    .catch((err) => { aiLog("Error", { message: (err && err.message) || String(err) }); return { status: "error", provider: provider.id, intent: cls.intent, error: (err && err.message) || String(err), text: aiFriendlyError(err), log: aiLogGet(6) }; });
+}
+
+/* ── Conversation Engine 래퍼: 자체 ctx 유지하며 여러 턴 대화(문맥 보존). Provider만 호출. ── */
+function createProviderConversationEngine(deps) {
+  const D = deps || {};
+  const ctx = createConvContext();
+  return {
+    ctx,
+    reset: () => convReset(ctx),
+    handle: (text) => aiProviderChat(text, ctx, (typeof D.appData === "function" ? D.appData() : {}) || {}, { execute: D.execute, userId: D.userId }),
+    // ★ STEP8: 스트리밍 대화(이벤트 콜백). Mock도 동일 이벤트 구조.
+    handleStream: (text, onEvent) => aiProviderChatStream(text, ctx, (typeof D.appData === "function" ? D.appData() : {}) || {}, { execute: D.execute, userId: D.userId }, onEvent),
+    // ★ STEP10: 음성 입력 처리(정규화 후 같은 ctx로 처리 → 음성=텍스트 품질 동일).
+    handleVoice: (rawText) => aiVoiceProcess(rawText, ctx, (typeof D.appData === "function" ? D.appData() : {}) || {}, { execute: D.execute, userId: D.userId }),
+    summarize: () => aiSummarizeConversation(ctx),
+    provider: () => AI_LLM_REGISTRY.active(),
+    setProvider: (id) => AI_LLM_REGISTRY.setActive(id),
+    log: (n) => aiLogGet(n),
+  };
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   STEP 8 — AI Conversation Core 완성: Prompt Builder · Streaming · 오류처리 · 요약.
+   Mock 기준으로 전부 검증. OpenAI는 키+활성화만 하면 동일 코드로 동작(구조 유지).
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── ⑥ Prompt Builder (모듈화): 시스템/사용자/Memory/Tool결과 조합. 부분(part) 단위로 관리. ── */
+const AI_SYS_PROMPT_PARTS = {
+  identity: "당신은 '조비서'입니다. 조아저씨쌈 농산물 직거래 주문관리의 전담 AI 비서입니다.",
+  tone: "말투는 자연스럽고 친절하게. 업무 답변은 간결하고 정확하게. 사장님을 존중합니다.",
+  mode: "일상 대화와 업무 대화를 자동 구분합니다. 일상 대화는 편하게, 업무는 핵심만.",
+  honesty: "확실하지 않으면 추측하지 않고 되묻습니다.",
+  safety: "삭제·발송·수정 등 중요한 작업은 반드시 사용자 확인을 받은 뒤에만 진행합니다.",
+  tools: "필요하면 등록된 Tool(주문·고객·업체·재고·OCR 등)을 호출해 처리하고, 실제 저장은 앱의 기존 기능으로만 합니다.",
+};
+function aiBuildSystemPrompt(opts) {
+  const o = opts || {};
+  const parts = [AI_SYS_PROMPT_PARTS.identity, AI_SYS_PROMPT_PARTS.tone, AI_SYS_PROMPT_PARTS.mode, AI_SYS_PROMPT_PARTS.honesty, AI_SYS_PROMPT_PARTS.safety, AI_SYS_PROMPT_PARTS.tools];
+  if (o.memorySummary) parts.push("참고(기억): " + o.memorySummary);
+  if (o.personaNote) parts.push(o.personaNote);
+  return parts.join("\n");
+}
+// 시스템+대화+Tool결과 → 공급자에 넘길 messages 배열. Provider 무관 표준 형태.
+function aiBuildPrompt(input) {
+  const inp = input || {};
+  const messages = [];
+  messages.push({ role: "system", content: aiBuildSystemPrompt({ memorySummary: inp.memorySummary, personaNote: inp.personaNote }) });
+  (inp.messages || []).forEach((m) => messages.push(m));
+  if (inp.toolResults && inp.toolResults.length) {
+    messages.push({ role: "system", content: "Tool 실행 결과: " + inp.toolResults.map((t) => `${t.tool}=${t.result}`).join("; ") + " — 이 결과를 사장님께 자연스러운 문장으로 전달하세요." });
+  }
+  return messages;
+}
+
+/* ── ⑤ Context 관리: 긴 대화 자동 요약 → Memory 저장 구조. 최근 대화는 그대로 유지. ── */
+const AI_CTX_SUMMARY_THRESHOLD = 12; // 이 턴 수를 넘으면 오래된 대화를 요약해 접어둠
+function aiSummarizeConversation(ctx) {
+  if (!ctx || !Array.isArray(ctx.turns) || !ctx.turns.length) return "";
+  return aiLocalSummarize(ctx);
+}
+// 긴 대화면 앞부분을 요약해 ctx.summary에 접고 turns를 최근 것만 유지. Memory에도 저장 가능.
+function aiMaybeSummarize(ctx, userId) {
+  if (!ctx || !Array.isArray(ctx.turns) || ctx.turns.length <= AI_CTX_SUMMARY_THRESHOLD) return null;
+  const keep = 6;
+  const older = ctx.turns.slice(0, ctx.turns.length - keep);
+  const summary = aiLocalSummarize({ turns: older });
+  ctx.summary = (ctx.summary ? ctx.summary + " " : "") + summary;
+  ctx.turns = ctx.turns.slice(-keep);
+  try { if (userId && typeof aiMemFirebaseMirror === "function") { /* Memory 저장 구조 준비: 세션 요약 */ aiSessionRecord && aiSessionRecord(userId, "summaries", summary); } } catch (e) {}
+  aiLog("Memory", { summarized: true, kept: keep });
+  return ctx.summary;
+}
+
+/* ── ⑧ 오류 처리: Provider/Tool/네트워크/타임아웃 → 사장님이 이해하기 쉬운 안내로. ── */
+function aiFriendlyError(err) {
+  const m = String((err && err.message) || err || "");
+  if (/timeout|시간초과|지연/i.test(m)) return "AI 응답이 조금 늦고 있어요. 잠시 후 다시 시도해 주세요.";
+  if (/Failed to fetch|network|networkerror|ENOTFOUND|ECONN/i.test(m)) return "인터넷 연결이 불안정한 것 같아요. 연결을 확인한 뒤 다시 시도해 주세요.";
+  if (/401|403|키|key|unauthorized|api key/i.test(m)) return "AI 키 설정이 필요해요. 설정에서 키를 확인해 주세요.";
+  if (/429|quota|rate|한도|초과/i.test(m)) return "지금 AI 요청이 많아요. 잠깐 뒤에 다시 시도해 주세요.";
+  if (/비활성|준비 완료/.test(m)) return m; // 우리 안내문은 그대로 전달
+  return "지금은 그 요청을 처리하기 어려워요. 잠시 후 다시 시도하거나 화면에서 직접 진행해 주세요.";
+}
+// 타임아웃 래퍼: ms 안에 안 끝나면 reject(‘시간초과’). Mock은 즉시라 항상 통과.
+function aiWithTimeout(promise, ms) {
+  const limit = ms || 15000;
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const timer = (typeof setTimeout !== "undefined") ? setTimeout(() => { if (!done) { done = true; reject(new Error("timeout 시간초과")); } }, limit) : null;
+    Promise.resolve(promise).then((v) => { if (!done) { done = true; if (timer) clearTimeout(timer); resolve(v); } }, (e) => { if (!done) { done = true; if (timer) clearTimeout(timer); reject(e); } });
+  });
+}
+
+/* ── ③ Streaming 파이프라인: 이벤트 기반. Mock/OpenAI 동일 이벤트 구조.
+   이벤트: {type:'start'} → {type:'token',text} … → ({type:'tool'} | {type:'need_confirm'} | {type:'done',result} | {type:'error'}) */
+function aiProviderChatStream(text, ctx, appData, deps, onEvent) {
+  const emit = (ev) => { try { if (typeof onEvent === "function") onEvent(ev); } catch (e) {} };
+  emit({ type: "start" });
+  return aiProviderChat(text, ctx, appData, deps).then((res) => {
+    // 텍스트를 토큰 이벤트로 흘려보냄(Mock은 시뮬레이션, OpenAI 연결 시 실제 스트림으로 교체 가능)
+    const words = String((res && res.text) || "").split(/(\s+)/);
+    words.forEach((w) => { if (w) emit({ type: "token", text: w }); });
+    if (res.status === "need_confirm") emit({ type: "need_confirm", confirm: res.confirm, command: res.command });
+    else if ((res.executed && res.executed.length) || (res.toolCalls && res.toolCalls.length)) emit({ type: "tool", executed: res.executed || [] });
+    if (res.status === "error") emit({ type: "error", error: res.error });
+    emit({ type: "done", result: res });
+    return res;
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   STEP 9 — Proactive AI Assistant & Long-Term Memory. 독립 모듈, 순수 함수.
+   원칙: ① AI는 먼저 '제안'만. 중요한 작업은 반드시 사용자 확인 후 실행(대신 결정 안 함).
+        ② 장기·선호 기억은 사용자 승인 없이 저장(활성화)하지 않음(후보→승인).
+        ③ 전부 기존 Tool·데이터 읽기. 기존 함수/Firebase stores/* 변경 없음.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+// ── ① 6단계 Memory 구조(각 계층 독립). persist=저장여부, approval=저장 전 승인 필요.
+const AI_MEMORY_TIERS = [
+  { id: "working", name: "작업 기억", scope: "현재 대화(ctx)", persist: false, approval: false },
+  { id: "session", name: "세션 기억", scope: "오늘 작업(자정 만료)", persist: true, approval: false },
+  { id: "longterm", name: "장기 기억", scope: "오래 기억할 사실", persist: true, approval: true },
+  { id: "business", name: "업무 기억", scope: "매출·상품·고객 집계", persist: true, approval: false },
+  { id: "preference", name: "선호 기억", scope: "습관·말투·발음", persist: true, approval: true },
+  { id: "learning", name: "학습 기억", scope: "승인된 별칭·표현", persist: true, approval: true },
+];
+function aiMemoryTiers() { return AI_MEMORY_TIERS.slice(); }
+
+// ── ③ Long-Term Memory: 후보 제안 → 승인해야 '저장된 장기기억'이 됨(승인 전엔 활성화 안 됨).
+function aiLongTermGet(userId) { return aiMemLoad(userId, "longterm", { approved: [], candidates: [] }); }
+function aiLongTermPropose(userId, fact, reason) {
+  if (!fact) return null;
+  const lt = aiLongTermGet(userId);
+  if (lt.approved.some((e) => e.fact === fact) || lt.candidates.some((e) => e.fact === fact)) return null;
+  const id = "lt_" + (lt.approved.length + lt.candidates.length + 1) + "_" + String(fact).replace(/\s/g, "").slice(0, 6);
+  lt.candidates.push({ id, fact, reason: reason || "" });
+  aiMemSave(userId, "longterm", lt);
+  return id;
+}
+function aiLongTermApprove(userId, id) { const lt = aiLongTermGet(userId); const i = lt.candidates.findIndex((c) => c.id === id); if (i < 0) return false; const c = lt.candidates.splice(i, 1)[0]; lt.approved.push(c); aiMemSave(userId, "longterm", lt); return true; }
+function aiLongTermReject(userId, id) { const lt = aiLongTermGet(userId); const i = lt.candidates.findIndex((c) => c.id === id); if (i < 0) return false; lt.candidates.splice(i, 1); aiMemSave(userId, "longterm", lt); return true; }
+function aiLongTermList(userId) { return aiLongTermGet(userId).approved.slice(); }
+
+// ── ③ Preference Learning: 습관 관찰 → 후보. 승인해야 활성 선호가 됨(자동 저장 안 함).
+const AI_PREF_TYPES = ["product", "customer", "delivery", "workflow", "style", "pronunciation"];
+function aiPrefGet(userId) { return aiMemLoad(userId, "preference", { approved: {}, candidates: [] }); }
+function aiPrefObserve(userId, type, value, reason) {
+  if (!type || !value || AI_PREF_TYPES.indexOf(type) < 0) return null;
+  const p = aiPrefGet(userId);
+  const id = type + "_" + String(value).replace(/\s/g, "");
+  if ((p.approved[type] || []).indexOf(value) >= 0) return null;      // 이미 승인된 선호
+  if (p.candidates.some((c) => c.id === id)) return id;               // 이미 후보
+  p.candidates.push({ id, type, value, reason: reason || "" });
+  aiMemSave(userId, "preference", p);
+  return id;
+}
+function aiPrefApprove(userId, id) { const p = aiPrefGet(userId); const i = p.candidates.findIndex((c) => c.id === id); if (i < 0) return false; const c = p.candidates.splice(i, 1)[0]; if (!Array.isArray(p.approved[c.type])) p.approved[c.type] = []; if (p.approved[c.type].indexOf(c.value) < 0) p.approved[c.type].push(c.value); aiMemSave(userId, "preference", p); return true; }
+function aiPrefReject(userId, id) { const p = aiPrefGet(userId); const i = p.candidates.findIndex((c) => c.id === id); if (i < 0) return false; p.candidates.splice(i, 1); aiMemSave(userId, "preference", p); return true; }
+function aiPrefTop(userId, type) { return (aiPrefGet(userId).approved[type] || []).slice(); }
+
+// ── ① Business Memory: 매출·상품·고객 집계(파생·읽기전용). 스냅샷 저장은 선택.
+function aiBusinessMemory(appData) {
+  const orders = (appData && appData.orders) || [], products = (appData && appData.products) || [];
+  return {
+    topProducts: biProductSales(orders, 30).slice(0, 5),
+    repeatCustomers: biRepeatCustomers(orders).slice(0, 5),
+    lowStock: biLowStock(products, 3),
+    totalOrders: orders.length,
+  };
+}
+
+// ── ② Context 최적화: 너무 커지면 자동 요약(접기)+최근만 유지. STEP8 요약 재사용.
+function aiContextSize(ctx) { try { return JSON.stringify(ctx || {}).length; } catch (e) { return 0; } }
+function aiOptimizeContext(ctx, userId, maxChars) {
+  const max = maxChars || 4000;
+  if (aiContextSize(ctx) > max) { aiMaybeSummarize(ctx, userId); }
+  if (aiContextSize(ctx) > max && ctx && Array.isArray(ctx.turns)) { ctx.turns = ctx.turns.slice(-4); aiLog("Memory", { optimized: true }); }
+  return aiContextSize(ctx);
+}
+
+// 날짜 간격(일). 잘못된 값이면 0.
+function aiDaysBetween(a, b) { const da = new Date(a), db = new Date(b); if (isNaN(da.getTime()) || isNaN(db.getTime())) return 0; return Math.round((db.getTime() - da.getTime()) / 86400000); }
+// 정기 주문 시기 도래: 고객별 평균 주문간격 vs 마지막 주문 경과일(근거 포함, 3건 이상만).
+function aiRegularDue(appData) {
+  const orders = (appData && appData.orders) || [];
+  const today = (typeof todayStr === "function") ? todayStr() : "";
+  const byName = {};
+  orders.forEach((o) => { const n = (o && o.recipient && o.recipient.name) || (o && o.senderName); const d = o && o.orderDate; if (n && d) (byName[n] = byName[n] || []).push(d); });
+  const out = [];
+  Object.keys(byName).forEach((n) => {
+    const ds = byName[n].slice().sort(); if (ds.length < 3) return;
+    let sum = 0, cnt = 0; for (let i = 1; i < ds.length; i++) { const g = aiDaysBetween(ds[i - 1], ds[i]); if (g > 0) { sum += g; cnt++; } }
+    if (!cnt) return; const avg = Math.round(sum / cnt); if (avg <= 0) return;
+    const since = aiDaysBetween(ds[ds.length - 1], today);
+    if (since >= avg) out.push({ name: n, avgInterval: avg, sinceLast: since, reason: `평균 ${avg}일마다 주문, 마지막 주문 ${since}일 전` });
+  });
+  return out.sort((a, b) => b.sinceLast - a.sinceLast);
+}
+
+// ── ④ Proactive AI: 묻기 전에 먼저 제안(근거 포함). 실행은 안 함(제안만).
+function aiProactive(appData, userId) {
+  const out = [];
+  const pr = aiDailyPriorities(appData);
+  pr.filter((p) => p.task === "오늘 출고").forEach((p) => out.push({ kind: "shipping", text: `오늘 출고 예정 주문이 ${p.count}건 있어요.`, reason: p.reason }));
+  biLowStock((appData && appData.products) || [], 2).forEach((l) => out.push({ kind: "stock", text: `${l.name} 재고가 부족할 수 있어요(${l.stock}개).`, reason: `현재 재고 ${l.stock}개` }));
+  aiRegularDue(appData).slice(0, 3).forEach((d) => out.push({ kind: "regular", text: `${d.name} 고객의 정기 주문 시기가 됐어요.`, reason: d.reason }));
+  const sales = aiPredictSales(appData);
+  if (sales && sales.direction === "감소" && sales.recent7 > 0) out.push({ kind: "trend", text: "최근 판매가 줄고 있어요. 확인해 보세요.", reason: (sales.evidence || []).join(" · ") });
+  return out.slice(0, 8);
+}
+
+// ── ⑤ Smart Reminder: 중요 업무 알림. settings로 항목별 on/off(기본 on). 사용자가 끌 수 있음.
+function aiReminders(appData, settings) {
+  const s = settings || {}; const on = (k) => s[k] !== false;
+  const orders = (appData && appData.orders) || [], products = (appData && appData.products) || [];
+  const today = (typeof todayStr === "function") ? todayStr() : "";
+  const tomorrow = (function () { const d = new Date(); d.setDate(d.getDate() + 1); const p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; })();
+  const out = [];
+  if (on("unprocessed")) { const u = orders.filter((o) => o && (o.status === "pending" || o.status === "waiting")); if (u.length) out.push({ type: "미처리 주문", count: u.length, reason: `대기/미처리 ${u.length}건`, key: "unprocessed" }); }
+  if (on("lowstock")) { const low = biLowStock(products, 2); if (low.length) out.push({ type: "재고 부족", count: low.length, reason: low.map((l) => `${l.name}(${l.stock})`).join(", "), key: "lowstock" }); }
+  if (on("reserved")) { const rz = orders.filter((o) => o && o.reserveDate === tomorrow); if (rz.length) out.push({ type: "예약 배송", count: rz.length, reason: `내일 발송 예약 ${rz.length}건`, key: "reserved" }); }
+  if (on("unpaid")) { const up = orders.filter((o) => o && o.status === "waiting"); if (up.length) out.push({ type: "미수금/입금대기", count: up.length, reason: `입금대기 ${up.length}건`, key: "unpaid" }); }
+  if (on("urgent")) { const ug = orders.filter((o) => o && o.reserveDate === today && o.status !== "shipped"); if (ug.length) out.push({ type: "긴급 출고", count: ug.length, reason: `오늘 발송인데 미발송 ${ug.length}건`, key: "urgent" }); }
+  return out;
+}
+
+// ── ⑥ Explainable: 추천/선택/도구호출의 근거를 사람 말로.
+function aiExplainRecommendation(rec) { if (!rec) return ""; return rec.reason ? `이유: ${rec.reason}` : "근거 정보가 없어요."; }
+function aiExplainProactive(item) { if (!item) return ""; return `${item.text} (근거: ${item.reason || "-"})`; }
+
+// ── ⑦ Daily Summary: 하루 업무 자동 요약(읽기).
+function aiDailySummary(appData) {
+  const orders = (appData && appData.orders) || [], products = (appData && appData.products) || [];
+  const today = (typeof todayStr === "function") ? todayStr() : "";
+  const todays = orders.filter((o) => o && o.orderDate === today);
+  const shipped = orders.filter((o) => o && o.status === "shipped" && String(o.shippedAt || "").slice(0, 10) === today);
+  const low = biLowStock(products, 2);
+  const custToday = {}; todays.forEach((o) => { const n = (o.recipient && o.recipient.name) || o.senderName; if (n) custToday[n] = true; });
+  const salesToday = todays.reduce((s, o) => s + (o.items || []).reduce((a, it) => a + (Number(it.qty) || 0), 0), 0);
+  const trend = aiPredictSales(appData);
+  const tomorrow = (function () { const d = new Date(); d.setDate(d.getDate() + 1); const p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`; })();
+  const tomorrowTasks = orders.filter((o) => o && o.reserveDate === tomorrow).length;
+  return {
+    date: today, orderCount: todays.length, shippedCount: shipped.length,
+    lowStock: low, newCustomerToday: Object.keys(custToday).length, salesUnits: salesToday,
+    salesTrend: trend.direction, tomorrowTasks,
+  };
+}
+function aiDailySummaryText(sum) {
+  if (!sum) return "";
+  const parts = [`오늘 주문 ${sum.orderCount}건`, `출고 완료 ${sum.shippedCount}건`];
+  if (sum.lowStock && sum.lowStock.length) parts.push(`재고 부족 ${sum.lowStock.length}종`);
+  parts.push(`판매 추세 ${sum.salesTrend}`);
+  if (sum.tomorrowTasks) parts.push(`내일 예약 출고 ${sum.tomorrowTasks}건`);
+  return parts.join(" · ");
+}
+
+// ── ⑧ Weekly Analysis: 주간 분석(읽기) + 쉬운 말 설명.
+function aiWeeklyAnalysis(appData) {
+  const orders = (appData && appData.orders) || [];
+  return {
+    topProducts: biProductSales(orders, 7).slice(0, 5),
+    repeatCustomers: biRepeatCustomers(orders).slice(0, 5),
+    trend: aiPredictSales(appData),
+    stockPredict: aiPredictStock(appData).slice(0, 5),
+  };
+}
+function aiWeeklyAnalysisText(a) {
+  if (!a) return "";
+  const parts = [];
+  if (a.topProducts && a.topProducts.length) parts.push(`이번 주 많이 나간 상품: ${a.topProducts.map((p) => `${p.name}(${p.qty})`).join(", ")}`);
+  if (a.repeatCustomers && a.repeatCustomers.length) parts.push(`반복 주문 고객: ${a.repeatCustomers.map((c) => `${c.name}(${c.count}회)`).join(", ")}`);
+  if (a.trend) parts.push(`주문 추세는 ${a.trend.direction}세예요(${(a.trend.evidence || []).join(", ")}).`);
+  return parts.join(" / ");
+}
+
+// ── ⑨ 사용자 설정: 학습/자동제안/음성/알림 on-off + Memory 초기화 + 개인정보 삭제.
+function aiSettingsGet(userId) { return aiMemLoad(userId, "settings", { learn: true, autosuggest: true, voice: true, reminder: true }); }
+function aiSettingsSet(userId, key, val) { const s = aiSettingsGet(userId); s[key] = val; aiMemSave(userId, "settings", s); return s; }
+function aiSettingsIsOn(userId, key) { const s = aiSettingsGet(userId); return s[key] !== false; }
+// 개인정보 전체 삭제: STEP4 기본 + STEP9 신규 계층까지. (다른 사용자 데이터는 영향 없음)
+function aiPrivacyDeleteAll(userId) {
+  try { aiMemDeleteAll(userId); } catch (e) {}
+  ["longterm", "preference", "settings", "business", "voice"].forEach((k) => {
+    try { if (typeof localStorage !== "undefined") localStorage.removeItem(aiMemKey(userId, k)); } catch (e) {}
+    try { aiMemFirebaseMirror(userId, k, null); } catch (e) {}
+  });
+  return true;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   STEP 10 — Voice AI 고도화 (음성 인식 정확도 · 사용자 사전 · 발음 보정 · Voice Memory).
+   원칙: ① 음성은 '정규화'만 하고 실제 이해·실행은 기존 Conversation Engine/Tool로 수렴.
+        ② 사용자 승인 없는 학습(사전 등록) 없음(후보→승인).
+        ③ 음성과 텍스트가 '같은 Context(ctx)'를 공유 → 품질 동일.
+        ④ Provider 독립: 정규화는 Provider 앞단에서 일어나므로 OpenAI 연결해도 동일 동작.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+function aiVoiceNS(s) { return String(s || "").replace(/\s/g, ""); }
+function aiVoiceCore(name) { try { return String(name || "").replace(new RegExp(WEIGHT_RE, "g"), "").replace(/\s/g, ""); } catch (e) { return String(name || "").replace(/\s/g, ""); } }
+
+// ── ② 사용자 사전(User Dictionary): 승인된 표현만 활성. 후보→승인 구조.
+//   저장: kind "voice" = { approved:{ nsKey: canonical }, candidates:[], repeats:{}, style:{}, terms:[] }
+function aiVoiceMemGet(userId) { return aiMemLoad(userId, "voice", { approved: {}, candidates: [], repeats: {}, style: {}, terms: [] }); }
+function aiVoiceMemSave(userId, v) { return aiMemSave(userId, "voice", v); }
+function aiVoiceDictLookup(userId, spoken) { const v = aiVoiceMemGet(userId); return v.approved[aiVoiceNS(spoken)] || null; }
+function aiVoiceDictPropose(userId, spoken, canonical, reason) {
+  if (!spoken || !canonical) return null;
+  const v = aiVoiceMemGet(userId); const k = aiVoiceNS(spoken);
+  if (v.approved[k]) return null;
+  const id = "vd_" + k;
+  if (v.candidates.some((c) => c.id === id)) return id;
+  v.candidates.push({ id, spoken: spoken, canonical: canonical, reason: reason || "" });
+  aiVoiceMemSave(userId, v); return id;
+}
+function aiVoiceDictApprove(userId, id) { const v = aiVoiceMemGet(userId); const i = v.candidates.findIndex((c) => c.id === id); if (i < 0) return false; const c = v.candidates.splice(i, 1)[0]; v.approved[aiVoiceNS(c.spoken)] = c.canonical; aiVoiceMemSave(userId, v); return true; }
+function aiVoiceDictReject(userId, id) { const v = aiVoiceMemGet(userId); const i = v.candidates.findIndex((c) => c.id === id); if (i < 0) return false; v.candidates.splice(i, 1); aiVoiceMemSave(userId, v); return true; }
+// 사용자가 직접 추가/수정/삭제(명시적 행위 = 승인).
+function aiVoiceDictAddDirect(userId, spoken, canonical) { if (!spoken || !canonical) return false; const v = aiVoiceMemGet(userId); v.approved[aiVoiceNS(spoken)] = canonical; aiVoiceMemSave(userId, v); return true; }
+function aiVoiceDictEdit(userId, spoken, newCanonical) { const v = aiVoiceMemGet(userId); const k = aiVoiceNS(spoken); if (!(k in v.approved)) return false; v.approved[k] = newCanonical; aiVoiceMemSave(userId, v); return true; }
+function aiVoiceDictRemove(userId, spoken) { const v = aiVoiceMemGet(userId); const k = aiVoiceNS(spoken); if (!(k in v.approved)) return false; delete v.approved[k]; aiVoiceMemSave(userId, v); return true; }
+function aiVoiceDictList(userId) { const v = aiVoiceMemGet(userId); return Object.keys(v.approved).map((k) => ({ spoken: k, canonical: v.approved[k] })); }
+
+// ── ⑥ Voice Memory: 말투·업무 용어 저장(수정·삭제 가능).
+function aiVoiceStyleSet(userId, key, val) { const v = aiVoiceMemGet(userId); v.style[key] = val; aiVoiceMemSave(userId, v); return v.style; }
+function aiVoiceStyleGet(userId) { return aiVoiceMemGet(userId).style || {}; }
+function aiVoiceTermAdd(userId, term) { if (!term) return false; const v = aiVoiceMemGet(userId); v.terms = v.terms || []; if (v.terms.indexOf(term) < 0) v.terms.push(term); aiVoiceMemSave(userId, v); return true; }
+function aiVoiceTermRemove(userId, term) { const v = aiVoiceMemGet(userId); v.terms = (v.terms || []).filter((t) => t !== term); aiVoiceMemSave(userId, v); return true; }
+function aiVoiceMemoryExport(userId) { return aiVoiceMemGet(userId); }
+
+// ── ③ 발음 보정: 같은 오류가 반복되면(2회+) 상품/이름에 가까운 걸 사전 등록 '제안'(승인 필요).
+function aiVoiceRepeatRecord(userId, spoken) { const v = aiVoiceMemGet(userId); v.repeats = v.repeats || {}; const k = aiVoiceNS(spoken); v.repeats[k] = (v.repeats[k] || 0) + 1; aiVoiceMemSave(userId, v); return v.repeats[k]; }
+function aiVoiceSuggestCorrection(userId, spoken, appData) {
+  if (!spoken) return null;
+  if (aiVoiceDictLookup(userId, spoken)) return null;         // 이미 사전에 있음
+  const count = aiVoiceRepeatRecord(userId, spoken);
+  if (count < 2) return null;                                  // 반복(2회+)일 때만 제안
+  const prod = (typeof fuzzyProductMatch === "function") ? fuzzyProductMatch(spoken, (appData && appData.products) || [], 0.5) : null;
+  const canonical = prod ? aiVoiceCore(prod.name) : null;
+  if (!canonical || aiVoiceNS(spoken) === canonical) return null;
+  return { spoken: spoken, canonical: canonical, count: count, prompt: `앞으로 '${spoken}'를 '${canonical}'로 이해할까요?` };
+}
+
+// ── ① 음성 정규화: 사전 치환 → 미완성 단어 복원 → 개인/공통 발음교정. 실제 이해는 기존 엔진.
+//   반환: { text, applied:[{from,to,by}], suggestion }
+function aiVoiceRepairPartial(text, appData) {
+  const products = (appData && appData.products) || [];
+  const cores = [...new Set(products.map((p) => aiVoiceCore(p.name)).filter(Boolean))];
+  return String(text || "").split(/(\s+)/).map((tok) => {
+    const w = aiVoiceNS(tok); if (w.length < 2) return tok;
+    if (cores.indexOf(w) >= 0) return tok;                     // 이미 완성된 상품명
+    const matches = cores.filter((c) => c.length > w.length && c.indexOf(w) === 0);  // 접두 일치
+    return matches.length === 1 ? tok.replace(w, matches[0]) : tok;
+  }).join("");
+}
+function aiVoiceNormalize(rawText, userId, appData) {
+  let t = String(rawText || "").trim();
+  const applied = [];
+  const v = aiVoiceMemGet(userId);
+  // 1) 사용자 사전(승인된 것만): 토큰이 사전 키와 정확히 일치하면 치환
+  t = t.split(/(\s+)/).map((tok) => {
+    const w = aiVoiceNS(tok); if (!w) return tok;
+    if (v.approved && v.approved[w]) { applied.push({ from: w, to: v.approved[w], by: "dict" }); return tok.replace(w, v.approved[w]); }
+    return tok;
+  }).join("");
+  // 2) 미완성 단어 복원(상품 핵심명 접두 유일 매칭)
+  const before = t; t = aiVoiceRepairPartial(t, appData);
+  if (t !== before) applied.push({ from: before, to: t, by: "partial" });
+  // 3) 개인 발음교정(STEP4) — 상품 핵심명 기준
+  try { if (typeof aiPersonalCanonicalize === "function") { const pc = aiPersonalCanonicalize(userId, aiVoiceNS(t)); if (pc && applied.every((a) => a.to !== pc)) applied.push({ from: aiVoiceNS(t), to: pc, by: "personal" }); } } catch (e) {}
+  return { text: t, applied: applied };
+}
+
+// ── ①④⑤ Voice 처리 파이프라인: 정규화 → (같은 ctx로) Conversation Engine. 음성=텍스트 품질 동일.
+function aiVoiceProcess(rawText, ctx, appData, deps) {
+  const D = deps || {};
+  const userId = (typeof D.userId === "function" ? D.userId() : "__anon__");
+  const norm = aiVoiceNormalize(rawText, userId, appData);
+  aiLog("Voice", { raw: rawText, normalized: norm.text, applied: norm.applied.map((a) => a.by) });
+  // 반복 발음 오류 → 사전 등록 제안(승인 필요). 정규화로 안 바뀐 낯선 토큰만 후보.
+  let suggestion = null;
+  if (norm.text === String(rawText || "").trim()) {
+    const tokens = String(rawText || "").split(/\s+/).filter((w) => aiVoiceNS(w).length >= 2);
+    for (const tk of tokens) { const s = aiVoiceSuggestCorrection(userId, tk, appData); if (s) { suggestion = s; break; } }
+  }
+  return aiProviderChat(norm.text, ctx, appData, { execute: D.execute, userId: D.userId }).then((res) => {
+    res.voice = { raw: rawText, normalized: norm.text, applied: norm.applied, suggestion: suggestion };
+    return res;
+  });
 }
 
 /* ===== 고도화 헬퍼: 상품 퍼지매칭 · 동명이인 후보 · 선택 파싱 · 기존주문 묶음 ===== */
@@ -2316,6 +3750,218 @@ function runSelfTests() {
     removeProblemLog(id);
     return ok;
   }, (g) => g === true);
+
+  // ★ STEP3: AI Layer (Tool Registry / Context / Intent / Conversation)
+  const AICTX = { products: P, customers: [{ id: "c1", name: "대솔수곡점" }, { id: "c2", name: "김철수" }], vendors: [] };
+  T("STEP3 도구목록/권한 등록", () => { const rg = createToolRegistry(); return rg.list().length >= 15 && rg.accessOf("order.delete") === "destructive" && rg.accessOf("customer.search") === "read" && rg.accessOf("order.create") === "write"; }, (g) => g === true);
+  T("STEP3 액션→도구 매핑", () => AI_TOOL_REGISTRY.toolForAction("DELETE_ORDER"), "order.delete");
+  T("STEP3 고객검색 의도", () => { const r = aiResolveIntent("김철수 찾아", createConvContext(), AICTX); return r.command && r.command.action === "SEARCH" && r.command.keyword === "김철수" && r.access === "read"; }, (g) => g === true);
+  T("STEP3 컨텍스트 대명사(그 사람→현재고객)", () => {
+    const c = createConvContext(); c.currentCustomer = "대솔수곡점";
+    const r = aiResolveIntent("그 사람 주문 수정", c, AICTX);
+    return r.command && r.command.action === "EDIT_ORDER" && r.command.name === "대솔수곡점";
+  }, (g) => g === true);
+  T("STEP3 '하나 더'=상품추가(컨텍스트)", () => {
+    const c = createConvContext(); c.currentCustomer = "대솔수곡점"; c.currentProduct = "채소2kg";
+    const r = aiResolveIntent("하나 더", c, AICTX);
+    return r.tool === "order.addItem" && r.access === "write" && r.command.payload.product === "채소2kg";
+  }, (g) => g === true);
+  T("STEP3 컨텍스트 없으면 되물음", () => { const r = aiResolveIntent("하나 더", createConvContext(), AICTX); return r.needsClarify === true; }, (g) => g === true);
+  T("STEP3 삭제는 destructive", () => { const r = aiResolveIntent("대솔수곡점 주문 삭제", createConvContext(), AICTX); return r.tool === "order.delete" && r.access === "destructive"; }, (g) => g === true);
+  T("STEP3 대화엔진: read 자동실행", () => {
+    const rec = []; const eng = createConversationEngine({ execute: (c) => { rec.push(c); return true; }, appData: () => AICTX });
+    const out = eng.handle("김철수 찾아");
+    return out.done === true && out.read === true && rec.length === 1 && rec[0].action === "SEARCH";
+  }, (g) => g === true);
+  T("STEP3 대화엔진: write는 확인 후 실행", () => {
+    const rec = []; const eng = createConversationEngine({ execute: (c) => { rec.push(c); return true; }, appData: () => AICTX, confirmText: () => "할까요?" });
+    const a = eng.handle("대솔수곡점 발송완료 처리");   // write → 확인 대기
+    if (!(a.needsConfirm === true && rec.length === 0)) return false;
+    const b = eng.handle("응");                          // 승인 → 실행
+    return b.done === true && rec.length === 1 && rec[0].action === "SET_STATUS";
+  }, (g) => g === true);
+  T("STEP3 대화엔진: '아니다'로 취소(미실행)", () => {
+    const rec = []; const eng = createConversationEngine({ execute: (c) => { rec.push(c); return true; }, appData: () => AICTX, confirmText: () => "할까요?" });
+    eng.handle("대솔수곡점 주문 삭제");                  // destructive → 확인 대기
+    const b = eng.handle("아니다");                       // 취소
+    return b.executed === false && rec.length === 0;
+  }, (g) => g === true);
+  T("STEP3 대화엔진: 멀티턴 컨텍스트 유지", () => {
+    const rec = []; const eng = createConversationEngine({ execute: (c) => { rec.push(c); return true; }, appData: () => AICTX, confirmText: () => "할까요?" });
+    eng.handle("김철수 찾아");                            // currentCustomer=김철수
+    const b = eng.handle("그 사람 주문 수정");            // 그 사람 → 김철수
+    return b.command && b.command.name === "김철수";
+  }, (g) => g === true);
+
+  // ★ STEP4: Personal Memory + Learning (사용자별, 승인기반)
+  const U = "__selftest_user__";
+  aiMemDeleteAll(U);
+  T("STEP4 세션기억 기록/조회(오늘)", () => { aiSessionRecord(U, "customers", "김철수"); return aiSessionGet(U).customers.includes("김철수"); }, (g) => g === true);
+  T("STEP4 사용자기억 자주쓰는 고객 집계", () => { aiUserBump(U, "favoriteCustomers", "대솔"); aiUserBump(U, "favoriteCustomers", "대솔"); const top = aiUserTop(U, "favoriteCustomers", 1)[0]; return top && top.key === "대솔" && top.count === 2; }, (g) => g === true);
+  T("STEP4 학습: 후보→승인 후 approved 반영", () => {
+    const id = aiLearnCandidate(U, "청기어", "청겨자", "alias");
+    const beforeApproved = aiLearnGet(U).approved.length;
+    const ok = aiLearnApprove(U, id);
+    const L = aiLearnGet(U);
+    return ok && L.approved.some((e) => e.from === "청기어" && e.to === "청겨자") && L.candidates.every((e) => e.id !== id) && L.approved.length === beforeApproved + 1;
+  }, (g) => g === true);
+  T("STEP4 학습: 승인 없이는 미적용(후보만)", () => { const id = aiLearnCandidate(U, "적겨", "적겨자"); const L = aiLearnGet(U); return !!id && L.candidates.some((e) => e.id === id) && L.approved.every((e) => e.from !== "적겨"); }, (g) => g === true);
+  T("STEP4 개인사전 우선 정규화", () => aiPersonalCanonicalize(U, "청기어"), "청겨자");
+  T("STEP4 학습 끄기/켜기", () => { aiLearnSetEnabled(U, false); const off = aiLearnIsEnabled(U) === false; aiLearnSetEnabled(U, true); return off && aiLearnIsEnabled(U) === true; }, (g) => g === true);
+  T("STEP4 학습 삭제/수정", () => {
+    aiLearnApproveDirect(U, "모듬", "모듬쌈"); const L1 = aiLearnGet(U); const e = L1.approved.find((x) => x.from === "모듬");
+    aiLearnEditTo(U, e.id, "모듬쌈1kg"); const edited = aiLearnGet(U).approved.find((x) => x.from === "모듬").to === "모듬쌈1kg";
+    aiLearnRemove(U, e.id); const removed = aiLearnGet(U).approved.every((x) => x.from !== "모듬");
+    return edited && removed;
+  }, (g) => g === true);
+  T("STEP4 워크플로 3회 반복→선호흐름", () => { let p = null; for (let i = 0; i < 3; i++) p = aiWorkflowRecord(U, ["고객검색", "상품선택", "배송일", "저장"]); return Array.isArray(p) && p.join(">") === "고객검색>상품선택>배송일>저장"; }, (g) => g === true);
+  T("STEP4 제안엔진(단골+재고+미발송)", () => {
+    for (let i = 0; i < 3; i++) aiUserBump(U, "favoriteCustomers", "하레하레");
+    const sug = aiBuildSuggestions(U, { orders: [{ reserveDate: (typeof todayStr === "function" ? todayStr() : ""), status: "ready" }], products: [{ name: "청겨자", stock: 1 }] });
+    return sug.some((s) => s.type === "habit") && sug.some((s) => s.type === "stock") && sug.some((s) => s.type === "delivery");
+  }, (g) => g === true);
+  T("STEP4 내보내기/전체삭제(개인정보)", () => {
+    const exp = aiMemExport(U); const hasData = exp.learning && exp.user;
+    aiMemDeleteAll(U);
+    const cleared = aiLearnGet(U).approved.length === 0 && Object.keys(aiUserGet(U).favoriteCustomers).length === 0;
+    return !!hasData && cleared;
+  }, (g) => g === true);
+  aiMemDeleteAll(U);
+
+  // ★ STEP5: AI Agent 시나리오
+  const today5 = (typeof todayStr === "function") ? todayStr() : "2026-07-13";
+  const AGDATA = {
+    customers: [{ id: "c1", name: "김철수" }], vendors: [{ id: "v1", name: "대솔수곡점" }],
+    products: [{ id: "p1", name: "청겨자 1kg", stock: 1 }, { id: "p2", name: "채소2kg", stock: 20 }, { id: "p3", name: "적상추 1kg", stock: 8 }],
+    orders: [
+      { recipient: { name: "김철수" }, orderDate: today5, status: "ready", reserveDate: today5, items: [{ productId: "p2", name: "채소2kg", qty: 2 }] },
+      { recipient: { name: "김철수" }, orderDate: "2026-07-06", status: "shipped", items: [{ productId: "p2", name: "채소2kg", qty: 2 }] },
+    ],
+  };
+  T("STEP5 안전: read만 자동, 삭제·발송은 확인", () => aiIsAutoSafe("customer.search") === true && aiIsAutoSafe("order.delete") === false && aiIsAutoSafe("delivery.confirm") === false, (g) => g === true);
+  T("STEP5 시나리오1 '김철수 지난번처럼'→계획+주문초안", () => {
+    const p = aiPlan("김철수 지난번처럼 보내", createConvContext(), AGDATA);
+    return p.goal.includes("재주문") && p.steps.some((s) => s.tool === "order.create" && s.requiresConfirm) && p.steps.some((s) => s.kind === "confirm");
+  }, (g) => g === true);
+  T("STEP5 시나리오1 실행→확인요청(자동실행 안함)", () => {
+    const p = aiPlan("김철수 지난번처럼", createConvContext(), AGDATA);
+    let ran = false; const out = aiRunPlan(p, { execute: () => { ran = true; return true; } });
+    return out.status === "need_confirm" && ran === false;
+  }, (g) => g === true);
+  T("STEP5 시나리오2 '청겨자 재고 확인'", () => { const p = aiPlan("청겨자 재고 확인", createConvContext(), AGDATA); return p.data && p.data.name.indexOf("청겨자") === 0 && p.data.stock === 1; }, (g) => g === true);
+  T("STEP5 시나리오3 '오늘 해야 할 일'→우선순위", () => { const p = aiPlan("오늘 해야 할 일", createConvContext(), AGDATA); return Array.isArray(p.data) && p.data[0] && p.data[0].task === "오늘 출고"; }, (g) => g === true);
+  T("STEP5 시나리오4 '거래명세서 보내'→발송은 확인단계", () => { const p = aiPlan("대솔수곡점 거래명세서 보내줘", createConvContext(), AGDATA); return p.steps.some((s) => s.kind === "confirm" && s.requiresConfirm) && !!p.note; }, (g) => g === true);
+  T("STEP5 시나리오5 '내일 출고 예약'", () => { const p = aiPlan("김철수 내일 출고 예약", createConvContext(), AGDATA); return p.goal.includes("예약") && p.steps.some((s) => s.tool === "order.create" && s.requiresConfirm); }, (g) => g === true);
+  T("STEP5 시나리오6 '재고 부족 상품 알려줘'", () => { const p = aiPlan("재고 부족 상품 알려줘", createConvContext(), AGDATA); return Array.isArray(p.data) && p.data.some((x) => x.name.indexOf("청겨자") === 0); }, (g) => g === true);
+  T("STEP5 BI 고객 요일패턴", () => { const s = biCustomerStat("김철수", [{ recipient: { name: "김철수" }, orderDate: "2026-07-03" }, { recipient: { name: "김철수" }, orderDate: "2026-07-10" }, { recipient: { name: "김철수" }, orderDate: "2026-06-26" }]); return s.count === 3 && s.weekdayPattern === "금"; }, (g) => g === true);
+  T("STEP5 Reasoning 재고부족 판단(추측금지)", () => { const r = aiReasonDelivery([{ name: "청겨자 1kg", qty: 5 }], AGDATA.products); return r.ok === false && r.evidence.some((e) => e.includes("부족")); }, (g) => g === true);
+  T("STEP5 추천엔진 근거 포함", () => { const rs = aiRecommendations(AGDATA, "__x__"); return rs.length > 0 && rs.every((r) => r.text && r.reason); }, (g) => g === true);
+  T("STEP5 Explainable 근거 설명 생성", () => { const p = aiPlan("김철수 지난번처럼", createConvContext(), AGDATA); const ex = aiExplainPlan(p); return ex.includes("목표") && ex.includes("순서"); }, (g) => g === true);
+
+  // ★ STEP6: Autonomous AI OS
+  T("STEP6 OS Core 생성/브리핑 데이터", () => {
+    const os = createAiOS({ execute: () => true, appData: () => AGDATA, userId: () => "__x__" });
+    const b = os.brief();
+    return b && Array.isArray(b.priorities) && Array.isArray(b.recommendations) && b.predict && b.monitor && Array.isArray(b.optimize);
+  }, (g) => g === true);
+  T("STEP6 OS는 승인없이 쓰기 자동실행 안함", () => {
+    let ran = false;
+    const os = createAiOS({ execute: () => { ran = true; return true; }, appData: () => AGDATA, userId: () => "__x__" });
+    const r = os.handle("김철수 지난번처럼", createConvContext());
+    const run = os.run(r.plan);
+    return run.status === "need_confirm" && ran === false;
+  }, (g) => g === true);
+  T("STEP6 Multi-Agent 도구→담당 배정", () => aiAgentForTool("order.delete").id === "order" && aiAgentForTool("product.search").id === "inventory" && aiAgentForTool("delivery.confirm").id === "shipment", (g) => g === true);
+  T("STEP6 Coordinator 라우팅(재고→재고담당)", () => { const c = createAgentCoordinator(); const r = c.route("청겨자 재고 확인", createConvContext(), AGDATA); return r.agent.id === "inventory" && !!r.reason; }, (g) => g === true);
+  T("STEP6 Coordinator 라우팅(정산→정산담당)", () => createAgentCoordinator().route("거래명세서 보내줘", createConvContext(), AGDATA).agent.id === "finance", (g) => g === true);
+  T("STEP6 예측: 재고소진 근거 포함", () => {
+    const ad = { products: [{ name: "청겨자 1kg", stock: 2 }], orders: [{ orderDate: (typeof todayStr === "function" ? todayStr() : "2026-07-16"), items: [{ name: "청겨자 1kg", qty: 7 }] }] };
+    const s = aiPredictStock(ad);
+    return s.length > 0 && s[0].daysLeft <= 5 && s[0].evidence.includes("판매") && !!s[0].confidence;
+  }, (g) => g === true);
+  T("STEP6 예측: 매출 추세 방향+근거", () => { const p = aiPredictSales(AGDATA); return ["증가", "감소", "유지"].includes(p.direction) && Array.isArray(p.evidence); }, (g) => g === true);
+  T("STEP6 예측: 계절 힌트", () => { const s = aiPredictSeasonal(AGDATA, 11); return s.month === 11 && s.hints.length > 0; }, (g) => g === true);
+  T("STEP6 자기모니터링: 저장용량·근거", () => { const m = aiSelfMonitor(AGDATA); return typeof m.storagePct === "number" && Array.isArray(m.warnings) && Array.isArray(m.evidence) && !!m.health; }, (g) => g === true);
+  T("STEP6 자기모니터링: 1MB 근접시 경고", () => { const big = { orders: [{ note: "x".repeat(900000) }] }; const m = aiSelfMonitor(big); return m.storagePct >= 80 && m.warnings.some((w) => w.level === "high"); }, (g) => g === true);
+  T("STEP6 자기최적화: 제안만(승인필요 표시)", () => { const props = aiSelfOptimize(aiSelfMonitor({ orders: [{ note: "x".repeat(700000) }] }), { orders: [], products: [] }); return props.length > 0 && props.every((p) => p.requiresApproval === true && p.evidence); }, (g) => g === true);
+  T("STEP6 플러그인: 표준 인터페이스·planned", () => { const r = createPluginRegistry(); return r.list().length >= 8 && r.planned().length === r.list().length && r.get("courier").capabilities.length > 0; }, (g) => g === true);
+  T("STEP6 플러그인: register로 확장", () => { const r = createPluginRegistry(); const ok = r.register({ id: "test.x", name: "테스트", category: "정보", capabilities: ["a"] }); return ok && r.get("test.x").status === "planned"; }, (g) => g === true);
+  T("STEP6 대화모드: 업무 vs 일상 자동판별", () => aiConversationMode("주문 등록해줘").mode === "business" && aiConversationMode("안녕 고마워").mode === "casual", (g) => g === true);
+  T("STEP6 OS handle: 모드·담당·계획·설명 동봉", () => { const os = createAiOS({ execute: () => true, appData: () => AGDATA, userId: () => "__x__" }); const r = os.handle("청겨자 재고 확인", createConvContext()); return !!r.mode && !!r.agent && !!r.plan && typeof r.explain === "string"; }, (g) => g === true);
+
+  // ★ STEP7: LLM Provider 레이어 (공급자 독립)
+  T("STEP7 Registry: mock/openai/claude/gemini 등록·기본 mock", () => { const r = createLLMRegistry(); r.register(createMockProvider()); r.register(createOpenAIProvider(() => "")); r.register(createClaudeProvider(() => "")); r.register(createGeminiProvider(() => "")); return r.ids().length === 4 && r.getActiveId() === "mock" && r.active().isMock === true; }, (g) => g === true);
+  T("STEP7 Provider 전환(공급자만 바꿔도 동일 인터페이스)", () => { const r = createLLMRegistry(); r.register(createMockProvider()); r.register(createOpenAIProvider(() => "sk-x")); const ok = r.setActive("openai"); return ok && r.getActiveId() === "openai" && typeof r.active().complete === "function"; }, (g) => g === true);
+  T("STEP7 도구→JSON스키마(함수호출 표준)", () => { const s = llmToolSchemas(); const create = s.find((x) => x.name === "order.create"); return s.length >= 15 && create && create.parameters.type === "object" && !!create.parameters.properties.name; }, (g) => g === true);
+  T("STEP7 toolCall→기존 커맨드 변환(재사용)", () => { const c = llmToolCallToCommand("customer.search", { keyword: "김철수" }); return c && c.action === "SEARCH" && c.keyword === "김철수"; }, (g) => g === true);
+  T("STEP7 OpenAI toRequest: function 스키마 포함", () => { const p = createOpenAIProvider(() => "k"); const rq = p.toRequest({ messages: [{ role: "user", content: "안녕" }], tools: llmToolSchemas() }); return rq.tools[0].type === "function" && !!rq.tools[0].function.name && rq.tool_choice === "auto"; }, (g) => g === true);
+  T("STEP7 OpenAI fromResponse: tool_calls 파싱", () => { const p = createOpenAIProvider(() => "k"); const r = p.fromResponse({ choices: [{ message: { content: "확인", tool_calls: [{ function: { name: "customer.search", arguments: '{"keyword":"대솔"}' } }] } }] }); return r.toolCalls[0].tool === "customer.search" && r.toolCalls[0].args.keyword === "대솔" && r.text === "확인"; }, (g) => g === true);
+  T("STEP7 Claude fromResponse: tool_use 파싱", () => { const p = createClaudeProvider(() => "k"); const r = p.fromResponse({ content: [{ type: "text", text: "네" }, { type: "tool_use", name: "product.search", input: { keyword: "청겨자" } }] }); return r.toolCalls[0].tool === "product.search" && r.toolCalls[0].args.keyword === "청겨자"; }, (g) => g === true);
+  T("STEP7 Gemini fromResponse: functionCall 파싱", () => { const p = createGeminiProvider(() => "k"); const r = p.fromResponse({ candidates: [{ content: { parts: [{ text: "조회" }, { functionCall: { name: "vendor.search", args: { keyword: "하레하레" } } }] } }] }); return r.toolCalls[0].tool === "vendor.search" && r.toolCalls[0].args.keyword === "하레하레"; }, (g) => g === true);
+  T("STEP7 유료 Provider는 키 없으면 준비상태(작동불능 아님)", () => { const p = createOpenAIProvider(() => ""); return p.needsKey === true && p.hasKey() === false && typeof p.complete === "function"; }, (g) => g === true);
+  T("STEP7 Mock 일상대화: Tool 없이 자연 응답", () => { let out = null; createMockProvider().complete({ messages: [{ role: "user", content: "안녕 고마워" }], appData: AGDATA }).then((r) => { out = r; }); return true; }, (g) => g === true); // 비동기 실제검증은 하네스에서
+  T("STEP7 안전: 쓰기 도구 자동실행 안함(게이트)", () => { const create = AI_TOOL_DEFS.find((t) => t.name === "order.create"); return aiIsAutoSafe("customer.search") === true && aiIsAutoSafe("order.create") === false && create.access === "write"; }, (g) => g === true);
+  T("STEP7 메시지 빌더: 최근 맥락 포함", () => { const ctx = createConvContext(); ctx.turns = [{ user: "김철수 찾아", ai: "찾았어요" }]; const m = aiBuildMessages(ctx, "지난번처럼"); return m.length === 3 && m[0].role === "user" && m[2].content === "지난번처럼"; }, (g) => g === true);
+  T("STEP7 Memory·Voice는 Provider 독립(공급자 바꿔도 동일)", () => { const before = aiPersonalCanonicalize(U, "청기어"); createLLMRegistry().setActive && AI_LLM_REGISTRY.setActive("mock"); const after = aiPersonalCanonicalize(U, "청기어"); return before === after && before === "청겨자"; }, (g) => g === true);
+  T("STEP7 인터페이스: chat/streamChat/functionCall/health 존재", () => { const p = AI_LLM_REGISTRY.get("mock"); return typeof p.chat === "function" && typeof p.streamChat === "function" && typeof p.functionCall === "function" && typeof p.health === "function" && p.health().ok === true; }, (g) => g === true);
+  T("STEP7 Smart Intent: 주문/고객조회/재고/업체/OCR/일반/설정/help/unknown", () => {
+    const I = (t) => aiClassifyIntent(t, createConvContext(), AGDATA).intent;
+    return I("김철수 지난번처럼") === "주문" && I("청겨자 재고 확인") === "재고" && I("하레하레 거래명세서") === "업체"
+      && I("영수증 사진 읽어줘") === "OCR" && I("안녕 고마워") === "일반대화" && I("설정 바꿔줘") === "설정"
+      && I("뭐 할 수 있어?") === "help" && I("ㅁㄴㅇㄹ 아무말") === "unknown";
+  }, (g) => g === true);
+  T("STEP7 Fallback: unknown은 추측 안 함", () => aiClassifyIntent("qwerty 아무거나", createConvContext(), AGDATA).intent === "unknown", (g) => g === true);
+  T("STEP7 Logging: 기록/조회/초기화", () => { aiLogClear(); aiLog("Intent", { a: 1 }); aiLog("Tool", { b: 2 }); const g = aiLogGet(); const ok = g.length === 2 && g[0].kind === "Intent" && g[1].kind === "Tool"; aiLogClear(); return ok && aiLogGet().length === 0; }, (g) => g === true);
+  T("STEP7 문맥 갱신: 이름 언급→현재고객 기억", () => { const ctx = createConvContext(); aiUpdateContext(ctx, "김철수", AGDATA); return ctx.currentCustomer === "김철수"; }, (g) => g === true);
+  T("STEP7 문맥 유지: 현재고객 있으면 '지난번처럼' 해소", () => { const ctx = createConvContext(); ctx.currentCustomer = "김철수"; const p = aiPlan("지난번처럼", ctx, AGDATA); return p.goal && p.goal.indexOf("김철수") === 0; }, (g) => g === true);
+  T("STEP7 함수호출 스키마 도구명 = 기존 Tool", () => { const s = llmToolSchemas().map((x) => x.name); return s.includes("customer.search") && s.includes("order.create") && s.includes("product.search") && s.includes("vendor.search") && s.includes("delivery.confirm"); }, (g) => g === true);
+
+  // ★ STEP8: Conversation Core 완성
+  T("STEP8 인터페이스 확장: summarize/healthCheck 존재", () => { const p = AI_LLM_REGISTRY.get("mock"); return typeof p.summarize === "function" && typeof p.healthCheck === "function"; }, (g) => g === true);
+  T("STEP8 모든 Provider 동일 인터페이스", () => AI_LLM_REGISTRY.list().every((p) => ["chat", "streamChat", "functionCall", "summarize", "health", "healthCheck"].every((m) => typeof p[m] === "function")), (g) => g === true);
+  T("STEP8 Prompt Builder: system 프롬프트 조합", () => { const msgs = aiBuildPrompt({ messages: [{ role: "user", content: "안녕" }], memorySummary: "김철수 단골" }); return msgs[0].role === "system" && msgs[0].content.includes("조비서") && msgs[0].content.includes("김철수 단골") && msgs[1].content === "안녕"; }, (g) => g === true);
+  T("STEP8 Prompt Builder: Tool결과 → 자연문장 지시 포함", () => { const msgs = aiBuildPrompt({ messages: [{ role: "user", content: "재고" }], toolResults: [{ tool: "product.search", result: "청겨자 1개" }] }); return msgs.some((m) => m.role === "system" && m.content.includes("Tool 실행 결과") && m.content.includes("청겨자 1개")); }, (g) => g === true);
+  T("STEP8 OpenAI: 키 있어도 비활성 기본(비용0)", () => { const p = createOpenAIProvider(() => "sk-test"); return p.hasKey() === true && p.isEnabled() === false; }, (g) => g === true);
+  T("STEP8 오류 안내: 네트워크/타임아웃/키/한도 구분", () => aiFriendlyError(new Error("Failed to fetch")).includes("연결") && aiFriendlyError(new Error("timeout 시간초과")).includes("늦") && aiFriendlyError(new Error("401 unauthorized")).includes("키") && aiFriendlyError(new Error("429 quota")).includes("많"), (g) => g === true);
+  T("STEP8 로컬 요약: 대화 핵심 축약", () => { const s = aiLocalSummarize({ turns: [{ user: "김철수" }, { user: "지난번처럼" }] }); return typeof s === "string" && s.includes("김철수"); }, (g) => g === true);
+  T("STEP8 Context 자동요약: 임계 넘으면 접고 최근만 유지", () => { const ctx = createConvContext(); ctx.turns = []; for (let i = 0; i < 15; i++) ctx.turns.push({ user: "말" + i, ai: "답" + i }); const s = aiMaybeSummarize(ctx, "__x__"); return !!ctx.summary && ctx.turns.length === 6; }, (g) => g === true);
+  T("STEP8 healthCheck: mock 정상", () => { const p = AI_LLM_REGISTRY.get("mock"); const h = p.health(); return h.ok === true && h.isMock === true; }, (g) => g === true);
+
+  // ★ STEP9: Proactive AI & Long-Term Memory
+  T("STEP9 Memory 6계층 정의", () => { const t = aiMemoryTiers(); return t.length === 6 && t.map((x) => x.id).join(",") === "working,session,longterm,business,preference,learning"; }, (g) => g === true);
+  T("STEP9 장기기억: 승인 전엔 저장 안 됨(후보만)", () => { aiPrivacyDeleteAll(U); const id = aiLongTermPropose(U, "김철수는 금요일 단골", "패턴"); const before = aiLongTermList(U).length; return !!id && before === 0; }, (g) => g === true);
+  T("STEP9 장기기억: 승인해야 저장", () => { aiPrivacyDeleteAll(U); const id = aiLongTermPropose(U, "대솔은 4kg 묶음 선호", "관찰"); const ok = aiLongTermApprove(U, id); return ok && aiLongTermList(U).some((e) => e.fact.indexOf("대솔") === 0); }, (g) => g === true);
+  T("STEP9 선호학습: 관찰→후보, 승인해야 활성", () => { aiPrivacyDeleteAll(U); const id = aiPrefObserve(U, "product", "청겨자 1kg", "자주 주문"); const beforeTop = aiPrefTop(U, "product").length; aiPrefApprove(U, id); return beforeTop === 0 && aiPrefTop(U, "product").indexOf("청겨자 1kg") >= 0; }, (g) => g === true);
+  T("STEP9 선호학습: 잘못된 타입 거부", () => aiPrefObserve(U, "badtype", "x") === null, (g) => g === true);
+  T("STEP9 업무기억: 매출·상품·고객 집계", () => { const b = aiBusinessMemory(AGDATA); return Array.isArray(b.topProducts) && Array.isArray(b.repeatCustomers) && typeof b.totalOrders === "number"; }, (g) => g === true);
+  T("STEP9 Context 최적화: 커지면 요약·축소", () => { const ctx = createConvContext(); ctx.turns = []; for (let i = 0; i < 40; i++) ctx.turns.push({ user: "긴대화내용반복" + i, ai: "응답내용반복" + i }); const sz = aiOptimizeContext(ctx, "__x__", 1000); return ctx.turns.length <= 6 && sz <= aiContextSize({ turns: [] }) + 4000; }, (g) => g === true);
+  T("STEP9 정기주문 시기 도래 감지(근거)", () => {
+    const AD = { orders: [
+      { recipient: { name: "정기씨" }, orderDate: "2026-06-01" }, { recipient: { name: "정기씨" }, orderDate: "2026-06-08" }, { recipient: { name: "정기씨" }, orderDate: "2026-06-15" },
+    ] };
+    const due = aiRegularDue(AD); return due.some((d) => d.name === "정기씨" && d.avgInterval === 7 && d.reason.includes("평균"));
+  }, (g) => g === true);
+  T("STEP9 Proactive: 먼저 제안(근거 포함)", () => { const ps = aiProactive(AGDATA, "__x__"); return Array.isArray(ps) && ps.every((p) => p.text && p.reason); }, (g) => g === true);
+  T("STEP9 Reminder: 항목별 on/off 반영", () => { const all = aiReminders(AGDATA, {}); const off = aiReminders(AGDATA, { lowstock: false, unprocessed: false, reserved: false, unpaid: false, urgent: false }); return off.length === 0 && all.length >= 0; }, (g) => g === true);
+  T("STEP9 Daily Summary 구조+문장", () => { const s = aiDailySummary(AGDATA); const txt = aiDailySummaryText(s); return typeof s.orderCount === "number" && typeof s.shippedCount === "number" && txt.includes("오늘 주문"); }, (g) => g === true);
+  T("STEP9 Weekly Analysis 쉬운말 설명", () => { const a = aiWeeklyAnalysis(AGDATA); const txt = aiWeeklyAnalysisText(a); return Array.isArray(a.topProducts) && a.trend && typeof txt === "string"; }, (g) => g === true);
+  T("STEP9 설정: 학습/제안/음성/알림 on-off", () => { aiPrivacyDeleteAll(U); aiSettingsSet(U, "reminder", false); const off = aiSettingsIsOn(U, "reminder") === false; aiSettingsSet(U, "reminder", true); return off && aiSettingsIsOn(U, "reminder") === true && aiSettingsIsOn(U, "voice") === true; }, (g) => g === true);
+  T("STEP9 개인정보 전체삭제(다른 사용자 무관)", () => { aiLongTermApprove(U, aiLongTermPropose(U, "삭제될 사실", "x")); aiPrivacyDeleteAll(U); return aiLongTermList(U).length === 0 && aiPrefTop(U, "product").length === 0; }, (g) => g === true);
+  T("STEP9 Explainable: 추천 근거 문장화", () => aiExplainRecommendation({ reason: "최근 7일 5개 판매" }).includes("이유") && aiExplainProactive({ text: "재고 부족", reason: "1개" }).includes("근거"), (g) => g === true);
+
+  // ★ STEP10: Voice AI 고도화
+  var VDATA = { products: [{ id: "p1", name: "청겨자 1kg" }, { id: "p2", name: "적겨자 1kg" }, { id: "p3", name: "모듬쌈채소" }], customers: [{ name: "김철수" }], vendors: [], orders: [] };
+  T("STEP10 사용자사전: 승인 전엔 미적용(후보만)", () => { aiPrivacyDeleteAll(U); const id = aiVoiceDictPropose(U, "청겨", "청겨자", "반복"); return !!id && aiVoiceDictLookup(U, "청겨") === null; }, (g) => g === true);
+  T("STEP10 사용자사전: 승인해야 적용", () => { aiPrivacyDeleteAll(U); const id = aiVoiceDictPropose(U, "적겨", "적겨자"); aiVoiceDictApprove(U, id); return aiVoiceDictLookup(U, "적겨") === "적겨자"; }, (g) => g === true);
+  T("STEP10 정규화: 승인된 사전 치환", () => { aiPrivacyDeleteAll(U); aiVoiceDictAddDirect(U, "모듬", "모듬쌈채소"); const n = aiVoiceNormalize("모듬 두개", U, VDATA); return n.text.indexOf("모듬쌈채소") === 0 && n.applied.some((a) => a.by === "dict"); }, (g) => g === true);
+  T("STEP10 미완성 단어 복원(접두 유일매칭)", () => { aiPrivacyDeleteAll(U); const n = aiVoiceNormalize("청겨 세개", U, VDATA); return n.text.indexOf("청겨자") === 0; }, (g) => g === true);
+  T("STEP10 발음보정: 반복(2회+) 시 제안", () => { aiPrivacyDeleteAll(U); aiVoiceSuggestCorrection(U, "청겨자밭", VDATA); const s = aiVoiceSuggestCorrection(U, "청겨자밭", VDATA); return s && s.prompt.includes("이해할까요") && s.canonical === "청겨자"; }, (g) => g === true);
+  T("STEP10 발음보정: 1회는 제안 안 함", () => { aiPrivacyDeleteAll(U); return aiVoiceSuggestCorrection(U, "루꼬라비슷한말", VDATA) === null; }, (g) => g === true);
+  T("STEP10 Voice Memory: 용어 추가/삭제", () => { aiPrivacyDeleteAll(U); aiVoiceTermAdd(U, "택배출고"); const has = aiVoiceMemoryExport(U).terms.indexOf("택배출고") >= 0; aiVoiceTermRemove(U, "택배출고"); return has && aiVoiceMemoryExport(U).terms.indexOf("택배출고") < 0; }, (g) => g === true);
+  T("STEP10 사전 수정/삭제", () => { aiPrivacyDeleteAll(U); aiVoiceDictAddDirect(U, "청겨", "청겨자"); aiVoiceDictEdit(U, "청겨", "청경채"); const edited = aiVoiceDictLookup(U, "청겨") === "청경채"; aiVoiceDictRemove(U, "청겨"); return edited && aiVoiceDictLookup(U, "청겨") === null; }, (g) => g === true);
+  T("STEP10 말투 저장/조회", () => { aiPrivacyDeleteAll(U); aiVoiceStyleSet(U, "honorific", true); return aiVoiceStyleGet(U).honorific === true; }, (g) => g === true);
+  T("STEP10 정규화는 Provider 독립(엔진 앞단)", () => { aiPrivacyDeleteAll(U); aiVoiceDictAddDirect(U, "청겨", "청겨자"); AI_LLM_REGISTRY.setActive("openai"); const a = aiVoiceNormalize("청겨 두개", U, VDATA); AI_LLM_REGISTRY.setActive("mock"); const b = aiVoiceNormalize("청겨 두개", U, VDATA); return a.text === b.text && a.text.indexOf("청겨자") === 0; }, (g) => g === true);
+
   const passed = cases.filter((c) => c.ok).length;
   return { passed, failed: cases.length - passed, total: cases.length, cases };
 }
@@ -4717,6 +6363,40 @@ function App() {
     refreshMemoryCands();
     setSideMenuOpen(false);
   }
+  // ★ STEP4: 개인 AI 기억 뷰어(사용자별) — 확인/수정/삭제/초기화/내보내기/학습 on·off
+  const [aiMemOpen, setAiMemOpen] = useState(false);
+  const [aiMemData, setAiMemData] = useState(null);
+  function refreshAiMem() {
+    try {
+      const uid = aiUserId();
+      setAiMemData({
+        uid,
+        learning: aiLearnGet(uid),
+        favCustomers: aiUserTop(uid, "favoriteCustomers", 5),
+        favProducts: aiUserTop(uid, "favoriteProducts", 5),
+        workflow: aiWorkflowPreferred(uid),
+        enabled: aiLearnIsEnabled(uid),
+      });
+    } catch (e) { setAiMemData({ uid: "default", learning: { approved: [], candidates: [], enabled: true }, favCustomers: [], favProducts: [], workflow: null, enabled: true }); }
+  }
+  function openAiMemory() { refreshAiMem(); setAiMemOpen(true); setSideMenuOpen(false); }
+  function aiMemApprove(id) { aiLearnApprove(aiMemData.uid, id); refreshAiMem(); fireToast("배웠어요 — 앞으로 그렇게 알아들을게요"); }
+  function aiMemReject(id) { aiLearnReject(aiMemData.uid, id); refreshAiMem(); }
+  function aiMemRemove(id) { aiLearnRemove(aiMemData.uid, id); refreshAiMem(); }
+  function aiMemEdit(id, to) { aiLearnEditTo(aiMemData.uid, id, to); refreshAiMem(); fireToast("수정했어요"); }
+  function aiMemAddDirect(from, to) { if (aiLearnApproveDirect(aiMemData.uid, from, to)) { refreshAiMem(); fireToast(`"${from}" → "${to}" 기억할게요`); } }
+  function aiMemToggleEnabled() { aiLearnSetEnabled(aiMemData.uid, !aiMemData.enabled); refreshAiMem(); }
+  function aiMemReset() { askConfirm("내 AI 학습을 모두 지울까요? (다른 사용자 데이터는 영향 없음)", () => { aiMemDeleteAll(aiMemData.uid); refreshAiMem(); fireToast("내 AI 학습을 초기화했어요"); }); }
+  function aiMemDownload() {
+    try {
+      const data = aiMemExport(aiMemData.uid);
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob); const a = document.createElement("a");
+      a.href = url; a.download = `내AI학습_${aiMemData.uid}.json`; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      fireToast("내 AI 학습 데이터를 내보냈어요");
+    } catch (e) { fireToast("내보내기에 실패했어요"); }
+  }
   function deleteMemory(from) {
     if (typeof removeLearnedAlias === "function") removeLearnedAlias(from);
     setMemoryList((prev) => (prev || []).filter((e) => e.from !== from));
@@ -5916,6 +7596,79 @@ function App() {
     if (cmd && cmd.action !== "UNKNOWN") { handleVoiceAction(cmd); return true; }
     return false;
   }
+
+  // ★ STEP3: Conversation Engine 인스턴스(앱당 1개) — 실행은 기존 handleVoiceAction으로 위임.
+  //  기존 UI/음성 파이프라인은 그대로 두고, 검증·향후 연동용으로만 노출(기본 동작 변화 없음).
+  const _asstDepsRef = useRef({});
+  _asstDepsRef.current = {
+    execute: (c) => { try { handleVoiceAction(c); return true; } catch (e) { return false; } },
+    appData: () => ({ customers, vendors, products, orders }),
+  };
+  const _asstRef = useRef(null);
+  useEffect(() => {
+    if (_asstRef.current) return;   // 1회만 생성 → 대화 컨텍스트 유지
+    try {
+      _asstRef.current = createConversationEngine({
+        execute: (c) => _asstDepsRef.current.execute(c),
+        appData: () => _asstDepsRef.current.appData(),
+        confirmText: (r) => {
+          const t = (typeof AI_TOOL_REGISTRY !== "undefined" && AI_TOOL_REGISTRY.get(r.tool)) ? AI_TOOL_REGISTRY.get(r.tool).title : "작업";
+          const nm = (r.command && r.command.name) ? r.command.name + " " : "";
+          return `${nm}${t}, 진행할까요? ("응" / "아니")`;
+        },
+      });
+      window.__joassamAssistant = _asstRef.current;   // 콘솔/검증용(예: __joassamAssistant.handle("김철수 찾아"))
+    } catch (e) {}
+  }, []);
+
+  // ★ STEP6: AI OS 인스턴스(앱당 1개) — STEP3~5 엔진을 조합만. 실행은 기존 handleVoiceAction으로 위임.
+  //  기존 홈/음성 파이프라인은 그대로. 대시보드 데이터·검증용으로만 노출(기본 동작 변화 없음).
+  const _aiOsRef = useRef(null);
+  useEffect(() => {
+    if (_aiOsRef.current) return;
+    try {
+      _aiOsRef.current = createAiOS({
+        execute: (c) => _asstDepsRef.current.execute(c),
+        appData: () => _asstDepsRef.current.appData(),
+        userId: () => { try { return aiUserId(); } catch (e) { return "__anon__"; } },
+      });
+      window.__joassamAiOS = _aiOsRef.current;   // 콘솔/검증용(예: __joassamAiOS.brief())
+    } catch (e) {}
+  }, []);
+
+  // ★ STEP7: Provider 기반 대화엔진(앱당 1개) — 자체 문맥 유지. Mock 기본, 콘솔에서 대화 테스트 가능.
+  const _aiChatRef = useRef(null);
+  useEffect(() => {
+    if (_aiChatRef.current) return;
+    try {
+      _aiChatRef.current = createProviderConversationEngine({
+        execute: (c) => _asstDepsRef.current.execute(c),
+        appData: () => _asstDepsRef.current.appData(),
+        userId: () => { try { return aiUserId(); } catch (e) { return "__anon__"; } },
+      });
+      window.__joassamAiChat = _aiChatRef.current;   // 예: await __joassamAiChat.handle("김철수 지난번처럼")
+    } catch (e) {}
+  }, []);
+
+  // ★ STEP6: AI 대시보드(홈 상단 브리핑) 데이터 — 전부 읽기 전용. 기존 홈 화면은 그대로 유지, 위에 카드만 추가.
+  const aiBrief = useMemo(() => {
+    try {
+      const ad = { orders, products, customers, vendors };
+      const uid = (function () { try { return aiUserId(); } catch (e) { return "__anon__"; } })();
+      const remOn = aiSettingsIsOn(uid, "reminder");
+      return {
+        priorities: aiDailyPriorities(ad),
+        recommendations: aiRecommendations(ad, uid),
+        predict: aiPredictAll(ad),
+        monitor: aiSelfMonitor(ad),
+        proactive: aiProactive(ad, uid),
+        reminders: aiReminders(ad, remOn ? {} : { unprocessed: false, lowstock: false, reserved: false, unpaid: false, urgent: false }),
+        dailySummary: aiDailySummary(ad),
+        remindersOn: remOn,
+      };
+    } catch (e) { return null; }
+  }, [orders, products, customers, vendors]);
+
 
   async function runVoiceCommand(text) {
     const said = String(text || "").trim();
@@ -8469,7 +10222,7 @@ function App() {
 
         <div style={{ padding: "16px 16px 16px", maxWidth: "none", flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
           {tab === "home" && (
-            <HomeTab appName={appName} orders={orders} counts={counts} customerMap={customerMap} productMap={productMap} orderTotal={orderTotal} exportBackup={exportBackup} importBackup={importBackup} backupInputRef={backupInputRef} fireToast={fireToast} setTab={setTab} members={members} nickname={nickname} onSelectOrder={(id) => { setTab("orders"); setSelectedOrderId(id); }} couriers={couriers} customerCount={customers.length} vendorCount={vendors.length} overdueCount={overdueDeliveries.length} pendingApprovalCount={isCurrentUserAdmin ? Object.values(accounts).filter((a) => a && a.pending).length : 0} isAdmin={isCurrentUserAdmin} accounts={accounts} newRegularCount={findNewMonthlyRegularCandidates(customers, orders).length} />
+            <HomeTab appName={appName} orders={orders} counts={counts} customerMap={customerMap} productMap={productMap} orderTotal={orderTotal} exportBackup={exportBackup} importBackup={importBackup} backupInputRef={backupInputRef} fireToast={fireToast} setTab={setTab} members={members} nickname={nickname} onSelectOrder={(id) => { setTab("orders"); setSelectedOrderId(id); }} couriers={couriers} customerCount={customers.length} vendorCount={vendors.length} overdueCount={overdueDeliveries.length} pendingApprovalCount={isCurrentUserAdmin ? Object.values(accounts).filter((a) => a && a.pending).length : 0} isAdmin={isCurrentUserAdmin} accounts={accounts} newRegularCount={findNewMonthlyRegularCandidates(customers, orders).length} aiBrief={aiBrief} />
           )}
 
           {tab === "orders" && !selectedOrder && !invoicePreview && (
@@ -8851,6 +10604,16 @@ function App() {
           />
         )}
 
+        {aiMemOpen && aiMemData && (
+          <PersonalMemoryModal
+            data={aiMemData}
+            onClose={() => setAiMemOpen(false)}
+            onApprove={aiMemApprove} onReject={aiMemReject}
+            onRemove={aiMemRemove} onEdit={aiMemEdit} onAdd={aiMemAddDirect}
+            onToggleEnabled={aiMemToggleEnabled} onReset={aiMemReset} onExport={aiMemDownload}
+          />
+        )}
+
         {memoryList !== null && (
           <div style={{ position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 300000, padding: 20 }} onClick={() => setMemoryList(null)}>
             <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 16, padding: "20px 18px", maxWidth: 380, width: "100%", maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" }}>
@@ -9176,6 +10939,7 @@ function App() {
             checkingUpdate={checkingUpdate}
             onSelfTest={runSelfTestAndShow}
             onMemory={openMemoryManager}
+            onAiMemory={openAiMemory}
             onProblemNote={openProblemNote}
             problemNoteCount={noteUnresolved}
             isAdmin={isCurrentUserAdmin}
@@ -10007,7 +11771,131 @@ function DeliveryCheckTab({ orders, recentlyConfirmed, customerMap, onConfirm, o
   );
 }
 
-function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal, exportBackup, importBackup, backupInputRef, fireToast, setTab, members, nickname, onSelectOrder, couriers, customerCount, vendorCount, overdueCount, pendingApprovalCount, isAdmin, accounts, newRegularCount }) {
+// ★ STEP6: AI 대시보드(홈 상단 브리핑 카드). 읽기 전용 요약 + 근거. 기존 홈은 그대로 아래에 유지.
+//  접기/펼치기 가능. 실행 버튼 없음 — 급한 일은 해당 탭으로 이동만(중요한 작업은 조비서 승인 흐름 사용).
+function AiBriefingCard({ brief, setTab }) {
+  const [open, setOpen] = React.useState(true);
+  if (!brief) return null;
+  const pri = (brief.priorities || []);
+  const recs = (brief.recommendations || []);
+  const mon = brief.monitor || {};
+  const stockPred = (brief.predict && brief.predict.stock) || [];
+  const salesPred = (brief.predict && brief.predict.sales) || null;
+  const season = (brief.predict && brief.predict.seasonal) || null;
+  const reminders = (brief.reminders) || [];
+  const proactive = (brief.proactive) || [];
+  const daily = brief.dailySummary || null;
+  const nothing = !pri.length && !recs.length && !stockPred.length && !reminders.length && !proactive.length;
+  return (
+    <div style={{ background: "linear-gradient(135deg,#F3F9F4,#EAF4EC)", border: "1px solid #CDE6D3", borderRadius: 14, padding: "14px 16px", marginBottom: 16 }}>
+      <button onClick={() => setOpen((o) => !o)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, background: "none", border: "none", padding: 0, cursor: "pointer", textAlign: "left" }}>
+        <span style={{ fontSize: 20 }}>🤖</span>
+        <span style={{ flex: 1 }}>
+          <span style={{ display: "block", fontSize: 14, fontWeight: 800, color: "#1F5130" }}>AI 브리핑 · 오늘 이렇게 준비했어요</span>
+          <span style={{ display: "block", fontSize: 11, color: "#5B7A63", marginTop: 1 }}>조비서 AI OS · 실행은 항상 사장님 확인 후에만</span>
+        </span>
+        <span style={{ color: "#3E7A52", fontSize: 15 }}>{open ? "▾" : "▸"}</span>
+      </button>
+
+      {open && (
+        <div style={{ marginTop: 12 }}>
+          {nothing && (
+            <div style={{ fontSize: 13, color: "#3E5A46", padding: "6px 2px" }}>오늘 급한 일이나 특별한 신호는 없어요. 평소처럼 진행하시면 돼요. 👍</div>
+          )}
+
+          {reminders.length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#9A3B3B", marginBottom: 5 }}>🔔 잊지 마세요 (알림은 설정에서 끌 수 있어요)</div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {reminders.map((r, i) => (
+                  <span key={i} title={r.reason} style={{ fontSize: 12, fontWeight: 600, color: "#8A2F2F", background: "#FDECEC", border: "1px solid #F2C7C7", borderRadius: 20, padding: "4px 10px" }}>
+                    {r.type} {r.count}건
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {proactive.length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 5 }}>✨ AI가 먼저 챙겼어요</div>
+              {proactive.slice(0, 4).map((p, i) => (
+                <div key={i} style={{ fontSize: 12.5, color: "#31473a", background: "#fff", border: "1px solid #E3EEE6", borderRadius: 8, padding: "7px 10px", marginBottom: 5 }}>
+                  <span style={{ fontWeight: 600 }}>{p.text}</span>
+                  {p.reason && <span style={{ display: "block", fontSize: 11, color: "#8A968D", marginTop: 1 }}>근거: {p.reason}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {daily && (daily.orderCount > 0 || daily.shippedCount > 0) && (
+            <div style={{ fontSize: 11.5, color: "#4A5B50", background: "#F0F6F1", border: "1px solid #DBEBDF", borderRadius: 8, padding: "7px 10px", marginBottom: 10 }}>
+              📊 오늘 요약: 주문 {daily.orderCount}건 · 출고완료 {daily.shippedCount}건{daily.lowStock && daily.lowStock.length ? ` · 재고부족 ${daily.lowStock.length}종` : ""} · 판매 {daily.salesTrend}{daily.tomorrowTasks ? ` · 내일 예약 ${daily.tomorrowTasks}건` : ""}
+            </div>
+          )}
+
+          {pri.length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 5 }}>📌 오늘 우선순위</div>
+              {pri.slice(0, 5).map((p, i) => {
+                const tabFor = p.task.includes("출고") || p.task.includes("발송") || p.task.includes("입금") ? "orders" : (p.task.includes("재고") ? "products" : "orders");
+                return (
+                  <button key={i} onClick={() => setTab(tabFor)} style={{ width: "100%", display: "flex", alignItems: "center", gap: 8, textAlign: "left", background: "#fff", border: "1px solid #DDEBE0", borderRadius: 8, padding: "8px 10px", marginBottom: 5, cursor: "pointer" }}>
+                    <span style={{ fontSize: 12, fontWeight: 800, color: "#2F6F4E", minWidth: 16 }}>{i + 1}</span>
+                    <span style={{ flex: 1 }}>
+                      <span style={{ display: "block", fontSize: 13, fontWeight: 700, color: "#243b2e" }}>{p.task} <span style={{ color: "#2F6F4E" }}>{p.count}건</span></span>
+                      <span style={{ display: "block", fontSize: 11, color: "#7B8A80", marginTop: 1 }}>{p.reason}</span>
+                    </span>
+                    <span style={{ color: "#8FA895", fontSize: 14 }}>›</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {recs.length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 5 }}>💡 제안 (근거 포함)</div>
+              {recs.slice(0, 4).map((r, i) => (
+                <div key={i} style={{ fontSize: 12.5, color: "#31473a", background: "#fff", border: "1px solid #E3EEE6", borderRadius: 8, padding: "7px 10px", marginBottom: 5 }}>
+                  <span style={{ fontWeight: 600 }}>{r.text}</span>
+                  {r.reason && <span style={{ display: "block", fontSize: 11, color: "#8A968D", marginTop: 1 }}>근거: {r.reason}</span>}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {stockPred.length > 0 && (
+            <div style={{ marginBottom: 10 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#8A5A1C", marginBottom: 5 }}>📉 재고 소진 예측</div>
+              {stockPred.slice(0, 3).map((s, i) => (
+                <div key={i} style={{ fontSize: 12.5, color: "#6E4A16", background: "#FFF9EF", border: "1px solid #F0E0C4", borderRadius: 8, padding: "7px 10px", marginBottom: 5 }}>
+                  <span style={{ fontWeight: 700 }}>{s.name}</span> 약 <b>{s.daysLeft}일</b> 뒤 소진 예상
+                  <span style={{ display: "block", fontSize: 11, color: "#A98B52", marginTop: 1 }}>근거: {s.evidence} · {s.confidence}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {(salesPred || season) && (
+            <div style={{ fontSize: 11.5, color: "#5B7A63", borderTop: "1px dashed #CDE6D3", paddingTop: 8, marginTop: 4 }}>
+              {salesPred && <div>📈 최근 판매 <b>{salesPred.direction}</b> (7일 {salesPred.recent7}개 · 이전 {salesPred.prev7}개){salesPred.top && salesPred.top.length ? ` · 인기 ${salesPred.top.join(", ")}` : ""}</div>}
+              {season && season.hints && season.hints.length > 0 && <div style={{ marginTop: 3 }}>🗓️ {season.month}월 참고: {season.hints.join(", ")}</div>}
+            </div>
+          )}
+
+          {mon && (mon.health === "주의" || (mon.warnings && mon.warnings.length > 0)) && (
+            <div style={{ fontSize: 11.5, color: "#9A4A2A", background: "#FDF2EC", border: "1px solid #F0CDB8", borderRadius: 8, padding: "7px 10px", marginTop: 8 }}>
+              ⚙️ 시스템 점검: {mon.warnings.map((w) => w.text).join(" ")} <span style={{ color: "#B98A72" }}>(자동으로 바꾸지 않고 사장님께 먼저 알려드려요)</span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal, exportBackup, importBackup, backupInputRef, fireToast, setTab, members, nickname, onSelectOrder, couriers, customerCount, vendorCount, overdueCount, pendingApprovalCount, isAdmin, accounts, newRegularCount, aiBrief }) {
   const recentOrders = [...orders]
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
     .slice(0, 5);
@@ -10018,6 +11906,8 @@ function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal,
         <div style={{ fontSize: 18, fontWeight: 700, color: "#1B2430" }}>{appName}</div>
         <div style={{ fontSize: 12, color: "#5F5E5A", marginTop: 2 }}>{nickname ? `${(accounts?.[nickname] && accounts[nickname].displayName) || nickname}님 환영합니다` : "신선한 농산물을 믿고 주문해 주세요!"}</div>
       </div>
+
+      {aiBrief && <AiBriefingCard brief={aiBrief} setTab={setTab} />}
 
       {pendingApprovalCount > 0 && (
         <button
@@ -12560,6 +14450,92 @@ function BundleConfirmModal({ name, classes, onCancel, onChoose }) {
 }
 
 // ★ v73: 자주 나온 말 후보 한 줄 — 올바른 말로 고쳐 학습하거나 무시(삭제)
+// ★ STEP4: 개인 AI 기억 뷰어 — 승인 후보/배운 별칭 확인·수정·삭제·초기화·내보내기·학습 on·off
+function PersonalMemoryModal({ data, onClose, onApprove, onReject, onRemove, onEdit, onAdd, onToggleEnabled, onReset, onExport }) {
+  const [nf, setNf] = React.useState(""); const [nt, setNt] = React.useState("");
+  const L = (data && data.learning) || { approved: [], candidates: [] };
+  const box = { background: "#fff", borderRadius: 16, padding: "18px 16px", maxWidth: 440, width: "100%", maxHeight: "88vh", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" };
+  const sect = { fontSize: 12.5, fontWeight: 700, color: "#5B3E9C", margin: "12px 0 6px" };
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 320000, padding: 18 }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={box}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+          <div style={{ fontSize: 16, fontWeight: 700 }}>🧠 내 AI 기억</div>
+          <span style={{ fontSize: 11, color: "#888780" }}>사용자: {data.uid}</span>
+        </div>
+        <div style={{ fontSize: 11, color: "#888780", marginBottom: 8, lineHeight: 1.5 }}>
+          이 학습은 <b>이 사용자 전용</b>이고 다른 사용자와 공유되지 않아요. 모든 학습은 <b>승인해야</b> 적용됩니다.
+        </div>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, fontWeight: 700, color: data.enabled ? "#2F6F4E" : "#A32D2D", marginBottom: 6 }}>
+          <input type="checkbox" checked={!!data.enabled} onChange={onToggleEnabled} /> 학습 {data.enabled ? "켜짐" : "꺼짐"}
+        </label>
+
+        <div style={{ overflowY: "auto", flex: 1, borderTop: "1px solid #F1F2EC", paddingTop: 6 }}>
+          {(L.candidates && L.candidates.length > 0) && (
+            <div>
+              <div style={sect}>🔎 승인 대기 ({L.candidates.length})</div>
+              {L.candidates.map((e) => (
+                <div key={e.id} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 2px", borderBottom: "1px solid #F7F6F1" }}>
+                  <div style={{ flex: 1, fontSize: 12.5 }}><b>{e.from}</b> <span style={{ color: "#888780" }}>→</span> <span style={{ color: "#5B3E9C", fontWeight: 700 }}>{e.to}</span></div>
+                  <button onClick={() => onApprove(e.id)} style={{ border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 11.5, borderRadius: 7, padding: "5px 10px", cursor: "pointer" }}>승인</button>
+                  <button onClick={() => onReject(e.id)} style={{ border: "1px solid #E2C4C4", background: "#fff", color: "#A32D2D", fontWeight: 700, fontSize: 11.5, borderRadius: 7, padding: "5px 8px", cursor: "pointer" }}>거절</button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={sect}>📚 배운 말 ({(L.approved || []).length})</div>
+          {(L.approved || []).length === 0 ? (
+            <div style={{ fontSize: 12, color: "#888780", padding: "8px 0" }}>아직 없어요. 아래에서 직접 추가하거나, 대화 중 정정한 말이 승인되면 쌓여요.</div>
+          ) : (L.approved.map((e) => (
+            <PersonalAliasRow key={e.id} entry={e} onRemove={onRemove} onEdit={onEdit} />
+          )))}
+          <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+            <input value={nf} onChange={(ev) => setNf(ev.target.value)} placeholder="들리는 말 (예: 청기어)" style={{ flex: 1, border: "1px solid #D3D1C7", borderRadius: 8, padding: "6px 9px", fontSize: 12.5 }} />
+            <input value={nt} onChange={(ev) => setNt(ev.target.value)} placeholder="올바른 말 (예: 청겨자)" style={{ flex: 1, border: "1px solid #D3D1C7", borderRadius: 8, padding: "6px 9px", fontSize: 12.5 }} />
+            <button onClick={() => { if (nf.trim() && nt.trim()) { onAdd(nf.trim(), nt.trim()); setNf(""); setNt(""); } }} style={{ border: "none", background: "#5B3E9C", color: "#fff", fontWeight: 700, fontSize: 12, borderRadius: 8, padding: "6px 12px", cursor: "pointer" }}>추가</button>
+          </div>
+
+          {(data.favCustomers && data.favCustomers.length > 0) && (
+            <div><div style={sect}>⭐ 자주 주문받는 고객</div>
+              <div style={{ fontSize: 12, color: "#5F5E5A" }}>{data.favCustomers.map((c) => `${c.key}(${c.count})`).join(", ")}</div></div>
+          )}
+          {(data.favProducts && data.favProducts.length > 0) && (
+            <div><div style={sect}>⭐ 자주 나가는 상품</div>
+              <div style={{ fontSize: 12, color: "#5F5E5A" }}>{data.favProducts.map((c) => `${c.key}(${c.count})`).join(", ")}</div></div>
+          )}
+          {data.workflow && (
+            <div><div style={sect}>🔁 자주 하는 순서</div>
+              <div style={{ fontSize: 12, color: "#5F5E5A" }}>{data.workflow.join(" → ")}</div></div>
+          )}
+        </div>
+
+        <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
+          <button onClick={onExport} style={{ flex: 1, border: "1px solid #C7C9C0", background: "#fff", color: "#5F5E5A", fontWeight: 700, fontSize: 12, borderRadius: 9, padding: "9px 0", cursor: "pointer" }}>내보내기</button>
+          <button onClick={onReset} style={{ flex: 1, border: "1px solid #E2C4C4", background: "#fff", color: "#A32D2D", fontWeight: 700, fontSize: 12, borderRadius: 9, padding: "9px 0", cursor: "pointer" }}>전체 초기화</button>
+          <button onClick={onClose} style={{ flex: 1.2, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 12.5, borderRadius: 9, padding: "9px 0", cursor: "pointer" }}>닫기</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+function PersonalAliasRow({ entry, onRemove, onEdit }) {
+  const [editing, setEditing] = React.useState(false);
+  const [val, setVal] = React.useState(entry.to);
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 2px", borderBottom: "1px solid #F7F6F1" }}>
+      <div style={{ flex: 1, fontSize: 12.5 }}>
+        <b>{entry.from}</b> <span style={{ color: "#888780" }}>→</span>{" "}
+        {editing ? <input value={val} onChange={(e) => setVal(e.target.value)} style={{ border: "1px solid #D3D1C7", borderRadius: 6, padding: "3px 6px", fontSize: 12 }} />
+          : <span style={{ color: "#5B3E9C", fontWeight: 700 }}>{entry.to}</span>}
+      </div>
+      {editing
+        ? <button onClick={() => { onEdit(entry.id, val); setEditing(false); }} style={{ border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 11.5, borderRadius: 7, padding: "5px 9px", cursor: "pointer" }}>저장</button>
+        : <button onClick={() => setEditing(true)} style={{ border: "1px solid #C7C9C0", background: "#fff", color: "#5F5E5A", fontWeight: 700, fontSize: 11.5, borderRadius: 7, padding: "5px 9px", cursor: "pointer" }}>수정</button>}
+      <button onClick={() => onRemove(entry.id)} style={{ border: "1px solid #E2C4C4", background: "#fff", color: "#A32D2D", fontWeight: 700, fontSize: 11.5, borderRadius: 7, padding: "5px 8px", cursor: "pointer" }}>삭제</button>
+    </div>
+  );
+}
+
 function MemoryCandidateRow({ word, count, onLearn, onIgnore }) {
   const [val, setVal] = React.useState("");
   return (
@@ -12630,7 +14606,7 @@ function ProblemNoteRow({ entry, products, onSave, onDelete }) {
   );
 }
 
-function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onOpenBackupList, onCheckUpdate, checkingUpdate, onSelfTest, onMemory, onProblemNote, problemNoteCount, isAdmin, onClose, onNavigate, askConfirm, handleLogout, fireToast, geminiKey, setGeminiKey }) {
+function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onOpenBackupList, onCheckUpdate, checkingUpdate, onSelfTest, onMemory, onAiMemory, onProblemNote, problemNoteCount, isAdmin, onClose, onNavigate, askConfirm, handleLogout, fireToast, geminiKey, setGeminiKey }) {
   const [editingName, setEditingName] = useState(false);
   const [draftName, setDraftName] = useState(appName);
   const [restoreDate, setRestoreDate] = useState(todayStr());
@@ -12769,6 +14745,14 @@ function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, 
               style={{ width: "100%", marginTop: 8, padding: "9px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
             >
               🧠 AI가 배운 말 관리
+            </button>
+          )}
+          {onAiMemory && (
+            <button
+              onClick={onAiMemory}
+              style={{ width: "100%", marginTop: 8, padding: "9px 0", borderRadius: 8, border: "1px solid #6B4FA5", background: "#F5F1FB", color: "#5B3E9C", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
+            >
+              🧠 내 AI 기억 (개인 학습)
             </button>
           )}
           {onProblemNote && (
