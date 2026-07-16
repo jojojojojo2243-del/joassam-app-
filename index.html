@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 92;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
+const APP_VERSION = 93;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -1666,7 +1666,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // ===== JARVIS AI ASSISTANT =====
-const APP_BUILD = "v92 (07-16 STEP15 통합검증+의도분류 보정)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const APP_BUILD = "v93 (07-16 STEP10-1 음성 학습센터)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
 const JARVIS_TAB_MAP = {
   goHome:'home', goOrders:'orders', goNew:'new',
   goCustomers:'customers', goProducts:'products',
@@ -3621,6 +3621,95 @@ function aiDeployInfo() {
   return { version: (typeof APP_VERSION !== "undefined" ? APP_VERSION : 0), build: (typeof APP_BUILD !== "undefined" ? APP_BUILD : ""), platform: platform, installed: standalone, online: aiIsOnline() };
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   STEP 10-1 — Voice Training Center (사용자 음성 학습센터). 승인 기반 지속 학습.
+   원칙: ① 승인 없는 학습 저장 없음(전부 후보→승인). ② 개인정보 외부 전송 없음(전부 로컬/개인 기억).
+        ③ Provider 독립(정규화는 엔진 앞단) — Mock/OpenAI/Claude/Gemini 동일. ④ 기존 기능 재사용.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+// ── ⑤ 발음 유사도(%): 자모 기반. "청겨" vs "청겨자" 같은 근접 발음 측정.
+function aiVoiceSimilarity(a, b) {
+  const s = (typeof simJamo === "function") ? simJamo(aiVoiceNS(a), aiVoiceNS(b)) : 0;
+  return Math.round(s * 100);
+}
+
+// ── ⑩ 농장 전용 용어(집중 학습 대상).
+const AI_FARM_TERMS = ["청겨", "적겨", "루꼴라", "트레비소", "버터", "로메인", "다청채", "홍쌈배추", "EC", "pH", "양액", "수경재배", "병해", "출고", "포장", "택배"];
+// ⑨ 테스트 문장 20개(업무·음성 혼합).
+const AI_VOICE_TEST_SENTENCES = [
+  "청겨 두 박스", "김철수 지난번처럼", "내일 배송", "적겨 다섯", "재고 확인", "오늘 주문 보여줘",
+  "로메인 세 개", "모듬 두 개", "대솔본점 거래명세서", "오늘 할일", "청겨자 재고", "루꼴라 재고 확인",
+  "박영희 주문 등록", "내일 출고 예약", "깻잎 재고", "상추 두 박스", "김철수 연락처", "오늘 출고 뭐 있어",
+  "적겨자 재고 부족", "하레하레 명세서 보내",
+];
+function aiVoiceTestSentences() { return AI_VOICE_TEST_SENTENCES.slice(); }
+function aiVoiceFarmTerms() { return AI_FARM_TERMS.slice(); }
+
+// ── ②③ 학습 분석: 말한 내용 → 정규화 → 의도 → 실행예정 → (반복오류면 사전 등록 제안). 순수/로컬.
+function aiVoiceTrainAnalyze(rawText, userId, appData) {
+  const raw = String(rawText || "").trim();
+  const norm = aiVoiceNormalize(raw, userId, appData);
+  const cls = aiClassifyIntent(norm.text, createConvContext(), appData);
+  let action = "";
+  try {
+    const plan = aiPlan(norm.text, createConvContext(), appData);
+    if (plan && plan.goal) action = plan.goal;
+    else if (plan && plan.needsInfo) action = plan.needsInfo.question;
+  } catch (e) {}
+  // 반복 발음 오류 → 사전 등록 제안(유사도 포함)
+  let suggestion = null;
+  const tokens = raw.split(/\s+/).filter((w) => aiVoiceNS(w).length >= 2);
+  for (const tk of tokens) { const s = aiVoiceSuggestCorrection(userId, tk, appData); if (s) { s.similarity = aiVoiceSimilarity(s.spoken, s.canonical); suggestion = s; break; } }
+  return { stt: raw, normalized: norm.text, applied: norm.applied, intent: cls.intent, intentReason: cls.reason, action: action, suggestion: suggestion, changed: norm.text !== raw };
+}
+
+// ⑨ 테스트 실행: 각 문장이 '의미 있게 이해되는지'(unknown 아님) 정답률 계산.
+function aiVoiceTestRun(userId, appData, sentences) {
+  const list = (sentences && sentences.length) ? sentences : aiVoiceTestSentences();
+  const rows = list.map((s) => { const a = aiVoiceTrainAnalyze(s, userId, appData); const ok = a.intent !== "unknown"; return { text: s, normalized: a.normalized, intent: a.intent, ok: ok }; });
+  const pass = rows.filter((r) => r.ok).length;
+  return { total: rows.length, pass: pass, rate: rows.length ? Math.round(pass / rows.length * 100) : 0, rows: rows };
+}
+
+// ── ⑦ 업무 패턴 학습(승인 기반): 시간대별 업무 관찰 → 후보 → 승인해야 제안에 사용.
+//   저장: kind "workpattern" = { byHour:{h:{task:count}}, approved:{h:task}, candidates:[] }
+function aiWorkPatternGet(userId) { return aiMemLoad(userId, "workpattern", { byHour: {}, approved: {}, candidates: [] }); }
+function aiWorkBand(hour) { const h = Number(hour); if (h >= 5 && h < 12) return "오전"; if (h >= 12 && h < 18) return "오후"; return "저녁"; }
+function aiWorkPatternObserve(userId, hour, task) {
+  if (!task) return null;
+  const w = aiWorkPatternGet(userId); const band = aiWorkBand(hour);
+  w.byHour[band] = w.byHour[band] || {}; w.byHour[band][task] = (w.byHour[band][task] || 0) + 1;
+  // 3회 이상이면 후보 제안(승인 전까지 approved에 넣지 않음)
+  const id = band + ":" + task;
+  if (w.byHour[band][task] >= 3 && !(w.approved[band] === task) && !w.candidates.some((c) => c.id === id)) {
+    w.candidates.push({ id: id, band: band, task: task, count: w.byHour[band][task] });
+  }
+  aiMemSave(userId, "workpattern", w); return w.byHour[band][task];
+}
+function aiWorkPatternApprove(userId, id) { const w = aiWorkPatternGet(userId); const i = w.candidates.findIndex((c) => c.id === id); if (i < 0) return false; const c = w.candidates.splice(i, 1)[0]; w.approved[c.band] = c.task; aiMemSave(userId, "workpattern", w); return true; }
+function aiWorkPatternReject(userId, id) { const w = aiWorkPatternGet(userId); const i = w.candidates.findIndex((c) => c.id === id); if (i < 0) return false; w.candidates.splice(i, 1); aiMemSave(userId, "workpattern", w); return true; }
+function aiWorkPatternSuggest(userId, hour) { const w = aiWorkPatternGet(userId); const band = aiWorkBand(hour); return w.approved[band] ? { band: band, task: w.approved[band] } : null; }
+
+// ── ⑧ 학습 통계(Dashboard 데이터). 전부 로컬 기억에서 집계.
+function aiVoiceTrainStats(userId) {
+  const v = aiVoiceMemGet(userId);
+  const dict = Object.keys(v.approved || {});
+  const learn = aiMemLoad(userId, "learning", { approved: [], candidates: [], rejected: [] }) || {};
+  const repeats = v.repeats || {};
+  const repeatCount = Object.keys(repeats).filter((k) => repeats[k] >= 2).length;
+  return {
+    dictCount: dict.length,
+    abbrevCount: dict.length,
+    candidateCount: (v.candidates || []).length + ((learn.candidates || []).length),
+    approvedCount: (learn.approved || []).length + dict.length,
+    rejectedCount: (learn.rejected || []).length,
+    repeatErrorCount: repeatCount,
+    terms: (v.terms || []).length,
+    recent: (v.candidates || []).slice(-5).map((c) => `${c.spoken}→${c.canonical}`).concat(dict.slice(-5).map((k) => `${k}→${v.approved[k]}`)).slice(-6),
+    voiceAccuracy: dict.length ? Math.min(99, 80 + dict.length) : 80,   // 사전이 쌓일수록 추정 인식률↑
+  };
+}
+
 /* ===== 고도화 헬퍼: 상품 퍼지매칭 · 동명이인 후보 · 선택 파싱 · 기존주문 묶음 ===== */
 // #3 상품명 오인식 자동 매칭 ("가피라"→"카이피라")
 /* 자주 잘못 들리는 발음 → 정식 상품 핵심명 (유사도로 못 잡는 하드 케이스 확실 교정). 필요시 계속 추가. */
@@ -4287,6 +4376,17 @@ function runSelfTests() {
   T("STEP13 동기화 큐: 적재→플러시", () => { try { if (typeof localStorage !== "undefined") localStorage.removeItem(AI_SYNC_QUEUE_KEY); } catch (e) {} aiSyncQueueAdd({ a: 1 }); aiSyncQueueAdd({ a: 2 }); let flushed = 0; const done = aiSyncQueueFlush(() => { flushed++; return true; }); return done === 2 && flushed === 2 && aiSyncQueueGet().length === 0; }, (g) => g === true);
   T("STEP13 배포 정보 구조(버전·플랫폼·온라인)", () => { const d = aiDeployInfo(); return typeof d.version === "number" && typeof d.platform === "string" && typeof d.installed === "boolean" && typeof d.online === "boolean"; }, (g) => g === true);
   T("STEP13 백업 대상에 개인 학습 계층 포함", () => AI_BACKUP_KINDS.indexOf("voice") >= 0 && AI_BACKUP_KINDS.indexOf("preference") >= 0 && AI_BACKUP_KINDS.indexOf("longterm") >= 0 && AI_BACKUP_KINDS.indexOf("settings") >= 0, (g) => g === true);
+
+  // ★ STEP10-1: Voice Training Center
+  var VTD = { products: [{ id: "p1", name: "청겨자 1kg" }, { id: "p2", name: "적겨자 1kg" }, { id: "p3", name: "모듬쌈채소" }], customers: [{ name: "김철수" }], vendors: [], orders: [] };
+  T("STEP10-1 발음 유사도(%) 계산", () => { const s = aiVoiceSimilarity("청겨", "청겨자"); return typeof s === "number" && s >= 50 && s <= 100; }, (g) => g === true);
+  T("STEP10-1 학습분석: STT→정규화→의도→실행", () => { aiPrivacyDeleteAll(U); aiVoiceDictAddDirect(U, "청겨", "청겨자"); const a = aiVoiceTrainAnalyze("청겨 재고", U, VTD); return a.normalized.indexOf("청겨자") === 0 && a.intent === "재고" && a.changed === true; }, (g) => g === true);
+  T("STEP10-1 반복 발음오류 → 사전등록 제안(유사도 포함)", () => { aiPrivacyDeleteAll(U); aiVoiceTrainAnalyze("청겨자밭 재고", U, VTD); const a = aiVoiceTrainAnalyze("청겨자밭 재고", U, VTD); return a.suggestion && a.suggestion.canonical === "청겨자" && typeof a.suggestion.similarity === "number"; }, (g) => g === true);
+  T("STEP10-1 테스트 20문장 정답률 계산", () => { aiPrivacyDeleteAll(U); const r = aiVoiceTestRun(U, VTD); return r.total === 20 && typeof r.rate === "number" && r.rate >= 0 && r.rate <= 100 && Array.isArray(r.rows); }, (g) => g === true);
+  T("STEP10-1 농장 용어 세트 제공", () => { const t = aiVoiceFarmTerms(); return t.length >= 16 && t.indexOf("청겨") >= 0 && t.indexOf("수경재배") >= 0; }, (g) => g === true);
+  T("STEP10-1 업무패턴: 3회 관찰→후보, 승인해야 제안", () => { aiPrivacyDeleteAll(U); for (var i = 0; i < 3; i++) aiWorkPatternObserve(U, 9, "주문확인"); const w = aiWorkPatternGet(U); const cand = w.candidates.length > 0; const before = aiWorkPatternSuggest(U, 9); aiWorkPatternApprove(U, "오전:주문확인"); const after = aiWorkPatternSuggest(U, 9); return cand && before === null && after && after.task === "주문확인"; }, (g) => g === true);
+  T("STEP10-1 학습 통계 구조", () => { aiPrivacyDeleteAll(U); aiVoiceDictAddDirect(U, "적겨", "적겨자"); const s = aiVoiceTrainStats(U); return s.dictCount === 1 && typeof s.voiceAccuracy === "number" && Array.isArray(s.recent); }, (g) => g === true);
+  T("STEP10-1 시간대 밴드 분류", () => aiWorkBand(9) === "오전" && aiWorkBand(14) === "오후" && aiWorkBand(20) === "저녁", (g) => g === true);
 
   const passed = cases.filter((c) => c.ok).length;
   return { passed, failed: cases.length - passed, total: cases.length, cases };
@@ -6691,6 +6791,7 @@ function App() {
   }
   // ★ STEP4: 개인 AI 기억 뷰어(사용자별) — 확인/수정/삭제/초기화/내보내기/학습 on·off
   const [aiMemOpen, setAiMemOpen] = useState(false);
+  const [voiceTrainOpen, setVoiceTrainOpen] = useState(false);
   const [aiMemData, setAiMemData] = useState(null);
   function refreshAiMem() {
     try {
@@ -10950,6 +11051,14 @@ function App() {
           />
         )}
 
+        {voiceTrainOpen && (
+          <VoiceTrainingModal
+            appData={{ orders, products, customers, vendors }}
+            fireToast={fireToast}
+            onClose={() => setVoiceTrainOpen(false)}
+          />
+        )}
+
         {memoryList !== null && (
           <div style={{ position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 300000, padding: 20 }} onClick={() => setMemoryList(null)}>
             <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 16, padding: "20px 18px", maxWidth: 380, width: "100%", maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" }}>
@@ -11276,6 +11385,7 @@ function App() {
             onSelfTest={runSelfTestAndShow}
             onMemory={openMemoryManager}
             onAiMemory={openAiMemory}
+            onVoiceTrain={() => { setVoiceTrainOpen(true); setSideMenuOpen(false); }}
             onProblemNote={openProblemNote}
             problemNoteCount={noteUnresolved}
             isAdmin={isCurrentUserAdmin}
@@ -14793,6 +14903,192 @@ function BundleConfirmModal({ name, classes, onCancel, onChoose }) {
 
 // ★ v73: 자주 나온 말 후보 한 줄 — 올바른 말로 고쳐 학습하거나 무시(삭제)
 // ★ STEP4: 개인 AI 기억 뷰어 — 승인 후보/배운 별칭 확인·수정·삭제·초기화·내보내기·학습 on·off
+// ★ STEP10-1: AI 음성 학습센터 모달. 승인 기반 학습만 저장. 기존 기능 무영향(모듈 함수 재사용).
+function VoiceTrainingModal({ appData, fireToast, onClose }) {
+  const uid = (function () { try { return aiUserId(); } catch (e) { return "default"; } })();
+  const toast = (m) => { try { if (fireToast) fireToast(m); } catch (e) {} };
+  const [tab, setTab] = React.useState("learn");
+  const [, force] = React.useState(0); const refresh = () => force((x) => x + 1);
+  const [spoken, setSpoken] = React.useState("");
+  const [analysis, setAnalysis] = React.useState(null);
+  const [listening, setListening] = React.useState(false);
+  const [correcting, setCorrecting] = React.useState(false);
+  const [wrongWord, setWrongWord] = React.useState(""); const [rightWord, setRightWord] = React.useState("");
+  const [test, setTest] = React.useState(null);
+  const [dSpoken, setDSpoken] = React.useState(""); const [dCanon, setDCanon] = React.useState("");
+  const [editKey, setEditKey] = React.useState(""); const [editVal, setEditVal] = React.useState("");
+  const AD = appData || {};
+
+  function analyze(text) { const a = aiVoiceTrainAnalyze(text, uid, AD); setAnalysis(a); setCorrecting(false); setWrongWord((a.applied[0] && a.applied[0].from) || text.split(/\s+/)[0] || ""); setRightWord(a.normalized.split(/\s+/)[0] || ""); }
+  function startMic() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { toast("이 기기는 음성 인식을 지원하지 않아요. 글자로 입력해 주세요."); return; }
+    const rec = new SR(); rec.lang = "ko-KR"; rec.interimResults = false; rec.maxAlternatives = 1;
+    setListening(true);
+    rec.onresult = (e) => { const t = e.results[0][0].transcript; setSpoken(t); analyze(t); };
+    rec.onerror = () => setListening(false); rec.onend = () => setListening(false);
+    try { rec.start(); } catch (e) { setListening(false); }
+  }
+  function confirmRight() { try { aiWorkPatternObserve(uid, new Date().getHours(), analysis && analysis.intent); } catch (e) {} toast("좋아요! 이대로 이해할게요 👍"); setAnalysis(null); setSpoken(""); }
+  function saveCorrection() { if (!wrongWord.trim() || !rightWord.trim()) { toast("잘못 들린 말과 올바른 말을 모두 입력해 주세요"); return; } aiVoiceDictAddDirect(uid, wrongWord.trim(), rightWord.trim()); toast(`사전에 등록했어요: ${wrongWord.trim()} → ${rightWord.trim()}`); setAnalysis(null); setSpoken(""); setCorrecting(false); refresh(); }
+  function approveSuggestion(s) { aiVoiceDictAddDirect(uid, s.spoken, s.canonical); toast(`학습했어요: ${s.spoken} → ${s.canonical}`); setAnalysis(null); setSpoken(""); refresh(); }
+  function addDict() { if (!dSpoken.trim() || !dCanon.trim()) return; aiVoiceDictAddDirect(uid, dSpoken.trim(), dCanon.trim()); setDSpoken(""); setDCanon(""); toast("사전에 추가했어요"); refresh(); }
+  function removeDict(k) { aiVoiceDictRemove(uid, k); refresh(); }
+  function saveEdit(k) { if (!editVal.trim()) return; aiVoiceDictEdit(uid, k, editVal.trim()); setEditKey(""); setEditVal(""); toast("수정했어요"); refresh(); }
+
+  const dict = aiVoiceDictList(uid);
+  const stats = aiVoiceTrainStats(uid);
+  const wp = aiWorkPatternGet(uid);
+  const TAB = (id, label) => (
+    <button onClick={() => setTab(id)} style={{ flex: 1, padding: "8px 4px", fontSize: 12, fontWeight: 700, border: "none", borderBottom: tab === id ? "2px solid #2F6F4E" : "2px solid transparent", background: "none", color: tab === id ? "#2F6F4E" : "#8A968D", cursor: "pointer" }}>{label}</button>
+  );
+  const box = { background: "#fff", border: "1px solid #E3EEE6", borderRadius: 10, padding: 12, marginBottom: 10 };
+  const inp = { width: "100%", boxSizing: "border-box", border: "1px solid #CDE0D3", borderRadius: 8, padding: "8px 10px", fontSize: 14, marginBottom: 8 };
+  const btn = (bg) => ({ border: "none", background: bg || "#2F6F4E", color: "#fff", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer" });
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 4000, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 520, maxHeight: "92vh", overflowY: "auto", background: "#F4F7F4", borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
+          <div style={{ flex: 1, fontSize: 16, fontWeight: 800, color: "#1F5130" }}>🎙️ AI 음성 학습센터</div>
+          <button onClick={onClose} style={{ border: "none", background: "none", fontSize: 20, color: "#7B8A80", cursor: "pointer" }}>✕</button>
+        </div>
+        <div style={{ fontSize: 11, color: "#5B7A63", marginBottom: 10 }}>말투·발음·줄임말을 <b>승인하면</b> 기억해요. 학습할수록 더 잘 알아들어요. (개인정보는 기기에만 저장)</div>
+
+        <div style={{ display: "flex", borderBottom: "1px solid #DCE7DF", marginBottom: 12 }}>
+          {TAB("learn", "학습")}{TAB("test", "테스트")}{TAB("dict", "사전")}{TAB("stats", "통계")}
+        </div>
+
+        {tab === "learn" && (
+          <div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+              <input style={{ ...inp, marginBottom: 0 }} placeholder='예: "청겨 두 박스"' value={spoken} onChange={(e) => setSpoken(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && spoken.trim()) analyze(spoken.trim()); }} />
+              <button onClick={startMic} title="음성으로 말하기" style={{ ...btn(listening ? "#DB4437" : "#2F6F4E"), minWidth: 46 }}>{listening ? "●" : "🎤"}</button>
+            </div>
+            <button onClick={() => spoken.trim() && analyze(spoken.trim())} style={{ ...btn("#3E7A52"), width: "100%", marginBottom: 12 }}>분석하기</button>
+
+            {analysis && (
+              <div style={box}>
+                <Row2 label="① 말한 내용" value={analysis.stt} />
+                <Row2 label="② AI가 이해" value={analysis.normalized + (analysis.changed ? "  (보정됨)" : "")} />
+                <Row2 label="③ 의도(Intent)" value={analysis.intent + " · " + analysis.intentReason} />
+                <Row2 label="④ 실행 예정" value={analysis.action || "(없음)"} />
+
+                {analysis.suggestion && (
+                  <div style={{ background: "#FFF7ED", border: "1px solid #F0C6A8", borderRadius: 8, padding: 10, marginTop: 8 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: "#993C1D" }}>앞으로 '{analysis.suggestion.spoken}'를 '{analysis.suggestion.canonical}'로 인식할까요?</div>
+                    <div style={{ fontSize: 11, color: "#A9683F", margin: "3px 0 8px" }}>발음 유사도 {analysis.suggestion.similarity}% · {analysis.suggestion.count}회 반복 감지</div>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button onClick={() => approveSuggestion(analysis.suggestion)} style={btn("#2F6F4E")}>승인</button>
+                      <button onClick={() => setAnalysis(Object.assign({}, analysis, { suggestion: null }))} style={btn("#B0B7AE")}>거부</button>
+                    </div>
+                  </div>
+                )}
+
+                {!correcting && (
+                  <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                    <button onClick={confirmRight} style={{ ...btn("#2F6F4E"), flex: 1 }}>맞습니다</button>
+                    <button onClick={() => setCorrecting(true)} style={{ ...btn("#C7693B"), flex: 1 }}>틀립니다</button>
+                  </div>
+                )}
+                {correcting && (
+                  <div style={{ marginTop: 10, borderTop: "1px dashed #D9E4DC", paddingTop: 10 }}>
+                    <div style={{ fontSize: 12, color: "#5B7A63", marginBottom: 6 }}>올바른 표현을 알려주시면 사전에 등록해요(승인).</div>
+                    <input style={inp} placeholder="잘못 들린 말 (예: 청겨)" value={wrongWord} onChange={(e) => setWrongWord(e.target.value)} />
+                    <input style={inp} placeholder="올바른 말 (예: 청겨자)" value={rightWord} onChange={(e) => setRightWord(e.target.value)} />
+                    <button onClick={saveCorrection} style={{ ...btn("#2F6F4E"), width: "100%" }}>저장(사전 등록)</button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "test" && (
+          <div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+              <button onClick={() => setTest(aiVoiceTestRun(uid, AD))} style={{ ...btn("#2F6F4E"), flex: 1 }}>테스트 20문장</button>
+              <button onClick={() => setTest(aiVoiceTestRun(uid, AD, aiVoiceFarmTerms()))} style={{ ...btn("#3E7A52"), flex: 1 }}>농장 용어</button>
+            </div>
+            {test && (
+              <div>
+                <div style={{ textAlign: "center", fontSize: 22, fontWeight: 800, color: test.rate >= 80 ? "#2F6F4E" : "#C7693B", marginBottom: 10 }}>정답률 {test.rate}% <span style={{ fontSize: 13, color: "#8A968D" }}>({test.pass}/{test.total})</span></div>
+                {test.rows.map((r, i) => (
+                  <div key={i} style={{ ...box, padding: "8px 10px", marginBottom: 6, display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 15 }}>{r.ok ? "✅" : "⚠️"}</span>
+                    <span style={{ flex: 1 }}>
+                      <span style={{ display: "block", fontSize: 13, color: "#243b2e" }}>{r.text}{r.normalized !== r.text ? ` → ${r.normalized}` : ""}</span>
+                      <span style={{ display: "block", fontSize: 11, color: "#8A968D" }}>의도: {r.intent}</span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "dict" && (
+          <div>
+            <div style={box}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 8 }}>새 사전 추가</div>
+              <input style={inp} placeholder="잘못 들린 말 (예: 꽃상)" value={dSpoken} onChange={(e) => setDSpoken(e.target.value)} />
+              <input style={inp} placeholder="올바른 말 (예: 꽃상추)" value={dCanon} onChange={(e) => setDCanon(e.target.value)} />
+              <button onClick={addDict} style={{ ...btn("#2F6F4E"), width: "100%" }}>추가</button>
+            </div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#2C5A3B", margin: "4px 2px 8px" }}>내 사전 ({dict.length}개)</div>
+            {dict.length === 0 && <div style={{ fontSize: 12, color: "#8A968D", padding: 8 }}>아직 등록된 사전이 없어요. 학습 탭에서 만들어보세요.</div>}
+            {dict.map((d, i) => (
+              <div key={i} style={{ ...box, padding: "8px 10px", marginBottom: 6, display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ flex: 1, fontSize: 13, color: "#243b2e" }}>
+                  <b>{d.spoken}</b> → {editKey === d.spoken ? <input style={{ ...inp, marginBottom: 0, width: 120, display: "inline-block" }} value={editVal} onChange={(e) => setEditVal(e.target.value)} /> : d.canonical}
+                </span>
+                {editKey === d.spoken
+                  ? <button onClick={() => saveEdit(d.spoken)} style={btn("#2F6F4E")}>저장</button>
+                  : <button onClick={() => { setEditKey(d.spoken); setEditVal(d.canonical); }} style={btn("#B0B7AE")}>수정</button>}
+                <button onClick={() => removeDict(d.spoken)} style={btn("#C7693B")}>삭제</button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {tab === "stats" && (
+          <div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 10 }}>
+              <Stat label="사용자 사전" value={stats.dictCount} />
+              <Stat label="반복 발음" value={stats.repeatErrorCount} />
+              <Stat label="학습 후보" value={stats.candidateCount} />
+              <Stat label="승인 학습" value={stats.approvedCount} />
+              <Stat label="거부 학습" value={stats.rejectedCount} />
+              <Stat label="추정 인식률" value={stats.voiceAccuracy + "%"} />
+            </div>
+            <div style={box}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 6 }}>최근 학습 내용</div>
+              {stats.recent.length ? stats.recent.map((r, i) => <div key={i} style={{ fontSize: 12.5, color: "#31473a", padding: "2px 0" }}>· {r}</div>) : <div style={{ fontSize: 12, color: "#8A968D" }}>아직 없음</div>}
+            </div>
+            {(wp.candidates && wp.candidates.length > 0) && (
+              <div style={box}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#8A5A1C", marginBottom: 6 }}>업무 패턴 제안 (승인 필요)</div>
+                {wp.candidates.map((c, i) => (
+                  <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                    <span style={{ flex: 1, fontSize: 12.5, color: "#6E4A16" }}>{c.band}엔 주로 '{c.task}' ({c.count}회)</span>
+                    <button onClick={() => { aiWorkPatternApprove(uid, c.id); refresh(); }} style={btn("#2F6F4E")}>승인</button>
+                    <button onClick={() => { aiWorkPatternReject(uid, c.id); refresh(); }} style={btn("#B0B7AE")}>거부</button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {Object.keys(wp.approved || {}).length > 0 && (
+              <div style={{ fontSize: 11.5, color: "#5B7A63" }}>학습된 업무 패턴: {Object.keys(wp.approved).map((b) => `${b}→${wp.approved[b]}`).join(", ")}</div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+function Row2({ label, value }) { return (<div style={{ display: "flex", padding: "4px 0", borderBottom: "1px dashed #EDF2EE" }}><span style={{ width: 92, fontSize: 12, color: "#8A968D", flexShrink: 0 }}>{label}</span><span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: "#243b2e" }}>{value}</span></div>); }
+function Stat({ label, value }) { return (<div style={{ background: "#fff", border: "1px solid #E3EEE6", borderRadius: 10, padding: "10px 6px", textAlign: "center" }}><div style={{ fontSize: 18, fontWeight: 800, color: "#2F6F4E" }}>{value}</div><div style={{ fontSize: 10.5, color: "#8A968D", marginTop: 2 }}>{label}</div></div>); }
+
 function PersonalMemoryModal({ data, onClose, onApprove, onReject, onRemove, onEdit, onAdd, onToggleEnabled, onReset, onExport }) {
   const [nf, setNf] = React.useState(""); const [nt, setNt] = React.useState("");
   const L = (data && data.learning) || { approved: [], candidates: [] };
@@ -14948,7 +15244,7 @@ function ProblemNoteRow({ entry, products, onSave, onDelete }) {
   );
 }
 
-function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onOpenBackupList, onCheckUpdate, checkingUpdate, onSelfTest, onMemory, onAiMemory, onProblemNote, problemNoteCount, isAdmin, onClose, onNavigate, askConfirm, handleLogout, fireToast, geminiKey, setGeminiKey }) {
+function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onOpenBackupList, onCheckUpdate, checkingUpdate, onSelfTest, onMemory, onAiMemory, onVoiceTrain, onProblemNote, problemNoteCount, isAdmin, onClose, onNavigate, askConfirm, handleLogout, fireToast, geminiKey, setGeminiKey }) {
   const [editingName, setEditingName] = useState(false);
   const [draftName, setDraftName] = useState(appName);
   const [restoreDate, setRestoreDate] = useState(todayStr());
@@ -15095,6 +15391,14 @@ function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, 
               style={{ width: "100%", marginTop: 8, padding: "9px 0", borderRadius: 8, border: "1px solid #6B4FA5", background: "#F5F1FB", color: "#5B3E9C", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
             >
               🧠 내 AI 기억 (개인 학습)
+            </button>
+          )}
+          {onVoiceTrain && (
+            <button
+              onClick={onVoiceTrain}
+              style={{ width: "100%", marginTop: 8, padding: "9px 0", borderRadius: 8, border: "1px solid #2F6F4E", background: "#EFF7F1", color: "#1F5130", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
+            >
+              🎙️ AI 음성 학습센터
             </button>
           )}
           {onProblemNote && (

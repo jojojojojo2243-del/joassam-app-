@@ -1,12 +1,11 @@
 // 자동 업데이트 + 오프라인 지원 서비스워커 (STEP13)
-const VERSION = "v92-2026-07-16";   // ★ 배포마다 변경 — 새 버전 감지용
+const VERSION = "v93-2026-07-16";   // ★ 배포마다 변경 — 새 버전 감지용
 const SHELL = [
   "./",
   "./index.html",
   "./manifest.json",
   "./icon-192.png",
   "./icon-512.png",
-  "./icon-maskable-512.png",
 ];
 
 self.addEventListener("install", (e) => {
