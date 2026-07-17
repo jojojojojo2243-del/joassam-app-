@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 107;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
+const APP_VERSION = 105;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -1688,7 +1688,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // ===== JARVIS AI ASSISTANT =====
-const APP_BUILD = "v107 (07-17 STEP19 학습엔진·Farm AI·업무패턴·AI제안·AI Score)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const APP_BUILD = "v105 (07-17 멈춤방지 타임아웃·한도시 Mock답변·자동듣기 백오프)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
 const JARVIS_TAB_MAP = {
   goHome:'home', goOrders:'orders', goNew:'new',
   goCustomers:'customers', goProducts:'products',
@@ -2736,22 +2736,6 @@ const _MOCK_CASUAL_REPLIES = {
   "기분": "좋은 기분 저도 좋네요! 오늘도 힘내서 시작해봐요 😊",
   "아침": "좋은 아침이에요, 사장님! 오늘 할 일 정리해 드릴까요?",
   "날씨": "날씨는 제가 정확히 몰라요. 대신 오늘 출고·배송 챙겨드릴게요!",
-  // ★ STEP18: Fake AI 강화 — ChatGPT처럼 더 자연스럽고 폭넓게 응대
-  "하이": "안녕하세요, 사장님! 오늘 무엇을 도와드릴까요?",
-  "반가": "저도 반가워요, 사장님! 편하게 말씀해 주세요.",
-  "잘가": "네, 살펴 가세요! 필요할 때 다시 불러 주세요.",
-  "누구": "저는 조아저씨쌈 주문관리를 돕는 AI 비서 '조비서'예요. 주문·재고·배송·정산을 도와드려요.",
-  "뭐해": "사장님 부르시길 기다리고 있었어요! 주문이나 재고, 뭐든 말씀해 주세요.",
-  "이름": "저는 '조비서'라고 해요. 편하게 불러 주세요 😊",
-  "심심": "그럼 오늘 주문 현황이나 정기배송 예정 고객을 정리해 드릴까요?",
-  "배고": "든든히 챙겨 드세요, 사장님! 그동안 급한 주문은 제가 살펴둘게요.",
-  "화이팅": "네, 오늘도 화이팅이에요! 제가 옆에서 도울게요 💪",
-  "미안": "괜찮아요, 사장님. 전혀 신경 안 쓰셔도 돼요!",
-  "사랑": "감사해요 사장님! 저도 열심히 도와드릴게요 😊",
-  "좋아": "좋게 봐주셔서 감사해요! 더 잘 도와드릴게요.",
-  "괜찮": "네, 괜찮아요! 필요하면 언제든 말씀해 주세요.",
-  "몇시": "정확한 시간은 화면 시계를 확인해 주세요. 대신 오늘 일정은 제가 정리해 드릴 수 있어요.",
-  "고생": "사장님이 더 고생 많으세요. 제가 할 수 있는 일은 최대한 도울게요!",
 };
 function _mockCasualText(text) {
   const t = String(text || "").replace(/\s/g, "");
@@ -2792,244 +2776,6 @@ function createMockProvider() {
       return Promise.resolve({ provider: "mock", mode, text: replyText, toolCalls, plan, explain: aiExplainPlan(plan), usage: { cost: 0 } });
     },
   };
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   STEP 18 — Free AI Brain Platform
-   무료 API(Gemini)를 최대한 아끼면서도 테스트가 끊기지 않도록:
-   ① Smart Cache(질문/답변 1000) ② Voice Cache(발화 1000) ③ 두뇌 지표(오늘 호출·적중률)
-   ④ AI TEST MODE(Mock 최대 사용) ⑤ Provider 자가 테스트.
-   원칙: 기존 함수·Tool 변경 0. 기존 AI_CACHE/AI_PERF/aiUsage/aiResolveChain 재사용.
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-// ── ① Smart Cache: 동일 질문은 API 호출 없이 즉시 답(일반대화 포함). LRU 최대 1000, TTL 10분.
-const AI_SMART_CACHE = new Map();
-const AI_SMART_CACHE_MAX = 1000;
-const AI_SMART_TTL = 10 * 60 * 1000;
-function aiSmartKey(text, sig) { return String(text || "").replace(/\s/g, "").toLowerCase() + "|" + (sig || ""); }
-function aiSmartCacheGet(text, sig) {
-  const k = aiSmartKey(text, sig); const e = AI_SMART_CACHE.get(k);
-  if (!e) return null;
-  if (aiNow() - e.t > AI_SMART_TTL) { AI_SMART_CACHE.delete(k); return null; }
-  AI_SMART_CACHE.delete(k); AI_SMART_CACHE.set(k, e);   // LRU 갱신
-  return e.v;
-}
-function aiSmartCacheSet(text, sig, val) {
-  const k = aiSmartKey(text, sig);
-  if (AI_SMART_CACHE.has(k)) AI_SMART_CACHE.delete(k);
-  AI_SMART_CACHE.set(k, { t: aiNow(), v: val });
-  while (AI_SMART_CACHE.size > AI_SMART_CACHE_MAX) AI_SMART_CACHE.delete(AI_SMART_CACHE.keys().next().value);
-}
-function aiSmartCacheClear() { AI_SMART_CACHE.clear(); }
-
-// ── ② Voice Cache: 같은 발화는 STT/파싱 결과를 재사용(무료 STT라도 파싱 재계산 절약). LRU 최대 1000.
-const AI_VOICE_CACHE = new Map();
-const AI_VOICE_CACHE_MAX = 1000;
-function aiVoiceKey(utter) { return String(utter || "").replace(/\s/g, "").toLowerCase(); }
-function aiVoiceCacheGet(utter) {
-  const k = aiVoiceKey(utter); if (!k) return null;
-  const e = AI_VOICE_CACHE.get(k); if (!e) return null;
-  AI_VOICE_CACHE.delete(k); AI_VOICE_CACHE.set(k, e);   // LRU 갱신
-  return e;   // 저장한 값을 그대로 반환(래퍼 없음)
-}
-function aiVoiceCacheSet(utter, val) {
-  const k = aiVoiceKey(utter); if (!k) return;
-  if (AI_VOICE_CACHE.has(k)) AI_VOICE_CACHE.delete(k);
-  AI_VOICE_CACHE.set(k, val);
-  while (AI_VOICE_CACHE.size > AI_VOICE_CACHE_MAX) AI_VOICE_CACHE.delete(AI_VOICE_CACHE.keys().next().value);
-}
-function aiVoiceCacheClear() { AI_VOICE_CACHE.clear(); }
-
-// ── ③ 두뇌 지표: 오늘 호출 횟수·캐시적중·API호출·공급자별·최근 오류. (하루 단위 자동 리셋)
-const AI_BRAIN_METRICS = { day: "", calls: 0, cacheHits: 0, apiCalls: 0, errors: [], byProvider: {} };
-function aiBrainDayRoll() {
-  let d = ""; try { d = new Date().toISOString().slice(0, 10); } catch (e) { d = "day"; }
-  if (AI_BRAIN_METRICS.day !== d) { AI_BRAIN_METRICS.day = d; AI_BRAIN_METRICS.calls = 0; AI_BRAIN_METRICS.cacheHits = 0; AI_BRAIN_METRICS.apiCalls = 0; AI_BRAIN_METRICS.errors = []; AI_BRAIN_METRICS.byProvider = {}; }
-}
-function aiBrainRecordCall(providerId, cached) {
-  aiBrainDayRoll();
-  AI_BRAIN_METRICS.calls += 1;
-  if (cached) { AI_BRAIN_METRICS.cacheHits += 1; }
-  else { AI_BRAIN_METRICS.apiCalls += 1; const p = (AI_BRAIN_METRICS.byProvider[providerId] = AI_BRAIN_METRICS.byProvider[providerId] || 0); AI_BRAIN_METRICS.byProvider[providerId] = p + 1; }
-}
-function aiBrainRecordError(msg) {
-  aiBrainDayRoll();
-  AI_BRAIN_METRICS.errors.unshift({ t: aiNow(), msg: String(msg || "").slice(0, 120) });
-  if (AI_BRAIN_METRICS.errors.length > 20) AI_BRAIN_METRICS.errors.pop();
-}
-function aiBrainSnapshot() {
-  aiBrainDayRoll();
-  const tot = AI_BRAIN_METRICS.calls || 0;
-  const perf = (typeof aiPerfSnapshot === "function") ? aiPerfSnapshot() : { avgMs: 0 };
-  const chain = (typeof aiResolveChain === "function") ? aiResolveChain() : ["mock"];
-  const health = (typeof AI_LLM_REGISTRY !== "undefined") ? AI_LLM_REGISTRY.health() : [];
-  return {
-    testMode: aiTestModeGet(),
-    activeProvider: chain[0] || "mock",
-    chain: chain,
-    providers: health,
-    todayCalls: tot,
-    apiCalls: AI_BRAIN_METRICS.apiCalls,
-    cacheHits: AI_BRAIN_METRICS.cacheHits,
-    cacheHitRate: tot ? Math.round(AI_BRAIN_METRICS.cacheHits / tot * 100) : 0,
-    smartCacheSize: AI_SMART_CACHE.size,
-    voiceCacheSize: AI_VOICE_CACHE.size,
-    avgMs: perf.avgMs || 0,
-    byProvider: Object.assign({}, AI_BRAIN_METRICS.byProvider),
-    usage: (typeof aiUsageSnapshot === "function") ? aiUsageSnapshot() : [],
-    recentErrors: AI_BRAIN_METRICS.errors.slice(0, 8),
-  };
-}
-
-// ── ④ AI TEST MODE: ON이면 Mock을 최우선으로 써서 무료 한도(Gemini)를 아낌. 언제든 끌 수 있음.
-const AI_TEST_MODE_LS = "joassam_ai_test_mode_v1";
-function aiTestModeGet() { try { return (typeof localStorage !== "undefined") && localStorage.getItem(AI_TEST_MODE_LS) === "1"; } catch (e) { return false; } }
-function aiTestModeSet(on) { try { if (typeof localStorage !== "undefined") localStorage.setItem(AI_TEST_MODE_LS, on ? "1" : "0"); } catch (e) {} return !!on; }
-
-// ── ⑤ Provider 자가 테스트: Mock/Gemini/OpenAI/Claude 각각 짧은 호출로 상태 확인(키 없으면 '키 없음'으로 표기).
-function aiProviderSelfTest(providerId) {
-  const p = (typeof AI_LLM_REGISTRY !== "undefined") ? AI_LLM_REGISTRY.get(providerId) : null;
-  if (!p) return Promise.resolve({ provider: providerId, ok: false, detail: "미등록" });
-  if (!p.isMock && !(typeof p.hasKey === "function" && p.hasKey())) return Promise.resolve({ provider: providerId, ok: false, detail: "키 없음(설정에서 입력)" });
-  const t0 = aiNow();
-  const req = { messages: [{ role: "user", content: "안녕" }], mode: "casual", tools: [] };
-  return Promise.resolve().then(() => p.chat ? p.chat(req) : p.complete(req))
-    .then((r) => ({ provider: providerId, ok: true, ms: aiNow() - t0, text: (r && r.text ? String(r.text).slice(0, 40) : "") }))
-    .catch((e) => ({ provider: providerId, ok: false, detail: (e && e.message) || String(e) }));
-}
-function aiProviderSelfTestAll() {
-  return Promise.all(["mock", "gemini", "openai", "claude"].map((id) => aiProviderSelfTest(id)));
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   STEP 19 — AI Brain Evolution: 배우고·이해하고·스스로 발전하는 두뇌.
-   기존 학습 인프라(aiVoiceDict*, learnAlias, aiLearnQA, 문제로그, 기억계층)를 재사용하고
-   ① Farm AI 도메인 사전 ② 업무패턴 학습 ③ AI 제안 ④ 학습 통합 스냅샷 ⑤ AI Score(6종)를 추가.
-   원칙: 사용자 승인 없는 학습 금지 · 개인정보 외부 전송 금지 · 기존 기능 삭제 금지.
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-// ── ① Farm AI 도메인 사전(제품 기본 지식 — 사용자 데이터 학습 아님, 항상 인식). 요청 예시 포함.
-const FARM_AI_ALIASES = {
-  "청겨": "청겨자", "적겨": "적겨자", "꽃상": "꽃상추", "다청": "다청채",
-  "루꼴": "루꼴라", "버터": "버터헤드", "로메": "로메인", "치커": "치커리",
-  "비타민": "비타민채", "겨자채": "겨자채", "쌈채": "모듬쌈채소",
-};
-const FARM_AI_TERMS = ["EC", "pH", "양액", "수경재배", "병해", "출고", "포장", "택배", "루꼴라", "버터헤드", "청겨자", "적겨자", "꽃상추", "다청채", "모듬쌈채소", "정식", "육묘"];
-function farmAliasCanonical(word) { const w = String(word || "").replace(/\s/g, ""); return FARM_AI_ALIASES[w] || null; }
-function farmAliasList() { return Object.keys(FARM_AI_ALIASES).map((k) => ({ spoken: k, canonical: FARM_AI_ALIASES[k], builtin: true })); }
-
-// ── ② 업무 패턴 학습: 시간대별 실행한 작업을 기억(learning 계층). 개인 통계 — 외부 전송 없음.
-function aiWorkPatternRecord(userId, action) {
-  if (!action) return false;
-  const m = aiMemLoad(userId, "workpattern", { byHour: {}, byAction: {}, total: 0 }) || { byHour: {}, byAction: {}, total: 0 };
-  let hour = 0; try { hour = new Date().getHours(); } catch (e) { hour = 0; }
-  const hk = String(hour);
-  m.byHour[hk] = m.byHour[hk] || {};
-  m.byHour[hk][action] = (m.byHour[hk][action] || 0) + 1;
-  m.byAction[action] = (m.byAction[action] || 0) + 1;
-  m.total = (m.total || 0) + 1;
-  aiMemSave(userId, "workpattern", m); return true;
-}
-function aiWorkPatternGet(userId) { return aiMemLoad(userId, "workpattern", { byHour: {}, byAction: {}, total: 0 }) || { byHour: {}, byAction: {}, total: 0 }; }
-// 지금 시간대에 자주 하던 작업 상위 1개
-function aiWorkPatternNow(userId) {
-  const m = aiWorkPatternGet(userId); let hour = 0; try { hour = new Date().getHours(); } catch (e) {}
-  const cur = m.byHour[String(hour)] || {};
-  const top = Object.keys(cur).sort((a, b) => cur[b] - cur[a])[0];
-  return top ? { action: top, count: cur[top], hour: hour } : null;
-}
-
-// ── ③ AI 제안: 오래 주문 없는 고객 + 시간대 업무패턴. (제안일 뿐, 실행은 사용자 확인)
-function aiSuggestions(userId, appData, opts) {
-  const o = opts || {}; const out = [];
-  const orders = (appData && appData.orders) || [];
-  const customers = (appData && appData.customers) || [];
-  const staleDays = o.staleDays || 14;
-  let now = 0; try { now = Date.now(); } catch (e) { now = 0; }
-  // 최근 주문일 맵
-  const lastByName = {};
-  orders.forEach((od) => {
-    const nm = od.customerName || od.name; if (!nm) return;
-    const t = (od.createdAt ? Date.parse(od.createdAt) : (od.date ? Date.parse(od.date) : 0)) || 0;
-    if (!lastByName[nm] || t > lastByName[nm]) lastByName[nm] = t;
-  });
-  // 최근 주문이 있었으나 staleDays 이상 조용한 고객
-  Object.keys(lastByName).forEach((nm) => {
-    const t = lastByName[nm]; if (!t) return;
-    const days = Math.floor((now - t) / 86400000);
-    if (days >= staleDays && days < 3650) out.push({ type: "stale_customer", name: nm, days: days, text: `${nm} 고객이 ${days}일 동안 주문이 없어요. 연락해 볼까요?`, action: "goCustomers" });
-  });
-  out.sort((a, b) => (b.days || 0) - (a.days || 0));
-  const top = out.slice(0, o.limit || 5);
-  // 시간대 업무패턴 제안 1개
-  const wp = aiWorkPatternNow(userId);
-  if (wp && wp.count >= 3) top.unshift({ type: "work_pattern", text: `이 시간엔 보통 '${wp.action}'를 하셨어요. 지금 하시겠어요?`, action: wp.action });
-  return top;
-}
-
-// ── ④ 학습 엔진 통합 스냅샷: 무엇을 얼마나 배웠는지(승인된 것만).
-function aiLearningSnapshot(userId) {
-  const uid = userId || (typeof aiUserId === "function" ? aiUserId() : "default");
-  let voiceDict = 0, candidates = 0, terms = 0, aliases = 0, qa = 0, problems = 0, resolved = 0, work = 0;
-  try { const v = aiVoiceMemGet(uid); voiceDict = Object.keys(v.approved || {}).length; candidates = (v.candidates || []).length; terms = (v.terms || []).length; } catch (e) {}
-  try { aliases = Object.keys(getLearnedAliases() || {}).length; } catch (e) {}
-  try { qa = (typeof aiLearnQACount === "function") ? aiLearnQACount(uid) : 0; } catch (e) {}
-  try { const pl = (typeof getProblemLog === "function") ? getProblemLog() : []; problems = pl.length; resolved = pl.filter((p) => p.resolved).length; } catch (e) {}
-  try { work = aiWorkPatternGet(uid).total || 0; } catch (e) {}
-  return {
-    voiceDict, candidates, terms, aliases, learnedQA: qa,
-    problemLog: problems, problemResolved: resolved, workPatternCount: work,
-    farmTerms: FARM_AI_TERMS.length, farmAliases: Object.keys(FARM_AI_ALIASES).length,
-    pendingApprovals: candidates,   // 승인 대기(사용자 확인 필요)
-  };
-}
-
-// ── ⑤ AI Score: 내장 라벨 표본으로 실측(재현 가능). 6개 정확도 + 종합.
-const AI_SCORE_SAMPLES = {
-  voice: [ // 뭉갠 발음 → 기대 정규화 포함어
-    { say: "청겨 두박스", expect: "청겨자" }, { say: "적겨 하나", expect: "적겨자" },
-    { say: "꽃상 세개", expect: "꽃상추" }, { say: "다청 두봉", expect: "다청채" },
-    { say: "루꼴 500", expect: "루꼴라" }, { say: "버터 한판", expect: "버터헤드" },
-  ],
-  conv: [ // 발화 → 기대 의도
-    { say: "오늘 주문 보여줘", intent: "주문" }, { say: "김철수 고객 정보", intent: "고객조회" },
-    { say: "청겨자 재고 얼마나 남았어", intent: "재고" }, { say: "안녕", intent: "일반대화" },
-    { say: "고마워", intent: "일반대화" }, { say: "대솔수곡점 명세서", intent: "업체" },
-  ],
-};
-function aiScoreVoice(userId, appData) {
-  const s = AI_SCORE_SAMPLES.voice; let ok = 0;
-  s.forEach((c) => {
-    let out = "";
-    try { const r = aiVoiceNormalize(c.say, userId, appData); out = (r && r.text) || ""; } catch (e) { out = ""; }
-    const canon = farmAliasCanonical(c.say.split(/\s/)[0]);
-    if ((out && out.indexOf(c.expect) >= 0) || canon === c.expect) ok++;
-  });
-  return Math.round(ok / s.length * 100);
-}
-function aiScoreConversation(appData) {
-  const s = AI_SCORE_SAMPLES.conv; let ok = 0;
-  s.forEach((c) => { let it = ""; try { it = aiClassifyIntent(c.say, { turns: [] }, appData || {}).intent; } catch (e) {} if (it === c.intent) ok++; });
-  return Math.round(ok / s.length * 100);
-}
-function aiScoreSnapshot(userId, appData) {
-  const uid = userId || (typeof aiUserId === "function" ? aiUserId() : "default");
-  const ad = appData || {};
-  const voice = aiScoreVoice(uid, ad);
-  const conv = aiScoreConversation(ad);
-  // Memory: 학습 자산이 쌓일수록↑(0~100 완만). Tool/업무이해: 최근 오류율 반영. 추천: 표본 생성 성공.
-  const learn = aiLearningSnapshot(uid);
-  const memAssets = learn.voiceDict + learn.aliases + learn.learnedQA + learn.workPatternCount;
-  const memory = Math.min(100, 60 + Math.round(Math.min(memAssets, 40)));   // 60~100
-  const perf = (typeof aiPerfSnapshot === "function") ? aiPerfSnapshot(uid) : { errors: 0 };
-  const brain = (typeof aiBrainSnapshot === "function") ? aiBrainSnapshot() : { todayCalls: 0 };
-  const errRate = brain.todayCalls ? Math.min(1, (brain.recentErrors || []).length / brain.todayCalls) : 0;
-  const tool = Math.max(70, 100 - Math.round(errRate * 100));
-  const work = Math.min(100, 65 + Math.round(Math.min(learn.workPatternCount, 35)));
-  let suggestOk = 0; try { suggestOk = aiSuggestions(uid, ad, { staleDays: 0, limit: 3 }).length > 0 ? 100 : 80; } catch (e) { suggestOk = 80; }
-  const scores = { voice, conversation: conv, memory, tool, work, suggestion: suggestOk };
-  const overall = Math.round((voice + conv + memory + tool + work + suggestOk) / 6);
-  return { scores, overall, sampledAt: (function () { try { return new Date().toLocaleTimeString("ko-KR"); } catch (e) { return ""; } })() };
 }
 
 /* ── ②③④ 유료 Provider 스켈레톤 (키 있을 때만 호출 → 비용 0 유지) ──────────────
@@ -3278,17 +3024,6 @@ function aiProviderChat(text, ctx, appData, deps) {
     });
     aiLog("Response", { status: resp.status, text: (resp.text || "").slice(0, 40) });
     try { aiPerfRecordResponse(aiNow() - _t0); } catch (e) {}
-    // ★ STEP18: 두뇌 지표 기록 + 일반대화 답변 Smart Cache 저장(다음 동일 질문은 API 없이 즉답).
-    try {
-      if (typeof aiBrainRecordCall === "function") aiBrainRecordCall(resp.provider || "mock", !!resp.cached);
-      if (!resp.cached && resp.status === "done" && cls.intent === "일반대화" && resp.text && typeof aiSmartCacheSet === "function") {
-        aiSmartCacheSet(said, aiDataSig(appData), { status: "done", provider: resp.provider, mode: resp.mode, intent: cls.intent, text: resp.text });
-      }
-      // ★ STEP19: 업무 패턴 학습(시간대별 실행한 업무). 개인 통계 — 외부 전송 없음.
-      if (resp.status === "done" && typeof aiWorkPatternRecord === "function" && ["주문", "재고", "고객조회", "업체", "배송"].indexOf(cls.intent) >= 0) {
-        aiWorkPatternRecord((typeof D.userId === "function" ? D.userId() : "__anon__"), cls.intent);
-      }
-    } catch (e) {}
     return resp;
   };
 
@@ -3319,12 +3054,6 @@ function aiProviderChat(text, ctx, appData, deps) {
   if (AI_CACHEABLE_INTENTS[cls.intent]) {
     const hit = aiCacheGet(cacheKey);
     if (hit) { AI_PERF.cache.hits += 1; aiLog("Performance", { cache: "hit", intent: cls.intent }); return Promise.resolve(record(Object.assign({}, hit, { cached: true, log: aiLogGet(4) }))); }
-    AI_PERF.cache.misses += 1;
-  }
-  // ★ STEP18: Smart Cache — 일반대화도 동일 질문이면 API 호출 없이 즉시 답(무료 한도 절약).
-  if (cls.intent === "일반대화") {
-    const sHit = aiSmartCacheGet(said, sig);
-    if (sHit) { AI_PERF.cache.hits += 1; aiLog("Performance", { smartCache: "hit" }); return Promise.resolve(record(Object.assign({}, sHit, { cached: true, log: aiLogGet(4) }))); }
     AI_PERF.cache.misses += 1;
   }
   // ⑥③④ 최적화된 Prompt Builder(순서 고정·중복 제거·길이 상한) + 간결 도구 스키마(토큰 절약).
@@ -3368,7 +3097,7 @@ function aiProviderChat(text, ctx, appData, deps) {
         return done;
       });
     })
-    .catch((err) => { aiPerfError(); try { aiRecordError(aiRecoverableError(err) ? "network" : "provider", (err && err.message) || String(err)); } catch (e) {} try { if (typeof aiBrainRecordError === "function") aiBrainRecordError((err && err.message) || String(err)); } catch (e) {} aiLog("Error", { message: (err && err.message) || String(err) }); return { status: "error", provider: provider.id, intent: cls.intent, error: (err && err.message) || String(err), text: aiFriendlyError(err), log: aiLogGet(6) }; });
+    .catch((err) => { aiPerfError(); try { aiRecordError(aiRecoverableError(err) ? "network" : "provider", (err && err.message) || String(err)); } catch (e) {} aiLog("Error", { message: (err && err.message) || String(err) }); return { status: "error", provider: provider.id, intent: cls.intent, error: (err && err.message) || String(err), text: aiFriendlyError(err), log: aiLogGet(6) }; });
 }
 
 /* ── Conversation Engine 래퍼: 자체 ctx 유지하며 여러 턴 대화(문맥 보존). Provider만 호출. ── */
@@ -3732,8 +3461,6 @@ function aiVoiceNormalize(rawText, userId, appData) {
   t = t.split(/(\s+)/).map((tok) => {
     const w = aiVoiceNS(tok); if (!w) return tok;
     if (v.approved && v.approved[w]) { applied.push({ from: w, to: v.approved[w], by: "dict" }); return tok.replace(w, v.approved[w]); }
-    // ★ STEP19: Farm AI 도메인 사전(제품 기본 지식) — 사용자 사전에 없을 때만 보조 치환
-    if (typeof FARM_AI_ALIASES !== "undefined" && FARM_AI_ALIASES[w]) { applied.push({ from: w, to: FARM_AI_ALIASES[w], by: "farm" }); return tok.replace(w, FARM_AI_ALIASES[w]); }
     return tok;
   }).join("");
   // 2) 미완성 단어 복원(상품 핵심명 접두 유일 매칭)
@@ -3935,10 +3662,6 @@ function aiResolveChain() {
   const out = [];
   chain.forEach((id) => { const p = AI_LLM_REGISTRY.get(id); if (p && aiProviderUsable(p) && out.indexOf(id) < 0) out.push(id); });
   if (out.indexOf("mock") < 0) out.push("mock");
-  // ★ STEP18: AI TEST MODE ON → Mock을 최우선으로(무료 한도 아낌). Mock이 못 풀면 뒤의 실제 두뇌로 이어짐.
-  if (typeof aiTestModeGet === "function" && aiTestModeGet()) {
-    const mi = out.indexOf("mock"); if (mi > 0) { out.splice(mi, 1); out.unshift("mock"); }
-  }
   return out;
 }
 // ── 학습된 Q&A(무료 재사용): 진짜 LLM(Gemini/GPT)의 '조회형' 답변을 기억 → Mock이 같은 질문에 재사용.
@@ -6246,13 +5969,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     if (geminiKey) {
       try {
         const aiIn = { name: cur.name || '', items: (cur.items || []).map(i => ({ name: i.name, qty: i.qty })), reserveDate: cur.reserveDate || '', deliveryMessage: cur.deliveryMessage || '' };
-        // ★ STEP18: Voice Cache — 같은 발화+같은 작성중 상태면 Gemini 재호출 없이 재사용(무료 한도 절약)
-        const _vKey = text + '::' + JSON.stringify(aiIn);
-        let ai = (typeof aiVoiceCacheGet === 'function') ? aiVoiceCacheGet(_vKey) : null;
-        if (!ai) {
-          ai = await callGeminiOrderParse(text, aiIn, { vendors, customers, products }, geminiKey);
-          if (ai && typeof aiVoiceCacheSet === 'function') aiVoiceCacheSet(_vKey, ai);
-        }
+        const ai = await callGeminiOrderParse(text, aiIn, { vendors, customers, products }, geminiKey);
         if (ai && (ai.name || (ai.items && ai.items.length))) {
           draft = { name: ai.name, items: ai.items, reserveDate: ai.reserveDate, deliveryMessage: ai.deliveryMessage };
         }
@@ -11599,9 +11316,9 @@ function App() {
           />
         )}
 
-        {brainSettingsOpen && (() => { try { window.__joaAppData = { orders, customers, products, vendors }; } catch (e) {} return (
+        {brainSettingsOpen && (
           <AiBrainSettingsModal fireToast={fireToast} onClose={() => setBrainSettingsOpen(false)} />
-        ); })()}
+        )}
 
         {memoryList !== null && (
           <div style={{ position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 300000, padding: 20 }} onClick={() => setMemoryList(null)}>
@@ -15449,134 +15166,6 @@ function BundleConfirmModal({ name, classes, onCancel, onChoose }) {
 // ★ v73: 자주 나온 말 후보 한 줄 — 올바른 말로 고쳐 학습하거나 무시(삭제)
 // ★ STEP4: 개인 AI 기억 뷰어 — 승인 후보/배운 별칭 확인·수정·삭제·초기화·내보내기·학습 on·off
 // ★ STEP14-UI: AI 두뇌 설정(공급자·키·자동전환·비용). 기존 기능 무영향.
-// ★ STEP18: AI Dashboard — 현재 두뇌·상태·오늘 호출·캐시적중·평균속도·최근오류 + TEST MODE + Provider 테스트.
-function AiDashboardModal({ fireToast, onClose }) {
-  const toast = (m) => { try { if (fireToast) fireToast(m); } catch (e) {} };
-  const [snap, setSnap] = React.useState(() => { try { return aiBrainSnapshot(); } catch (e) { return null; } });
-  const [testMode, setTestMode] = React.useState(() => { try { return aiTestModeGet(); } catch (e) { return false; } });
-  const [tests, setTests] = React.useState(null);
-  const [testing, setTesting] = React.useState(false);
-  const refresh = () => { try { setSnap(aiBrainSnapshot()); } catch (e) {} };
-  React.useEffect(() => { const id = setInterval(refresh, 3000); return () => clearInterval(id); }, []);
-
-  const toggleTest = () => { const on = !testMode; setTestMode(on); try { aiTestModeSet(on); } catch (e) {} toast(on ? "AI TEST MODE 켜짐 — Mock 최대 사용(무료 한도 절약)" : "AI TEST MODE 꺼짐 — 실제 AI 우선"); refresh(); };
-  const runTests = () => { setTesting(true); Promise.resolve().then(() => aiProviderSelfTestAll()).then((r) => { setTests(r); setTesting(false); refresh(); }).catch(() => setTesting(false)); };
-  // ★ STEP19: AI Score / 학습 / 제안
-  const _ad = (typeof window !== "undefined" && window.__joaAppData) ? window.__joaAppData : {};
-  const [score, setScore] = React.useState(null);
-  const measure = () => { try { setScore(aiScoreSnapshot(undefined, _ad)); } catch (e) {} };
-  const learn = (function () { try { return aiLearningSnapshot(); } catch (e) { return {}; } })();
-  const suggestions = (function () { try { return aiSuggestions(undefined, _ad, { staleDays: 14, limit: 4 }); } catch (e) { return []; } })();
-
-  const nameOf = { mock: "Mock(무료)", gemini: "Gemini(무료)", openai: "OpenAI(유료)", claude: "Claude(유료)" };
-  const s = snap || {};
-  const box = { background: "#fff", border: "1px solid #E3EEE6", borderRadius: 10, padding: 12, marginBottom: 10 };
-  const stat = (label, val, sub) => (
-    <div style={{ flex: "1 1 30%", minWidth: 92, background: "#F4F7F4", border: "1px solid #E3EEE6", borderRadius: 10, padding: "10px 8px", textAlign: "center" }}>
-      <div style={{ fontSize: 18, fontWeight: 800, color: "#1F5130" }}>{val}</div>
-      <div style={{ fontSize: 11, color: "#5B7A63", marginTop: 2 }}>{label}</div>
-      {sub ? <div style={{ fontSize: 10, color: "#8A968D" }}>{sub}</div> : null}
-    </div>
-  );
-  return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 4100, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={onClose}>
-      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 520, maxHeight: "92vh", overflowY: "auto", background: "#F4F7F4", borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: 16 }}>
-        <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
-          <div style={{ flex: 1, fontSize: 16, fontWeight: 800, color: "#1F5130" }}>🧠 AI 두뇌 대시보드</div>
-          <button onClick={refresh} style={{ border: "1px solid #CDE0D3", background: "#fff", borderRadius: 8, padding: "4px 10px", fontSize: 12, marginRight: 6, cursor: "pointer" }}>새로고침</button>
-          <button onClick={onClose} style={{ border: "none", background: "none", fontSize: 20, color: "#7B8A80", cursor: "pointer" }}>✕</button>
-        </div>
-
-        <div style={box}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 6 }}>현재 두뇌</div>
-          <div style={{ fontSize: 13.5, color: "#31473a", marginBottom: 4 }}>활성: <b>{nameOf[s.activeProvider] || s.activeProvider || "-"}</b> · 자동 전환 순서: <b>{(s.chain || []).map((c) => nameOf[c] || c).join(" → ")}</b></div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {(s.providers || []).map((h, i) => (
-              <span key={i} style={{ fontSize: 11, fontWeight: 600, color: (h.hasKey || h.isMock) ? "#1F5130" : "#9A9A9A", background: (h.hasKey || h.isMock) ? "#EAF4EC" : "#F0F0F0", border: "1px solid #DCE7DF", borderRadius: 20, padding: "3px 9px" }}>
-                {nameOf[h.provider] || h.provider} {h.isMock ? "✓무료" : (h.hasKey ? "🔑연결" : "—키없음")}
-              </span>
-            ))}
-          </div>
-        </div>
-
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 }}>
-          {stat("오늘 호출", s.todayCalls || 0)}
-          {stat("API 호출", s.apiCalls || 0, "무료 소모")}
-          {stat("캐시 적중", (s.cacheHitRate || 0) + "%", (s.cacheHits || 0) + "회")}
-          {stat("평균 응답", (s.avgMs || 0) + "ms")}
-          {stat("Smart Cache", (s.smartCacheSize || 0) + "/1000")}
-          {stat("Voice Cache", (s.voiceCacheSize || 0) + "/1000")}
-        </div>
-
-        <div style={box}>
-          <label style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }}>
-            <input type="checkbox" checked={testMode} onChange={toggleTest} style={{ width: 18, height: 18 }} />
-            <span>
-              <span style={{ display: "block", fontSize: 13.5, fontWeight: 700, color: "#243b2e" }}>🧪 개발자 모드 (AI TEST MODE)</span>
-              <span style={{ display: "block", fontSize: 11.5, color: "#8A968D", marginTop: 1 }}>켜면 Mock AI를 최우선으로 써서 무료 한도(Gemini)를 아껴요. 테스트가 끊기지 않습니다.</span>
-            </span>
-          </label>
-        </div>
-
-        <div style={box}>
-          <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
-            <div style={{ flex: 1, fontSize: 12, fontWeight: 700, color: "#2C5A3B" }}>Provider 테스트</div>
-            <button onClick={runTests} disabled={testing} style={{ border: "none", background: testing ? "#9DB6A6" : "#2F6F4E", color: "#fff", borderRadius: 8, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: testing ? "default" : "pointer" }}>{testing ? "테스트 중…" : "4개 두뇌 테스트"}</button>
-          </div>
-          {(tests || []).map((t, i) => (
-            <div key={i} style={{ fontSize: 12, color: t.ok ? "#1F5130" : "#A9683F", marginBottom: 3 }}>
-              {t.ok ? "✅" : "⚠️"} {nameOf[t.provider] || t.provider} {t.ok ? `(${t.ms}ms) ${t.text || ""}` : `— ${t.detail || "실패"}`}
-            </div>
-          ))}
-          {!tests && <div style={{ fontSize: 11.5, color: "#8A968D" }}>버튼을 누르면 Mock·Gemini·OpenAI·Claude를 각각 호출해 상태를 확인해요(키 없는 두뇌는 '키 없음'으로 표시).</div>}
-        </div>
-
-        <div style={box}>
-          <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
-            <div style={{ flex: 1, fontSize: 12, fontWeight: 700, color: "#2C5A3B" }}>📊 AI Score {score ? <span style={{ color: "#1F5130" }}>· 종합 {score.overall}점</span> : ""}</div>
-            <button onClick={measure} style={{ border: "none", background: "#2F6F4E", color: "#fff", borderRadius: 8, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>점수 측정</button>
-          </div>
-          {score ? (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-              {[["Voice 정확도", score.scores.voice], ["대화 정확도", score.scores.conversation], ["기억 정확도", score.scores.memory], ["Tool 정확도", score.scores.tool], ["업무 이해도", score.scores.work], ["추천 정확도", score.scores.suggestion]].map((p, i) => (
-                <div key={i} style={{ flex: "1 1 30%", minWidth: 90, background: "#F4F7F4", border: "1px solid #E3EEE6", borderRadius: 8, padding: "8px 6px", textAlign: "center" }}>
-                  <div style={{ fontSize: 16, fontWeight: 800, color: p[1] >= 90 ? "#1F5130" : (p[1] >= 70 ? "#A9683F" : "#B4553F") }}>{p[1]}</div>
-                  <div style={{ fontSize: 10.5, color: "#5B7A63" }}>{p[0]}</div>
-                </div>
-              ))}
-            </div>
-          ) : <div style={{ fontSize: 11.5, color: "#8A968D" }}>버튼을 누르면 Voice·대화·기억·Tool·업무이해·추천 정확도를 내장 표본으로 실측해요.</div>}
-        </div>
-
-        <div style={box}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 6 }}>🎓 학습 현황 (승인된 것만)</div>
-          <div style={{ fontSize: 12, color: "#31473a", lineHeight: 1.7 }}>
-            사용자 사전 <b>{learn.voiceDict || 0}</b>개 · 학습 별칭 <b>{learn.aliases || 0}</b>개 · 업무용어 <b>{learn.terms || 0}</b>개<br />
-            재사용 답변 <b>{learn.learnedQA || 0}</b>개 · 업무패턴 <b>{learn.workPatternCount || 0}</b>회 · Farm 기본용어 <b>{learn.farmTerms || 0}</b>개
-            {learn.pendingApprovals ? <span style={{ color: "#A9683F", fontWeight: 700 }}> · 승인 대기 {learn.pendingApprovals}건</span> : null}
-          </div>
-        </div>
-
-        {(suggestions && suggestions.length) ? (
-          <div style={box}>
-            <div style={{ fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 6 }}>💡 AI 제안 (실행은 사장님 확인 후)</div>
-            {suggestions.map((sg, i) => (
-              <div key={i} style={{ fontSize: 12, color: "#31473a", marginBottom: 4, paddingLeft: 4 }}>• {sg.text}</div>
-            ))}
-          </div>
-        ) : null}
-
-        <div style={box}>
-          <div style={{ fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 6 }}>최근 오류 {(s.recentErrors || []).length ? "" : "(없음 ✓)"}</div>
-          {(s.recentErrors || []).map((e, i) => (
-            <div key={i} style={{ fontSize: 11, color: "#A9683F", marginBottom: 2 }}>• {e.msg}</div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function AiBrainSettingsModal({ fireToast, onClose }) {
   const toast = (m) => { try { if (fireToast) fireToast(m); } catch (e) {} };
   const LS = (typeof localStorage !== "undefined") ? localStorage : { getItem: () => null, setItem: () => {} };
@@ -15585,7 +15174,6 @@ function AiBrainSettingsModal({ fireToast, onClose }) {
   const initMode = (function () { const c = aiChainGet(); if (c && c[0] === "openai") return "paid"; if (c && c[0] === "gemini") return "free"; if (c && c.length === 1 && c[0] === "mock") return "mockonly"; return "free"; })();
   const [mode, setMode] = React.useState(initMode);
   const [, force] = React.useState(0); const refresh = () => force((x) => x + 1);
-  const [showDash, setShowDash] = React.useState(false);   // ★ STEP18: AI 대시보드
 
   function save() {
     // ★ v104: 여러 줄 키 지원 + 형식 점검 — AIza로 시작하지 않는 값은 걸러내고 안내
@@ -15654,9 +15242,7 @@ function AiBrainSettingsModal({ fireToast, onClose }) {
           </div>
         )}
 
-        <button onClick={save} style={{ width: "100%", border: "none", background: "#2F6F4E", color: "#fff", borderRadius: 10, padding: "12px 0", fontSize: 14, fontWeight: 800, cursor: "pointer", marginBottom: 8 }}>저장하기</button>
-        <button onClick={() => setShowDash(true)} style={{ width: "100%", border: "1px solid #2F6F4E", background: "#fff", color: "#1F5130", borderRadius: 10, padding: "10px 0", fontSize: 13.5, fontWeight: 700, cursor: "pointer", marginBottom: 12 }}>🧠 AI 두뇌 대시보드 열기 (상태·사용량·테스트)</button>
-        {showDash && <AiDashboardModal fireToast={fireToast} onClose={() => setShowDash(false)} />}
+        <button onClick={save} style={{ width: "100%", border: "none", background: "#2F6F4E", color: "#fff", borderRadius: 10, padding: "12px 0", fontSize: 14, fontWeight: 800, cursor: "pointer", marginBottom: 12 }}>저장하기</button>
 
         <div style={box}>
           <div style={{ fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 6 }}>현재 상태</div>
