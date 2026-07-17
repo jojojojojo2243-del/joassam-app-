@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 101;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
+const APP_VERSION = 102;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -1302,23 +1302,21 @@ function parseOrderMessage(text, products) {
 
 // ─── Gemini AI 주문 분석 (무료, 하루 1,500건) ───────────────────────────────
 // ★ 기본 Gemini 키 (여러 개 = 한도 초과 시 자동 전환). 서로 다른 구글 계정 키일 때 한도 배가됨
-const DEFAULT_GEMINI_KEYS = [
-  "AIzaSyDeHqJVlMkE1AypaO-Ntj7hlgRa1YoUHqM",
-  "AIzaSyDtuLf7ITrCaXXXRapultTfpRI6aZ97MMU",
-];
-const DEFAULT_GEMINI_KEY = DEFAULT_GEMINI_KEYS[0];  // 하위 호환용 (기본 키 1개)
+const DEFAULT_GEMINI_KEYS = [];   // ★ v102 보안: 하드코딩 기본 키 제거. 키는 ⚙️ AI 두뇌 설정에서 입력.
+const DEFAULT_GEMINI_KEY = "";  // 하위 호환용 (기본 키 없음)
 const GEMINI_AI_KEY = "jai_gemini_key";
 function loadGeminiKey() {
   try {
     const saved = localStorage.getItem(GEMINI_AI_KEY);
     if (saved && saved.trim() && saved !== "undefined") return saved.trim();
-    // 저장된 키가 없으면 기본 키 자동 저장 후 반환
-    localStorage.setItem(GEMINI_AI_KEY, DEFAULT_GEMINI_KEY);
-    return DEFAULT_GEMINI_KEY;
-  } catch { return DEFAULT_GEMINI_KEY; }
+    // v102: 새 통합 키(joassam_gemini_key_v1)도 확인 — 설정에서 저장한 키를 재사용
+    const unified = localStorage.getItem('joassam_gemini_key_v1');
+    if (unified && unified.trim() && unified !== "undefined") return unified.trim();
+    return "";   // 기본 키 없음 → 키 미설정 시 빈 문자열
+  } catch { return ""; }
 }
 function saveGeminiKey(k) {
-  try { localStorage.setItem(GEMINI_AI_KEY, (k && k.trim()) ? k.trim() : DEFAULT_GEMINI_KEY); } catch {}
+  try { const v = (k && k.trim()) ? k.trim() : ""; if (v) { localStorage.setItem(GEMINI_AI_KEY, v); localStorage.setItem('joassam_gemini_key_v1', v); } } catch {}
 }
 
 // ★ 여러 키 자동 전환 관리 ─────────────────────────────────────────
@@ -1666,7 +1664,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // ===== JARVIS AI ASSISTANT =====
-const APP_BUILD = "v101 (07-17 대화 실패원인 화면표시·Gemini키 자동인식)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const APP_BUILD = "v102 (07-17 한도초과 자동재시도·기본키제거·대화 안정화)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
 const JARVIS_TAB_MAP = {
   goHome:'home', goOrders:'orders', goNew:'new',
   goCustomers:'customers', goProducts:'products',
@@ -6144,8 +6142,27 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
           let r;
           try { r = await callGeminiJarvis(nh, getCtx(), _gkey); }
           catch (err) {
-            const em = 'AI 대화 연결에 실패했어요 (' + ((err && err.message) || '오류') + '). Gemini 키가 맞는지, 인터넷이 되는지 확인해 주세요.';
-            setLastAI(em); pushExchange(text, em); processingRef.current = false; speakThenListen(em); return;
+            const msg = (err && err.message) || '오류';
+            // ★ v102: 무료 사용량(분당 한도) 초과는 몇 초만 기다리면 자동 회복 → 짧은 쿨다운이면 자동 재시도 1회
+            if (msg.startsWith('QUOTA_EXCEEDED:')) {
+              const wait = Math.min(parseInt(msg.split(':')[1]) || 20, 25);
+              const waitMsg = '잠깐요, 무료 사용량이 몰려서 ' + wait + '초만 기다렸다 다시 답할게요…';
+              setLastAI(waitMsg); setPhaseSync('thinking');
+              await new Promise(res => setTimeout(res, (wait + 1) * 1000));
+              try { r = await callGeminiJarvis(nh, getCtx(), _gkey); }
+              catch (err2) {
+                const m2 = (err2 && err2.message || '').startsWith('QUOTA_EXCEEDED:')
+                  ? '지금 무료 사용량이 가득 찼어요. 1~2분 뒤 다시 말씀해 주시거나, ⚙️ AI 두뇌 설정에 다른 Gemini 키를 하나 더 넣어두면 번갈아 써서 안 끊겨요.'
+                  : 'AI 대화 연결에 실패했어요 (' + (err2 && err2.message || '오류') + '). 인터넷 연결을 확인해 주세요.';
+                setLastAI(m2); pushExchange(text, m2); processingRef.current = false; speakThenListen(m2); return;
+              }
+            } else {
+              const isKey = /API key|API_KEY|invalid|PERMISSION|401|403|400/i.test(msg);
+              const em = isKey
+                ? 'Gemini 키에 문제가 있어요. ⚙️ AI 두뇌 설정에서 키 전체를 복사해 다시 붙여넣고 "저장하기"를 눌러 주세요. (' + msg.slice(0, 60) + ')'
+                : 'AI 대화 연결에 실패했어요 (' + msg.slice(0, 80) + '). 인터넷 연결을 확인해 주세요.';
+              setLastAI(em); pushExchange(text, em); processingRef.current = false; speakThenListen(em); return;
+            }
           }
           const aiText = (r && r.text) || '네, 말씀하세요.';
           setLastAI(aiText); pushExchange(text, aiText);
