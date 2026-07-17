@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 99;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
+const APP_VERSION = 100;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -1666,7 +1666,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // ===== JARVIS AI ASSISTANT =====
-const APP_BUILD = "v99 (07-17 대량·뭉개진말투 테스트+버그6종수정)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const APP_BUILD = "v100 (07-17 조비서 대화창↔대화두뇌 연결+잡담·Gemini키 통합)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
 const JARVIS_TAB_MAP = {
   goHome:'home', goOrders:'orders', goNew:'new',
   goCustomers:'customers', goProducts:'products',
@@ -6130,6 +6130,30 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       return;
     }
 
+    // ★ v100: 일반 대화/잡담/모호한 말은 '명령'으로 처리하지 않고 대화 두뇌로 보냄(자연스러운 답).
+    //  Gemini 키는 옛 칸(geminiKey)이든 새 'AI 두뇌 설정' 칸이든 어디에 넣어도 읽는다.
+    try {
+      const _gkey = geminiKey || ((typeof localStorage !== 'undefined' && localStorage.getItem('joassam_gemini_key_v1')) || '');
+      let _intent = 'unknown';
+      try { _intent = aiClassifyIntent(text, { turns: [] }, { customers, vendors, products, orders }).intent; } catch (e) {}
+      const _isChat = (_intent === '일반대화' || _intent === 'help' || _intent === 'unknown');
+      if (_isChat && _gkey) {
+        setPhaseSync('thinking');
+        const nh = [...historyRef.current, { role: 'user', parts: [{ text }] }];
+        const r = await callGeminiJarvis(nh, getCtx(), _gkey);
+        const aiText = (r && r.text) || '네, 말씀하세요.';
+        setLastAI(aiText); pushExchange(text, aiText);
+        historyRef.current = [...nh, { role: 'model', parts: [{ text: aiText }] }].slice(-20); setHistory(historyRef.current);
+        const nav = (r && r.action && JARVIS_TAB_MAP[r.action]) ? r.action : (detectNavIntent(aiText) || null);
+        if (nav && JARVIS_TAB_MAP[nav]) setTimeout(() => { setTab(JARVIS_TAB_MAP[nav]); setMinimized(true); }, 400);
+        processingRef.current = false; speakThenListen(aiText); return;
+      }
+      if (_isChat && !_gkey && _intent === '일반대화' && typeof _mockCasualText === 'function') {
+        const m = _mockCasualText(text);
+        setLastAI(m); pushExchange(text, m); processingRef.current = false; speakThenListen(m); return;
+      }
+    } catch (e) { /* 실패 시 아래 기존 로직으로 진행 */ }
+
     // ★ 통합: 위의 조회·주문·이동으로 처리 안 된 명령을 로컬 규칙(앱 제어)으로 실행.
     //  조비서 orb로 말해도 명령 마이크와 똑같이 화면이동·검색·설정열기/닫기·주문폼이 실제로 동작한다.
     if (onAppCommand && onAppCommand(text)) {
@@ -6142,7 +6166,9 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
 
     setPhaseSync('thinking');
 
-    if (!geminiKey) {
+    // ★ v100: 옛 칸/새 'AI 두뇌 설정' 칸 어디에 넣어도 Gemini 키를 읽음
+    const _gk = geminiKey || ((typeof localStorage !== 'undefined' && localStorage.getItem('joassam_gemini_key_v1')) || '');
+    if (!_gk) {
       processingRef.current = false;  // ★ BUG1 Fix: 조기 return 전 잠금 해제
       const t = '못 알아들었어요. "주문목록 보여줘", "고객관리 열어줘", "OO 검색"처럼 말씀해 주세요.';
       try { addProblemLog(text, t, 'fail', snapshotTurns(text, t)); } catch (e) {}  // ★ v67/68: 못 알아들은 대화 전체 저장
@@ -6151,7 +6177,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
 
     const newHistory = [...historyRef.current, { role: 'user', parts: [{ text }] }];
     try {
-      const r = await callGeminiJarvis(newHistory, getCtx(), geminiKey);
+      const r = await callGeminiJarvis(newHistory, getCtx(), _gk);
       const aiText = r.text || '죄송해요, 다시 말씀해 주세요.';
       setLastAI(aiText);
       // ★ v67: 조비서가 제대로 답 못한(기본 사과문) 대화는 학습노트에 자동 저장
