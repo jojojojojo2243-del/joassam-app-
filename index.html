@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 104;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
+const APP_VERSION = 105;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -1359,7 +1359,9 @@ async function getGeminiModel(apiKey) {
   const preferred = ["gemini-2.0-flash", "gemini-flash-latest", "gemini-2.0-flash-001", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.5-pro", "gemini-1.5-pro"];
   const pick = (arr) => arr.find(n => !_geminiBlockedModels.has(n));
   try {
-    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+    // ★ v105: 8초 타임아웃 — 모델목록 조회가 멈춰서 "생각 중"에 영영 걸리는 것 방지
+    const _c = new AbortController(); const _t = setTimeout(() => _c.abort(), 8000);
+    let r; try { r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`, { signal: _c.signal }); } finally { clearTimeout(_t); }
     if (!r.ok) { const d = pick(["gemini-2.0-flash","gemini-flash-latest","gemini-1.5-flash"]) || "gemini-2.0-flash"; _geminiModelCache = d; _geminiModelCacheKey = apiKey; return d; }
     const data = await r.json();
     const names = (data.models || [])
@@ -1686,7 +1688,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // ===== JARVIS AI ASSISTANT =====
-const APP_BUILD = "v104 (07-17 Gemini 키 여러개 자동전환·형식점검)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const APP_BUILD = "v105 (07-17 멈춤방지 타임아웃·한도시 Mock답변·자동듣기 백오프)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
 const JARVIS_TAB_MAP = {
   goHome:'home', goOrders:'orders', goNew:'new',
   goCustomers:'customers', goProducts:'products',
@@ -5060,22 +5062,27 @@ null       : 이동 불필요한 일반 대화
   ];
 
   const _body = JSON.stringify({ contents, generationConfig:{ temperature:0.5, maxOutputTokens:2048 } });
-  let res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-    { method:'POST', headers:{'Content-Type':'application/json'}, body: _body }
-  );
+  // ★ v105: 15초 타임아웃 — 응답이 멈추면 "생각 중"에 영영 걸리지 않고 오류로 빠져 안내
+  const _fetchModel = async (mdl) => {
+    const c = new AbortController(); const t = setTimeout(() => c.abort(), 15000);
+    try {
+      return await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${mdl}:generateContent?key=${apiKey}`,
+        { method:'POST', headers:{'Content-Type':'application/json'}, body: _body, signal: c.signal }
+      );
+    } catch (err) {
+      if (err && err.name === 'AbortError') throw new Error('TIMEOUT: 응답이 너무 오래 걸려요');
+      throw err;
+    } finally { clearTimeout(t); }
+  };
+  let res = await _fetchModel(model);
   // ★ v103: 이 모델이 이 키에서 막혀있으면(신규 사용자 제한 등) 다른 모델로 자동 전환 후 재시도
   if (!res.ok) {
     const eProbe = await res.clone().json().catch(()=>({}));
     if (isGeminiModelUnavailable(eProbe.error?.message)) {
       blockGeminiModel(model);
       const alt = await getGeminiModel(apiKey);
-      if (alt && alt !== model) {
-        res = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${alt}:generateContent?key=${apiKey}`,
-          { method:'POST', headers:{'Content-Type':'application/json'}, body: _body }
-        );
-      }
+      if (alt && alt !== model) res = await _fetchModel(alt);
     }
   }
   if (!res.ok) {
@@ -5158,6 +5165,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   const audioStreamRef  = React.useRef(null);    // ★ v19: 소음억제 오디오 스트림
   const nsDisabledRef   = React.useRef(false);   // ★ v19: 충돌 시 소음억제 비활성
   const autoListenRef   = React.useRef(false);   // ★ v26: 자동 듣기 여부(동기) — 기본 끔
+  const geminiBackoffUntilRef = React.useRef(0); // ★ v105: 무료 한도 초과 시 자동 듣기 일시중지 시각(하머링 방지)
   const silenceCountRef = React.useRef(0);       // ★ v25: 연속 무음 횟수(시끄러운 곳 삐릭 방지)
   const accumBufRef     = React.useRef('');      // ★ v23: 발화 누적 버퍼(끝까지 듣기)
   const accumTimerRef   = React.useRef(null);    // ★ v23: 누적 종료(침묵) 타이머
@@ -5368,6 +5376,13 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   function beginListening() {
     if (!activeRef.current) return;
     if (phaseRef.current === 'thinking' || phaseRef.current === 'speaking') return;
+    // ★ v105: 무료 한도 초과 백오프 중이면 자동 듣기를 잠시 멈춰 요청 하머링을 끊음(한도 회복 유도)
+    const _bk = geminiBackoffUntilRef.current - Date.now();
+    if (_bk > 0) {
+      setPhaseSync('idle');
+      setTimeout(() => { if (activeRef.current && autoListenRef.current) beginListening(); }, Math.min(_bk, 60000) + 200);
+      return;
+    }
     clearInterval(countdownRef.current);
     setRetryCountdown(0);
     stopBargeIn();     // ★ v23: 정식 듣기 시작 전 끼어들기 감지기 정리(중복 마이크 방지)
@@ -6187,9 +6202,20 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
               await new Promise(res => setTimeout(res, (wait + 1) * 1000));
               try { r = await callGeminiJarvis(nh, getCtx(), _gkey); }
               catch (err2) {
-                const m2 = (err2 && err2.message || '').startsWith('QUOTA_EXCEEDED:')
-                  ? '지금 무료 사용량이 가득 찼어요. 1~2분 뒤 다시 말씀해 주시거나, ⚙️ AI 두뇌 설정에 다른 Gemini 키를 하나 더 넣어두면 번갈아 써서 안 끊겨요.'
-                  : 'AI 대화 연결에 실패했어요 (' + (err2 && err2.message || '오류') + '). 인터넷 연결을 확인해 주세요.';
+                const isQuota2 = (err2 && err2.message || '').startsWith('QUOTA_EXCEEDED:');
+                if (isQuota2) {
+                  // ★ v105: 무료 한도가 계속 막힘(자동대화가 요청을 계속 보내 회복 못 하는 경우 포함)
+                  //  ① 잡담은 Mock으로라도 답해 대화가 끊기지 않게 하고 ② 자동 듣기를 60초 멈춰(백오프) 한도 회복 유도
+                  geminiBackoffUntilRef.current = Date.now() + 60000;
+                  let m2;
+                  if (typeof _mockCasualText === 'function' && _intent === '일반대화') {
+                    m2 = _mockCasualText(text) + ' (무료 AI가 잠깐 쉬는 중이라 잠시 뒤 더 자연스럽게 답할게요. 자동대화를 끄면 사용량을 아껴서 더 잘 됩니다.)';
+                  } else {
+                    m2 = '지금 무료 사용량이 가득 찼어요. 자동대화를 잠깐 끄고 1~2분 뒤 다시 말씀해 주세요. ⚙️ AI 두뇌 설정에 다른 Gemini 키를 하나 더 넣어두면 번갈아 써서 안 끊겨요.';
+                  }
+                  setLastAI(m2); pushExchange(text, m2); processingRef.current = false; speakThenListen(m2); return;
+                }
+                const m2 = 'AI 대화 연결에 실패했어요 (' + (err2 && err2.message || '오류') + '). 인터넷 연결을 확인해 주세요.';
                 setLastAI(m2); pushExchange(text, m2); processingRef.current = false; speakThenListen(m2); return;
               }
             } else {
