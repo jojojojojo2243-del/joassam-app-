@@ -38,7 +38,7 @@ const IS_TEST = (typeof window !== "undefined") && /test/i.test(window.location.
 // 이 코드의 버전 번호. 중요한 안전장치를 고칠 때마다 1씩 올림.
 // 이 번호가 서버에 기록된 "최소 허용 버전"보다 낮으면, 오래된 기기로 판단해 저장을 스스로 금지함
 // (예전 아이콘이 남아있는 기기가 옛날 코드로 조용히 데이터를 지워버리는 사고를 막기 위함)
-const APP_VERSION = 93;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
+const APP_VERSION = 99;   // ★ 배포마다 +1. service-worker.js VERSION도 함께 변경.
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 
@@ -1666,7 +1666,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 // ===== JARVIS AI ASSISTANT =====
-const APP_BUILD = "v93 (07-16 STEP10-1 음성 학습센터)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
+const APP_BUILD = "v99 (07-17 대량·뭉개진말투 테스트+버그6종수정)";   // 배포 확인용 버전 표시 — 조비서 창 제목 옆에 보임
 const JARVIS_TAB_MAP = {
   goHome:'home', goOrders:'orders', goNew:'new',
   goCustomers:'customers', goProducts:'products',
@@ -1865,7 +1865,7 @@ function localParseVoiceCommand(rawText, ctx = {}) {
     const fz = fuzzyProductMatch(raw, products, 0.62);
     if (fz) prodHit = fz.name;
   }
-  const qtyMatch = raw.match(/(\d+|한|두|세|네|다섯)\s*(박스|봉지|봉|팩|세트|개|근|망|단|포|상자|묶음|kg|킬로그램|킬로|키로그램|키로|g|그램)/);
+  const qtyMatch = raw.match(/(\d+|한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\s*(박스|봉지|봉|팩|세트|개|근|망|단|포|상자|묶음|kg|킬로그램|킬로|키로그램|키로|g|그램)/);
   const hasOneWord = /(하나|한개|한 개|한개만|하나만)/.test(raw);   // "하나"=수량 1
 
   // 3) 신규 주문 폼 채우기 — 상품이 있거나 (수량/'하나' + 주문동사)
@@ -2302,7 +2302,33 @@ function aiPlan(text, ctx, appData) {
   const raw = String(text || "").trim(); const tNS = raw.replace(/\s/g, "");
   const customers = (appData && appData.customers) || [], vendors = (appData && appData.vendors) || [], products = (appData && appData.products) || [], orders = (appData && appData.orders) || [];
   const personNames = [...customers, ...vendors].map((x) => x && x.name).filter(Boolean);
-  const nameHit = (typeof matchName === "function") ? matchName(raw, personNames) : "";
+  let nameHit = (typeof matchName === "function") ? matchName(raw, personNames) : "";
+  // ★ 관대한 이름 인식: 이름 뒤에 말이 붙어 매칭 실패해도(예 "대솔 취소해뿌라") 앞 글자로 보완.
+  if (!nameHit) { nameHit = personNames.find((n) => { const ns = String(n).replace(/\s/g, ""); return ns && (tNS.indexOf(ns) >= 0 || (ns.length >= 2 && tNS.indexOf(ns.slice(0, 2)) >= 0)); }) || ""; }
+
+  // ★ 관리형 요청 안내(대화용 도구 없음) — 엉뚱한 주문 생성 방지. 화면으로 안내.
+  //   상품 이름 변경
+  if (/(상품명|이름|품목명).{0,5}(바꾸|바꿔|변경|수정|고쳐|고치)/.test(tNS) || /(을|를).{1,12}(으로|로).{0,3}(이름|명칭).{0,3}(바꾸|바꿔|변경|수정)/.test(tNS)) {
+    return { goal: "상품 이름 변경 안내", steps: [{ kind: "report", label: "상품 이름 변경은 '상품관리' 화면에서 할 수 있어요. (대화로는 아직 지원하지 않아요)" }] };
+  }
+  //   재고 수량 변경/수정 (조회는 통과, '변경/수정/N개로'만 안내)
+  if (/재고.{0,4}\d+개?로(변경|수정|바꾸|바꿔|맞춰)/.test(tNS) || /재고.{0,4}(변경|수정|고쳐|고치|올려|내려|늘려|줄여)/.test(tNS)) {
+    return { goal: "재고 수정 안내", steps: [{ kind: "report", label: "재고 수량 수정은 '상품관리' 화면에서 할 수 있어요. (대화로는 재고 조회만 지원해요)" }] };
+  }
+  //   주소 변경 안내 (조회는 통과, '변경/바꿔'만 안내)
+  if (/주소.{0,6}(바꾸|바꿔|바까|변경|수정|고쳐)/.test(tNS) || /주소.{0,10}(으로|로).{0,4}(바꾸|바꿔|바까|변경|수정)/.test(tNS)) {
+    return { goal: "주소 변경 안내", steps: [{ kind: "report", label: "주소 변경은 '고객관리/거래처관리' 화면에서 할 수 있어요. (대화로는 조회만 지원해요)" }] };
+  }
+  // ★ 취소/삭제(구어·사투리 포함): 이름 + 취소류 → 주문 삭제(반드시 확인). 이름 없으면 되물음.
+  if (/(취소|캔슬|무르|물러|빼버려|지워|삭제)/.test(tNS) && nameHit) {
+    return { goal: `${nameHit} 주문 취소`, warn: "취소(삭제)는 되돌리기 어려워요.",
+      steps: [{ kind: "write", tool: "order.delete", requiresConfirm: true, label: `${nameHit} 주문을 취소(삭제)할까요?`, command: { action: "DELETE_ORDER", name: nameHit, raw: raw } }] };
+  }
+  // ★ 기존 주문의 상품/수량 '변경'(…로 바꿔/변경) → 새 주문 생성이 아니라 주문 수정 화면(중복주문 방지).
+  if (nameHit && /(으로|개로|로)\s*(바꾸|바꿔|바까|변경|고쳐|고쳐줘|수정)/.test(raw)) {
+    return { goal: `${nameHit} 주문 수정`,
+      steps: [{ kind: "write", tool: "order.edit", requiresConfirm: true, label: `${nameHit} 주문을 열어 수정할까요? (내용 변경은 주문 화면에서)`, command: { action: "EDIT_ORDER", name: nameHit, raw: raw } }] };
+  }
 
   // (A) "지난번처럼 / 저번처럼" → 재주문 오케스트레이션
   if (/(지난번처럼|저번처럼|저번같이|늘하던|평소처럼|하던대로)/.test(tNS)) {
@@ -2364,7 +2390,8 @@ function aiPlan(text, ctx, appData) {
   }
   // (F) 그 외 → STEP3 단일 의도로 폴백(계획 없이 바로 도구 1개)
   const intent = (typeof aiResolveIntent === "function") ? aiResolveIntent(raw, ctx || createConvContext(), appData) : null;
-  if (intent && intent.command) return { goal: "요청 처리", single: true, intent, steps: [{ kind: intent.access === "read" ? "read" : "write", tool: intent.tool, requiresConfirm: intent.access !== "read", command: intent.command, label: (AI_TOOL_REGISTRY.get(intent.tool) || {}).title || "작업" }] };
+  // ★ 파서가 UNKNOWN을 내면 '처리했어요'라고 하지 않고 되물음(오해 소지 버그 수정).
+  if (intent && intent.command && intent.command.action && intent.command.action !== "UNKNOWN") return { goal: "요청 처리", single: true, intent, steps: [{ kind: intent.access === "read" ? "read" : "write", tool: intent.tool, requiresConfirm: intent.access !== "read", command: intent.command, label: (AI_TOOL_REGISTRY.get(intent.tool) || {}).title || "작업" }] };
   return { goal: "요청 이해 실패", needsInfo: { question: "무엇을 도와드릴까요? (예: \"김철수 지난번처럼\", \"청겨자 재고 확인\", \"오늘 할일\")" } };
 }
 
@@ -2566,7 +2593,7 @@ const AI_PLUGIN_REGISTRY = createPluginRegistry();
 
 // ── ⑦-F Natural Conversation: 일상 대화 vs 업무 모드 자동 판별(근거 포함).
 const _AI_BIZ_HINT = /(주문|재고|배송|명세서|정산|고객|거래처|출고|송장|상품|발주|입금|예약|묶음|취소|삭제|수정|등록|매출|판매)/;
-const _AI_CASUAL_HINT = /(안녕|고마워|고맙|수고|잘했|좋아|반가|하이|헬로|미안|사랑|화이팅|힘내|잘자|굿|ㅎㅎ|ㅋㅋ)/;
+const _AI_CASUAL_HINT = /(안녕|고마워|고맙|감사|수고|잘했|좋아|반가|하이|헬로|미안|사랑|화이팅|힘내|잘자|굿|ㅎㅎ|ㅋㅋ|덥|더워|춥|추워|피곤|힘드|힘든|아침|점심|저녁먹|기분|날씨|좋다|좋네|좋군|반갑)/;
 function aiConversationMode(text) {
   const t = String(text || "");
   const biz = _AI_BIZ_HINT.test(t), casual = _AI_CASUAL_HINT.test(t);
@@ -2677,8 +2704,16 @@ function llmToolCallToCommand(tool, args) {
 const _MOCK_CASUAL_REPLIES = {
   "안녕": "안녕하세요, 사장님! 조비서예요. 오늘도 좋은 하루 보내세요 😊 무엇을 도와드릴까요?",
   "고마워": "별말씀을요! 언제든 불러 주세요.",
+  "감사": "별말씀을요! 도움이 됐다니 기뻐요 😊",
   "수고": "감사합니다, 사장님도 고생 많으셨어요!",
   "잘했어": "칭찬 감사합니다! 더 잘 도와드릴게요.",
+  "덥": "많이 덥죠? 수분 자주 챙기시고 무리하지 마세요. 배송 상품은 아이스팩 잊지 마시고요!",
+  "더워": "많이 덥죠? 수분 자주 챙기시고 무리하지 마세요. 배송 상품은 아이스팩 잊지 마시고요!",
+  "춥": "쌀쌀하죠? 따뜻하게 하세요. 겨울 쌈채소는 보온 배송 신경 써야 해요.",
+  "피곤": "고생 많으세요. 잠깐 쉬어 가시는 것도 좋아요. 급한 일은 제가 챙겨드릴게요.",
+  "기분": "좋은 기분 저도 좋네요! 오늘도 힘내서 시작해봐요 😊",
+  "아침": "좋은 아침이에요, 사장님! 오늘 할 일 정리해 드릴까요?",
+  "날씨": "날씨는 제가 정확히 몰라요. 대신 오늘 출고·배송 챙겨드릴게요!",
 };
 function _mockCasualText(text) {
   const t = String(text || "").replace(/\s/g, "");
@@ -2887,12 +2922,19 @@ function aiClassifyIntent(text, ctx, appData) {
   if (/(설정|키설정|공급자|프로바이더|provider|모델변경|ai바꿔|ai변경)/i.test(t)) return { intent: "설정", confidence: 0.85, reason: "설정/공급자 변경" };
   if (/(사진|이미지|스캔|영수증|주문서찍|캡처|ocr)/i.test(t)) return { intent: "OCR", confidence: 0.8, reason: "이미지/OCR 표현" };
   if (/(재고|남았|모자|부족|떨어)/.test(t)) return { intent: "재고", confidence: 0.85, reason: "재고 표현" };
+  if (/(이름|상품명|품목명).{0,5}(바꾸|바꿔|변경|수정|고쳐|고치)/.test(t)) return { intent: "재고", confidence: 0.6, reason: "상품 이름 관리" };
   if (/(업체|거래처|납품|명세서|정산)/.test(t)) return { intent: "업체", confidence: 0.8, reason: "거래처/정산 표현" };
   if (/(주문|담아|등록|보내|지난번처럼|저번처럼|평소처럼|추가|빼줘|예약|출고|묶음)/.test(t)) return { intent: "주문", confidence: 0.8, reason: "주문/출고 표현" };
   // ★ STEP15 수정: '오늘 할일·우선순위'·'배송/일정'을 업무로 인식해 계획엔진으로 보냄(이전엔 unknown→fallback으로 막힘).
   if (/(할일|우선순위|뭐부터|뭐먼저|해야할|해야될|해야돼|오늘뭐)/.test(t)) return { intent: "주문", confidence: 0.7, reason: "오늘 업무/우선순위" };
   if (/(배송|출고|송장|일정)/.test(t)) return { intent: "주문", confidence: 0.65, reason: "배송/출고/일정" };
   const names = [...((appData && appData.customers) || []), ...((appData && appData.vendors) || [])].map((x) => x && x.name).filter(Boolean);
+  // ★ 관대한 이름 감지(앞 글자) + 취소/변경 명령 → 업무로 보냄(뭉개진 말투 대응).
+  //   명령어는 '공백 있는 원문'으로 검사(예: "배수 정보"의 "수 정"이 "수정"으로 오탐되는 것 방지).
+  const rawText = String(text || "");
+  const namePrefixHit = names.some((n) => { const ns = String(n).replace(/\s/g, ""); return ns.length >= 2 && t.indexOf(ns.slice(0, 2)) >= 0; });
+  if (namePrefixHit && /(취소|캔슬|무르|물러|지워|삭제)/.test(rawText)) return { intent: "주문", confidence: 0.72, reason: "취소/삭제 요청" };
+  if (namePrefixHit && /(바꾸|바꿔|바까|변경|수정|고쳐)/.test(rawText)) return { intent: "주문", confidence: 0.7, reason: "주문 변경 요청" };
   if (typeof matchName === "function" && matchName(String(text || ""), names)) return { intent: "고객조회", confidence: 0.75, reason: "등록된 이름 감지" };
   if (/(찾아|조회|누구|정보|연락처|주소|전화|번호|고객)/.test(t)) return { intent: "고객조회", confidence: 0.7, reason: "조회 표현" };
   // ★ STEP15 수정: 등록된 주소·전화번호가 포함되면 고객 조회로 인식.
@@ -2939,10 +2981,9 @@ function aiProviderChat(text, ctx, appData, deps) {
   const D = deps || {};
   ctx = ctx || createConvContext();
   appData = appData || {};
-  // ★ STEP12: 선택 공급자가 쓸 수 없으면(키 없음/비활성) 자동으로 Mock 사용 → 중단 없음.
-  const selected = (typeof aiUsableProvider === "function") ? AI_LLM_REGISTRY.active() : null;
-  const provider = (typeof aiUsableProvider === "function") ? aiUsableProvider() : AI_LLM_REGISTRY.active();
-  if (selected && provider && selected.id !== provider.id) aiLog("Provider", { autoFallback: selected.id + "→" + provider.id });
+  // ★ STEP12/14: Failover 체인의 첫 두뇌를 대표로. 실제 호출은 aiCallChain이 순서대로 자동 전환.
+  const _chainIds = (typeof aiResolveChain === "function") ? aiResolveChain() : ["mock"];
+  const provider = AI_LLM_REGISTRY.get(_chainIds[0]) || AI_LLM_REGISTRY.get("mock");
   const said = String(text || "");
   const _t0 = aiNow();   // ★ STEP11: 응답 시간 계측
   if (!provider) return Promise.resolve({ status: "error", error: "사용 가능한 AI 공급자가 없어요.", text: "" });
@@ -2968,7 +3009,22 @@ function aiProviderChat(text, ctx, appData, deps) {
   if (cls.intent === "help") return Promise.resolve(record({ status: "done", provider: provider.id, mode: "casual", intent: cls.intent, text: AI_HELP_TEXT, toolCalls: [], log: aiLogGet(5) }));
   if (cls.intent === "설정") return Promise.resolve(record({ status: "done", provider: provider.id, mode: "business", intent: cls.intent, text: `지금 AI 두뇌는 '${provider.name}'예요. 설정에서 다른 공급자(OpenAI·Claude·Gemini)로 바꿀 수 있어요.`, toolCalls: [], log: aiLogGet(5) }));
   // ⑧ 의도 미상 → 계획엔진의 추측도 신뢰하지 않고 즉시 되물음(추측 금지)
-  if (cls.intent === "unknown") { aiLog("Agent", { decision: "fallback" }); return Promise.resolve(record({ status: "fallback", provider: provider.id, mode: "casual", intent: cls.intent, text: AI_FALLBACK_TEXT, toolCalls: [], log: aiLogGet(6) })); }
+  if (cls.intent === "unknown") {
+    // ★ 분류 실패라도 결정적 파서(localParseVoiceCommand)가 실제 명령을 만들면 그걸로 처리(추측 아님).
+    //   맥락 명령("하나 더"·"되돌려" 등)이 unknown으로 막히던 버그 수정. 파서도 못 만들면 그때 되물음.
+    let it = null; try { it = aiResolveIntent(said, ctx, appData); } catch (e) {}
+    if (!it || !it.command || !it.command.action || it.command.action === "UNKNOWN") {
+      if (it && it.needsClarify) { aiLog("Agent", { decision: "need_info" }); return Promise.resolve(record({ status: "need_info", provider: provider.id, intent: cls.intent, text: it.question || AI_FALLBACK_TEXT, log: aiLogGet(6) })); }
+      aiLog("Agent", { decision: "fallback" }); return Promise.resolve(record({ status: "fallback", provider: provider.id, mode: "casual", intent: cls.intent, text: AI_FALLBACK_TEXT, toolCalls: [], log: aiLogGet(6) }));
+    }
+    const command = it.command; const acc = (typeof AI_TOOL_REGISTRY !== "undefined") ? AI_TOOL_REGISTRY.accessOf(it.tool) : "write";
+    aiLog("Tool", { picked: [it.tool], via: "parser" });
+    if (acc !== "read") {
+      aiLog("Agent", { decision: "need_confirm", tool: it.tool });
+      return Promise.resolve(record({ status: "need_confirm", provider: provider.id, intent: cls.intent, text: it.reply || "", confirm: ((typeof AI_TOOL_REGISTRY !== "undefined" && AI_TOOL_REGISTRY.get(it.tool)) || {}).title || "이 작업을 진행할까요?", tool: it.tool, command: command, log: aiLogGet(6) }));
+    }
+    return aiExecuteToolsParallel([{ tool: it.tool, args: command.payload || command, command: command }], D.execute).then((executed) => record({ status: "done", provider: provider.id, intent: cls.intent, text: it.reply || "처리했어요.", executed: executed, log: aiLogGet(6) }));
+  }
 
   // ★ STEP11: Response Cache — 읽기 질문은 동일 요청이면 재계산 없이 캐시 반환(TTL·데이터 시그니처).
   const sig = aiDataSig(appData);
@@ -2982,7 +3038,7 @@ function aiProviderChat(text, ctx, appData, deps) {
   const promptMessages = aiBuildPromptOptimized({ messages: aiBuildMessages(ctx, said), memorySummary: ctx.summary || "", businessContext: `주문 ${(appData.orders || []).length}건` });
   const request = { messages: promptMessages, tools: llmToolSchemasCompact(), appData: appData, ctx: ctx, mode: aiConversationMode(said).mode, intent: cls.intent };
   return Promise.resolve()
-    .then(() => aiCallWithRecovery(provider, request))   // ⑨ 오류 시 재시도→Mock 자동 폴백
+    .then(() => aiCallChain(request))   // ⑨ 체인 순서대로 시도 → 한도/오류 시 다음 두뇌로 자동 전환(끝은 Mock)
     .then((res) => {
       res = res || { toolCalls: [], text: "" };
       const calls = res.toolCalls || [];
@@ -3004,8 +3060,16 @@ function aiProviderChat(text, ctx, appData, deps) {
       // ⑥ 읽기 전용 도구만 → 중복 제거 후 병렬 실행(기존 Tool 호출).
       return aiExecuteToolsParallel(calls, D.execute).then((executed) => {
         if (executed.length) aiLog("Agent", { decision: "auto_executed", tools: executed });
-        const outText = res.text || (cls.intent === "일반대화" ? "" : "처리했어요.");
-        const done = record({ status: "done", provider: res.provider || provider.id, mode: res.mode, intent: cls.intent, text: outText, executed, plan: res.plan, explain: res.explain, recovered: !!res._recovered, log: aiLogGet(8) });
+        const uid = (typeof D.userId === "function" ? D.userId() : "__anon__");
+        const usedProvider = res.provider || res._usedProvider || provider.id;
+        let outText = res.text || (cls.intent === "일반대화" ? "" : "처리했어요.");
+        let learned = false;
+        // ★ 자동 학습(조회형만): 진짜 LLM 답변은 기억, Mock으로 떨어지면 기억한 답 재사용.
+        if (AI_CACHEABLE_INTENTS[cls.intent] && !executed.length && aiSettingsIsOn(uid, "learnFromLLM")) {
+          if (usedProvider !== "mock" && outText) { aiBackground(() => { try { aiLearnQASave(uid, said, sig, outText, usedProvider, cls.intent); } catch (e) {} }); }
+          else if (usedProvider === "mock") { const hit = aiLearnQAGet(uid, said, sig); if (hit && hit.text) { outText = hit.text; learned = true; aiLog("Memory", { learnedReplay: hit.provider }); } }
+        }
+        const done = record({ status: "done", provider: usedProvider, mode: res.mode, intent: cls.intent, text: outText, executed, plan: res.plan, explain: res.explain, recovered: !!res._recovered, learned: learned, log: aiLogGet(8) });
         // ⑤ 캐시 저장(읽기 질문만; 다음 동일 요청은 즉시 반환)
         if (AI_CACHEABLE_INTENTS[cls.intent]) aiCacheSet(cacheKey, { status: "done", provider: done.provider, mode: done.mode, intent: cls.intent, text: done.text, executed: [], plan: done.plan });
         return done;
@@ -3295,7 +3359,7 @@ function aiSettingsIsOn(userId, key) { const s = aiSettingsGet(userId); return s
 // 개인정보 전체 삭제: STEP4 기본 + STEP9 신규 계층까지. (다른 사용자 데이터는 영향 없음)
 function aiPrivacyDeleteAll(userId) {
   try { aiMemDeleteAll(userId); } catch (e) {}
-  ["longterm", "preference", "settings", "business", "voice"].forEach((k) => {
+  ["longterm", "preference", "settings", "business", "voice", "learnedqa", "workpattern"].forEach((k) => {
     try { if (typeof localStorage !== "undefined") localStorage.removeItem(aiMemKey(userId, k)); } catch (e) {}
     try { aiMemFirebaseMirror(userId, k, null); } catch (e) {}
   });
@@ -3563,6 +3627,60 @@ function aiUsableProvider() {
   return usable ? p : (mock || p);
 }
 
+/* ── Failover 체인: 여러 두뇌를 '순서대로' 시도 → 한도초과/오류면 다음으로 자동 전환. 항상 mock으로 끝(무료·무제한).
+   예) ["gemini","mock"] = Gemini 무료 우선, 막히면 Mock. ["openai","gemini","mock"] = 유료 우선. */
+const AI_CHAIN_LS = "joassam_ai_chain_v1";
+function aiChainGet() { try { const r = (typeof localStorage !== "undefined") ? localStorage.getItem(AI_CHAIN_LS) : null; if (r) return JSON.parse(r); } catch (e) {} return null; }
+function aiChainSet(arr) { try { if (typeof localStorage !== "undefined") localStorage.setItem(AI_CHAIN_LS, JSON.stringify(arr || [])); } catch (e) {} return arr; }
+function aiProviderUsable(p) { if (!p) return false; if (p.isMock) return true; return (typeof p.hasKey === "function" ? p.hasKey() : false) && (typeof p.isEnabled === "function" ? p.isEnabled() : true); }
+// 실제 시도 순서: 설정 체인 중 '사용 가능'한 것만, 중복 제거, 마지막은 항상 mock.
+function aiResolveChain() {
+  let chain = aiChainGet();
+  if (!chain || !chain.length) { const a = (typeof AI_LLM_REGISTRY !== "undefined") ? AI_LLM_REGISTRY.getActiveId() : "mock"; chain = [a]; }
+  const out = [];
+  chain.forEach((id) => { const p = AI_LLM_REGISTRY.get(id); if (p && aiProviderUsable(p) && out.indexOf(id) < 0) out.push(id); });
+  if (out.indexOf("mock") < 0) out.push("mock");
+  return out;
+}
+// ── 학습된 Q&A(무료 재사용): 진짜 LLM(Gemini/GPT)의 '조회형' 답변을 기억 → Mock이 같은 질문에 재사용.
+//   안전: ① 읽기 질문만 ② 데이터 시그니처 바뀌면 무효 ③ 위험한 작업은 저장 안 함.
+const AI_LEARNQA_MAX = 300;
+function aiLearnQAKey(text) { return String(text || "").replace(/\s/g, ""); }
+function aiLearnQAGet(userId, text, sig) {
+  const m = aiMemLoad(userId, "learnedqa", { items: {} }) || { items: {} };
+  const e = m.items[aiLearnQAKey(text)];
+  if (!e) return null;
+  if (sig && e.sig && e.sig !== sig) return null;   // 데이터가 바뀌면 재사용 안 함
+  return e;
+}
+function aiLearnQASave(userId, text, sig, answer, provider, intent) {
+  if (!text || !answer) return false;
+  const m = aiMemLoad(userId, "learnedqa", { items: {} }) || { items: {} };
+  const keys = Object.keys(m.items);
+  if (keys.length >= AI_LEARNQA_MAX && m.items[keys[0]]) delete m.items[keys[0]];
+  m.items[aiLearnQAKey(text)] = { text: answer, sig: sig || "", provider: provider || "", intent: intent || "" };
+  aiMemSave(userId, "learnedqa", m);
+  return true;
+}
+function aiLearnQACount(userId) { const m = aiMemLoad(userId, "learnedqa", { items: {} }) || { items: {} }; return Object.keys(m.items).length; }
+
+// 체인 실행: 각 두뇌를 순서대로. 복구 가능 오류(한도·네트워크·타임아웃)면 다음으로. Mock은 항상 성공.
+function aiCallChain(request) {
+  const ids = aiResolveChain();
+  const step = (k) => {
+    const p = AI_LLM_REGISTRY.get(ids[k]) || AI_LLM_REGISTRY.get("mock");
+    return aiWithTimeout(p.chat(request), 15000)
+      .then((r) => { r = r || {}; if (k > 0) r._recovered = true; r._usedProvider = p.id; return r; })
+      .catch((err) => {
+        aiLog("Provider", { id: p.id, error: (err && err.message) || String(err) });
+        try { if (!p.isMock) aiUsageError(p.id); } catch (e) {}
+        if (aiRecoverableError(err) && k < ids.length - 1) { AI_PERF.recoveries += 1; aiLog("Provider", { failover: p.id + "→" + ids[k + 1] }); return step(k + 1); }
+        throw err;
+      });
+  };
+  return step(0);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
    STEP 13 — PWA/Android 운영 준비: 오류수집(개인정보 제외) · 백업/복원 · 알림설정 ·
    오프라인 기능 · 배포 정보. 전부 추가 모듈, 기존 기능·AI 구조 변경 없음.
@@ -3602,7 +3720,7 @@ function aiSyncQueueAdd(item) { const q = aiSyncQueueGet(); q.push(item); if (q.
 function aiSyncQueueFlush(handler) { const q = aiSyncQueueGet(); let done = 0; if (typeof handler === "function") q.forEach((it) => { try { if (handler(it) !== false) done++; } catch (e) {} }); try { if (typeof localStorage !== "undefined") localStorage.removeItem(AI_SYNC_QUEUE_KEY); } catch (e) {} return done; }
 
 // ── ⑥ 백업/복원: 사용자 사전·Voice·Memory·환경설정을 한 번에. (개인정보는 사용자 자신 것만)
-const AI_BACKUP_KINDS = ["voice", "learning", "user", "session", "workflow", "preference", "longterm", "settings", "archive"];
+const AI_BACKUP_KINDS = ["voice", "learning", "user", "session", "workflow", "preference", "longterm", "settings", "archive", "learnedqa", "workpattern"];
 function aiBackupAll(userId) {
   const data = {}; AI_BACKUP_KINDS.forEach((k) => { const v = aiMemLoad(userId, k, null); if (v != null) data[k] = v; });
   return { app: "joassam-ai-os", version: (typeof APP_VERSION !== "undefined" ? APP_VERSION : 0), kinds: data };
@@ -3718,6 +3836,11 @@ const PRODUCT_ALIASES = {
   "카이피라": ["가피라", "카이빠라", "가이피라", "가이빠라", "카피라"],
   "루꼴라": ["루꼬라", "루콜라", "루꾸라", "루쿨라"],
   "로메인": ["로메인상추", "노메인"],
+  "깻잎": ["깨잎", "깨입", "깟잎", "깻입"],
+  "상추": ["상치", "상초", "쌍추"],
+  "청겨자": ["청거", "청겨", "청갸", "청거자"],
+  "적겨자": ["적거", "적겨", "적갸"],
+  "모듬쌈채소": ["모듬", "모듬쌈", "모둠", "모둠쌈"],
 };
 
 // ★ v41: 학습된 별칭(장기 기억) — 사용자가 "X를 Y로 기억해"라고 승인한 발음/줄임말을 localStorage에 저장.
@@ -4387,6 +4510,17 @@ function runSelfTests() {
   T("STEP10-1 업무패턴: 3회 관찰→후보, 승인해야 제안", () => { aiPrivacyDeleteAll(U); for (var i = 0; i < 3; i++) aiWorkPatternObserve(U, 9, "주문확인"); const w = aiWorkPatternGet(U); const cand = w.candidates.length > 0; const before = aiWorkPatternSuggest(U, 9); aiWorkPatternApprove(U, "오전:주문확인"); const after = aiWorkPatternSuggest(U, 9); return cand && before === null && after && after.task === "주문확인"; }, (g) => g === true);
   T("STEP10-1 학습 통계 구조", () => { aiPrivacyDeleteAll(U); aiVoiceDictAddDirect(U, "적겨", "적겨자"); const s = aiVoiceTrainStats(U); return s.dictCount === 1 && typeof s.voiceAccuracy === "number" && Array.isArray(s.recent); }, (g) => g === true);
   T("STEP10-1 시간대 밴드 분류", () => aiWorkBand(9) === "오전" && aiWorkBand(14) === "오후" && aiWorkBand(20) === "저녁", (g) => g === true);
+
+  // ★ STEP14-UI: Failover 체인(무료→무료 자동 전환)
+  T("체인: 설정 저장/조회", () => { aiChainSet(["gemini", "mock"]); const c = aiChainGet(); return Array.isArray(c) && c[0] === "gemini" && c[1] === "mock"; }, (g) => g === true);
+  T("체인 해석: 사용불가 두뇌는 건너뛰고 mock으로 끝", () => { aiChainSet(["gemini", "openai", "mock"]); const r = aiResolveChain(); return r[r.length - 1] === "mock" && r.indexOf("gemini") < 0 && r.indexOf("openai") < 0; /* 키 없으니 gemini/openai 제외 */ }, (g) => g === true);
+  T("체인: mock은 항상 마지막에 포함", () => { aiChainSet(["gemini"]); return aiResolveChain().indexOf("mock") >= 0; }, (g) => g === true);
+  T("사용가능 판정: mock=항상, 유료=키필요", () => aiProviderUsable(AI_LLM_REGISTRY.get("mock")) === true && aiProviderUsable(createGeminiProvider(() => "")) === false && aiProviderUsable(createGeminiProvider(() => "k")) === true, (g) => g === true);
+  // ★ 자동 학습(Gemini 답변 → Mock 재사용)
+  T("학습QA: 저장→같은 질문 재사용", () => { aiPrivacyDeleteAll(U); aiLearnQASave(U, "청겨자 재고", "1:1:1:0", "청겨자 재고는 5개예요", "gemini", "재고"); const e = aiLearnQAGet(U, "청겨자 재고", "1:1:1:0"); return e && e.text === "청겨자 재고는 5개예요" && e.provider === "gemini"; }, (g) => g === true);
+  T("학습QA: 데이터 바뀌면(시그니처 불일치) 재사용 안 함", () => { aiPrivacyDeleteAll(U); aiLearnQASave(U, "청겨자 재고", "1:1:1:0", "5개", "gemini", "재고"); return aiLearnQAGet(U, "청겨자 재고", "2:1:1:0") === null; }, (g) => g === true);
+  T("학습QA: 개수 집계 + 개인정보삭제로 제거", () => { aiPrivacyDeleteAll(U); aiLearnQASave(U, "a", "s", "1", "gemini", "재고"); aiLearnQASave(U, "b", "s", "2", "gemini", "재고"); const n = aiLearnQACount(U); aiPrivacyDeleteAll(U); return n === 2 && aiLearnQACount(U) === 0; }, (g) => g === true);
+  T("학습QA: 백업 대상 포함", () => AI_BACKUP_KINDS.indexOf("learnedqa") >= 0, (g) => g === true);
 
   const passed = cases.filter((c) => c.ok).length;
   return { passed, failed: cases.length - passed, total: cases.length, cases };
@@ -6275,7 +6409,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         {/* ★ MINI: 미니바 vs 확장 조건부 */}
         {minimized ? (
           <div style={{display:'flex',alignItems:'center',height:'100%',padding:'0 16px',gap:10,cursor:'pointer'}}
-               onClick={()=>setMinimized(false)}>
+               onClick={()=>{ setMinimized(false); autoListenRef.current = true; setAutoListen(true); if (!textMode && phaseRef.current === 'idle') setTimeout(() => { if (activeRef.current) beginListening(); }, 300); }}>
             {/* 미니 Orb */}
             <div style={{width:22,height:22,borderRadius:'50%',flexShrink:0,background:orbColor,
               boxShadow:`0 0 14px ${orbColor}`,animation:orbAnim}}/>
@@ -6431,12 +6565,12 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         {/* 다시 듣기 버튼 (idle 상태에서만) — v25: 누르면 무음카운터 초기화 후 한 번 듣기 */}
         {phase === 'idle' && !textMode && (
           <div style={{padding:'8px 16px',display:'flex',justifyContent:'center',alignItems:'center',gap:8,flexWrap:'wrap'}}>
-            <button onClick={()=>{ silenceCountRef.current = 0; beginListening(); }}
+            <button onClick={()=>{ silenceCountRef.current = 0; autoListenRef.current = true; setAutoListen(true); beginListening(); }}
               style={{
                 background:'rgba(76,175,80,0.3)',border:'1px solid rgba(76,175,80,0.5)',
                 borderRadius:20,color:'#a5d6a7',padding:'8px 24px',
                 cursor:'pointer',fontSize:14,
-              }}>🎤 {autoListen ? '다시 듣기' : '눌러서 말하기'}</button>
+              }}>🎤 {autoListen ? '연속 대화 중 — 말씀하세요' : '눌러서 대화 시작'}</button>
             {/* ★ v67: 방금 대화가 이상하면 학습노트에 저장 → 나중에 설정에서 글자로 정정·학습 */}
             {lastUser ? (
               <button onClick={()=>{ try { addProblemLog(lastUser, lastAI, 'manual', snapshotTurns(lastUser, lastAI)); setNoteSaved(true); setTimeout(()=>setNoteSaved(false), 2200); } catch(e){} }}
@@ -6792,6 +6926,7 @@ function App() {
   // ★ STEP4: 개인 AI 기억 뷰어(사용자별) — 확인/수정/삭제/초기화/내보내기/학습 on·off
   const [aiMemOpen, setAiMemOpen] = useState(false);
   const [voiceTrainOpen, setVoiceTrainOpen] = useState(false);
+  const [brainSettingsOpen, setBrainSettingsOpen] = useState(false);
   const [aiMemData, setAiMemData] = useState(null);
   function refreshAiMem() {
     try {
@@ -9147,6 +9282,8 @@ function App() {
       if (opt && opt.bold) cell.s = Object.assign({}, cell.s, { font: { bold: true } });
       ws[A(r, c)] = cell;
     };
+    // ★ 수식 부여: 다운로드 후 수량·단가를 고치면 금액·합계가 자동 재계산되도록. (캐시값 v는 유지)
+    const formulize = (r, c, f) => { const a = A(r, c); if (!ws[a]) ws[a] = { t: "n", v: 0 }; ws[a].f = f; ws[a].t = "n"; };
 
     // 테두리/정렬 스타일을 위해 모든 셀에 기본 스타일 적용
     const thin = { style: "thin", color: { rgb: "000000" } };
@@ -9235,6 +9372,7 @@ function App() {
         set(r, 14, it.qty); styleCell(r, 14, { sz: 9, num: true });
         set(r, 16, price); styleCell(r, 16, { sz: 9, num: true, align: "right" });
         set(r, 21, amount); styleCell(r, 21, { sz: 9, num: true, align: "right" });
+        formulize(r, 21, A(r, 14) + "*" + A(r, 16));   // 공급가액 = 수량×단가 (수식)
       } else if (overflow && i === maxRows - 1) {
         // 나머지 품목 롤업
         const rest = allItems.slice(shown);
@@ -9256,6 +9394,7 @@ function App() {
     set(SUM, 0, "합      계"); styleCell(SUM, 0, { bold: true, fill: "EAF1FB" });
     for (let c = 0; c <= 20; c++) styleCell(SUM, c, { bold: true, fill: "EAF1FB" });
     set(SUM, 21, total); styleCell(SUM, 21, { bold: true, num: true, align: "right", fill: "EAF1FB" });
+    formulize(SUM, 21, "SUM(" + A(HEAD + 1, 21) + ":" + A(HEAD + maxRows, 21) + ")");   // 합계 = 공급가액 열 SUM
     for (let c = 22; c <= 32; c++) styleCell(SUM, c, { fill: "EAF1FB" });
 
     // ===== 하단 합계 박스 (행 39) =====
@@ -9274,9 +9413,13 @@ function App() {
     set(FOOT, 14, "합계\n금액"); styleCell(FOOT, 14, { bold: true, sz: 9 });
     set(FOOT, 16, total); styleCell(FOOT, 16, { num: true, bold: true, align: "right" });
     set(FOOT, 26, "인수자"); styleCell(FOOT, 26, { bold: true, sz: 9 });
+    // ★ 하단 공급가액·합계금액도 합계셀(V39)을 참조 → 품목 수정 시 자동 반영
+    formulize(FOOT, 3, A(SUM, 21)); ws[A(FOOT, 3)].z = "#,##0";
+    formulize(FOOT, 16, A(SUM, 21)); ws[A(FOOT, 16)].z = "#,##0";
 
-    // 합계금액 상단 표시
-    set(8, 5, "₩" + total.toLocaleString()); styleCell(8, 5, { bold: true, color: "1F4E9C", sz: 11, align: "center" });
+    // 합계금액 상단 표시 (수식 참조 + 통화 서식)
+    set(8, 5, total); styleCell(8, 5, { bold: true, color: "1F4E9C", sz: 11, align: "center" });
+    formulize(8, 5, A(SUM, 21)); ws[A(8, 5)].z = '"₩"#,##0';
 
     // ===== 병합 (수정본과 동일 구조) =====
     const M = (r1, c1, r2, c2) => ({ s: { r: r1, c: c1 }, e: { r: r2, c: c2 } });
@@ -11059,6 +11202,10 @@ function App() {
           />
         )}
 
+        {brainSettingsOpen && (
+          <AiBrainSettingsModal fireToast={fireToast} onClose={() => setBrainSettingsOpen(false)} />
+        )}
+
         {memoryList !== null && (
           <div style={{ position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 300000, padding: 20 }} onClick={() => setMemoryList(null)}>
             <div onClick={(e) => e.stopPropagation()} style={{ background: "#fff", borderRadius: 16, padding: "20px 18px", maxWidth: 380, width: "100%", maxHeight: "80vh", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" }}>
@@ -11386,6 +11533,7 @@ function App() {
             onMemory={openMemoryManager}
             onAiMemory={openAiMemory}
             onVoiceTrain={() => { setVoiceTrainOpen(true); setSideMenuOpen(false); }}
+            onBrainSettings={() => { setBrainSettingsOpen(true); setSideMenuOpen(false); }}
             onProblemNote={openProblemNote}
             problemNoteCount={noteUnresolved}
             isAdmin={isCurrentUserAdmin}
@@ -14903,6 +15051,97 @@ function BundleConfirmModal({ name, classes, onCancel, onChoose }) {
 
 // ★ v73: 자주 나온 말 후보 한 줄 — 올바른 말로 고쳐 학습하거나 무시(삭제)
 // ★ STEP4: 개인 AI 기억 뷰어 — 승인 후보/배운 별칭 확인·수정·삭제·초기화·내보내기·학습 on·off
+// ★ STEP14-UI: AI 두뇌 설정(공급자·키·자동전환·비용). 기존 기능 무영향.
+function AiBrainSettingsModal({ fireToast, onClose }) {
+  const toast = (m) => { try { if (fireToast) fireToast(m); } catch (e) {} };
+  const LS = (typeof localStorage !== "undefined") ? localStorage : { getItem: () => null, setItem: () => {} };
+  const [gKey, setGKey] = React.useState(LS.getItem("joassam_gemini_key_v1") || "");
+  const [oKey, setOKey] = React.useState(LS.getItem("joassam_openai_key_v1") || "");
+  const initMode = (function () { const c = aiChainGet(); if (c && c[0] === "openai") return "paid"; if (c && c[0] === "gemini") return "free"; if (c && c.length === 1 && c[0] === "mock") return "mockonly"; return "free"; })();
+  const [mode, setMode] = React.useState(initMode);
+  const [, force] = React.useState(0); const refresh = () => force((x) => x + 1);
+
+  function save() {
+    LS.setItem("joassam_gemini_key_v1", gKey.trim());
+    LS.setItem("joassam_openai_key_v1", oKey.trim());
+    let chain, active;
+    if (mode === "free") { chain = ["gemini", "mock"]; active = "gemini"; LS.setItem("joassam_openai_enabled_v1", "0"); }
+    else if (mode === "paid") { chain = ["openai", "gemini", "mock"]; active = "openai"; LS.setItem("joassam_openai_enabled_v1", oKey.trim() ? "1" : "0"); }
+    else { chain = ["mock"]; active = "mock"; LS.setItem("joassam_openai_enabled_v1", "0"); }
+    aiChainSet(chain);
+    try { AI_LLM_REGISTRY.setActive(active); } catch (e) {}
+    toast("AI 두뇌 설정을 저장했어요");
+    refresh();
+  }
+
+  const health = (function () { try { return AI_LLM_REGISTRY.health(); } catch (e) { return []; } })();
+  const usage = (function () { try { return aiUsageSnapshot("openai"); } catch (e) { return null; } })();
+  const chainNow = (function () { try { return aiResolveChain(); } catch (e) { return ["mock"]; } })();
+  const nameOf = { mock: "Mock(무료)", gemini: "Gemini(무료)", openai: "OpenAI(유료)", claude: "Claude(유료)" };
+  const inp = { width: "100%", boxSizing: "border-box", border: "1px solid #CDE0D3", borderRadius: 8, padding: "9px 10px", fontSize: 13, marginBottom: 8 };
+  const box = { background: "#fff", border: "1px solid #E3EEE6", borderRadius: 10, padding: 12, marginBottom: 10 };
+  const Radio = (val, title, desc) => (
+    <label style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: "8px 4px", cursor: "pointer" }}>
+      <input type="radio" name="brainmode" checked={mode === val} onChange={() => setMode(val)} style={{ marginTop: 3 }} />
+      <span><span style={{ display: "block", fontSize: 13.5, fontWeight: 700, color: "#243b2e" }}>{title}</span><span style={{ display: "block", fontSize: 11.5, color: "#8A968D", marginTop: 1 }}>{desc}</span></span>
+    </label>
+  );
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 4000, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: 520, maxHeight: "92vh", overflowY: "auto", background: "#F4F7F4", borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
+          <div style={{ flex: 1, fontSize: 16, fontWeight: 800, color: "#1F5130" }}>⚙️ AI 두뇌 설정</div>
+          <button onClick={onClose} style={{ border: "none", background: "none", fontSize: 20, color: "#7B8A80", cursor: "pointer" }}>✕</button>
+        </div>
+        <div style={{ fontSize: 11.5, color: "#5B7A63", marginBottom: 12 }}>무료로 테스트하다가, 한도가 넘으면 자동으로 다른 두뇌로 넘어가요. 키는 이 기기에만 저장됩니다.</div>
+
+        <div style={box}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 8 }}>사용 방식</div>
+          {Radio("free", "무료 테스트 (추천)", "Gemini 무료 → 한도 넘으면 Mock(무료·무제한)로 자동 전환. 돈 안 듦.")}
+          {Radio("paid", "유료 우선 (ChatGPT)", "OpenAI → 실패 시 Gemini → Mock. 가장 자연스러움. 소액 비용 발생.")}
+          {Radio("mockonly", "Mock만 (완전 무료)", "인터넷 없어도 되는 기본 두뇌. 업무 명령엔 강함, 잡담은 제한적.")}
+        </div>
+
+        {(mode === "free" || mode === "paid") && (
+          <div style={box}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 8 }}>Gemini 키 (무료 · aistudio.google.com에서 발급)</div>
+            <input style={inp} type="password" placeholder="AIza... 붙여넣기" value={gKey} onChange={(e) => setGKey(e.target.value)} />
+          </div>
+        )}
+        {mode === "paid" && (
+          <div style={box}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 8 }}>OpenAI 키 (유료 · platform.openai.com에서 발급)</div>
+            <input style={inp} type="password" placeholder="sk-... 붙여넣기" value={oKey} onChange={(e) => setOKey(e.target.value)} />
+            <div style={{ fontSize: 11, color: "#A9683F" }}>※ 브라우저에서 직접 호출은 막힐 수 있어요. 그 경우 자동으로 Gemini/Mock으로 넘어갑니다.</div>
+          </div>
+        )}
+
+        <button onClick={save} style={{ width: "100%", border: "none", background: "#2F6F4E", color: "#fff", borderRadius: 10, padding: "12px 0", fontSize: 14, fontWeight: 800, cursor: "pointer", marginBottom: 12 }}>저장하기</button>
+
+        <div style={box}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 6 }}>현재 상태</div>
+          <div style={{ fontSize: 12.5, color: "#31473a", marginBottom: 4 }}>자동 전환 순서: <b>{chainNow.map((c) => nameOf[c] || c).join(" → ")}</b></div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 6 }}>
+            {health.map((h, i) => (
+              <span key={i} style={{ fontSize: 11, fontWeight: 600, color: (h.hasKey || h.isMock) ? "#1F5130" : "#9A9A9A", background: (h.hasKey || h.isMock) ? "#EAF4EC" : "#F0F0F0", border: "1px solid #DCE7DF", borderRadius: 20, padding: "3px 9px" }}>
+                {nameOf[h.provider] || h.provider} {h.isMock ? "✓" : (h.hasKey ? "🔑" : "—")}
+              </span>
+            ))}
+          </div>
+          {usage && usage.requests > 0 && (
+            <div style={{ fontSize: 11.5, color: "#5B7A63", marginBottom: 4 }}>OpenAI 사용: {usage.requests}회 · 토큰 {usage.totalTokens} · 예상 ${usage.estCostUSD}</div>
+          )}
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#31473a", marginTop: 4, cursor: "pointer" }}>
+            <input type="checkbox" defaultChecked={(function () { try { return aiSettingsIsOn(aiUserId(), "learnFromLLM"); } catch (e) { return true; } })()} onChange={(e) => { try { aiSettingsSet(aiUserId(), "learnFromLLM", e.target.checked); } catch (x) {} }} />
+            Gemini/GPT의 조회형 답변을 자동으로 기억해 무료로 재사용 <span style={{ color: "#8A968D" }}>(현재 {(function () { try { return aiLearnQACount(aiUserId()); } catch (e) { return 0; } })()}개 학습됨)</span>
+          </label>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ★ STEP10-1: AI 음성 학습센터 모달. 승인 기반 학습만 저장. 기존 기능 무영향(모듈 함수 재사용).
 function VoiceTrainingModal({ appData, fireToast, onClose }) {
   const uid = (function () { try { return aiUserId(); } catch (e) { return "default"; } })();
@@ -15244,7 +15483,7 @@ function ProblemNoteRow({ entry, products, onSave, onDelete }) {
   );
 }
 
-function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onOpenBackupList, onCheckUpdate, checkingUpdate, onSelfTest, onMemory, onAiMemory, onVoiceTrain, onProblemNote, problemNoteCount, isAdmin, onClose, onNavigate, askConfirm, handleLogout, fireToast, geminiKey, setGeminiKey }) {
+function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onOpenBackupList, onCheckUpdate, checkingUpdate, onSelfTest, onMemory, onAiMemory, onVoiceTrain, onBrainSettings, onProblemNote, problemNoteCount, isAdmin, onClose, onNavigate, askConfirm, handleLogout, fireToast, geminiKey, setGeminiKey }) {
   const [editingName, setEditingName] = useState(false);
   const [draftName, setDraftName] = useState(appName);
   const [restoreDate, setRestoreDate] = useState(todayStr());
@@ -15399,6 +15638,14 @@ function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, 
               style={{ width: "100%", marginTop: 8, padding: "9px 0", borderRadius: 8, border: "1px solid #2F6F4E", background: "#EFF7F1", color: "#1F5130", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
             >
               🎙️ AI 음성 학습센터
+            </button>
+          )}
+          {onBrainSettings && (
+            <button
+              onClick={onBrainSettings}
+              style={{ width: "100%", marginTop: 8, padding: "9px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#EAF2FB", color: "#185FA5", fontWeight: 700, fontSize: 12, cursor: "pointer" }}
+            >
+              ⚙️ AI 두뇌 설정 (무료/유료 전환)
             </button>
           )}
           {onProblemNote && (
