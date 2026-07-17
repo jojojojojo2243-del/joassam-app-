@@ -33,7 +33,7 @@
 /* v108: 사전 컴파일됨 (esbuild). 브라우저 Babel 불필요. */
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 108;
+const APP_VERSION = 109;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 const STATUS = {
@@ -1727,7 +1727,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "✅ 주문서에 적용" : `⏳ ${pendingCount}개 확인 필요`
   ))));
 }
-const APP_BUILD = "v108 (07-18 사전컴파일 전환·흰화면 수정, STEP18/19 유지)";
+const APP_BUILD = "v109 (07-18 Gemini 키 형식 AQ. 허용·키인식 수정)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -15431,10 +15431,11 @@ function AiBrainSettingsModal({ fireToast, onClose }) {
   const [showDash, setShowDash] = React.useState(false);
   function save() {
     const rawKeys = String(gKey || "").split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
-    const goodKeys = rawKeys.filter((k) => /^AIza[\w-]{20,}$/.test(k));
-    const badKeys = rawKeys.filter((k) => !/^AIza[\w-]{20,}$/.test(k));
+    const isKeyLike = (k) => /^[A-Za-z0-9._\-]{20,}$/.test(k);
+    const goodKeys = rawKeys.filter(isKeyLike);
+    const badKeys = rawKeys.filter((k) => !isKeyLike(k));
     if ((mode === "free" || mode === "paid") && rawKeys.length && badKeys.length) {
-      toast(badKeys.length + "개는 올바른 Gemini 키 형식이 아니에요 (키는 AIza로 시작). 그 값은 제외하고 저장해요.");
+      toast(badKeys.length + "개는 키 형식이 아니라 제외했어요 (공백·특수문자 확인).");
     }
     const cleanGeminiKeys = goodKeys.join("\n");
     LS.setItem("joassam_gemini_key_v1", cleanGeminiKeys || gKey.trim());
@@ -15486,9 +15487,9 @@ function AiBrainSettingsModal({ fireToast, onClose }) {
   const inp = { width: "100%", boxSizing: "border-box", border: "1px solid #CDE0D3", borderRadius: 8, padding: "9px 10px", fontSize: 13, marginBottom: 8 };
   const box = { background: "#fff", border: "1px solid #E3EEE6", borderRadius: 10, padding: 12, marginBottom: 10 };
   const Radio = (val, title, desc) => /* @__PURE__ */ React.createElement("label", { style: { display: "flex", gap: 8, alignItems: "flex-start", padding: "8px 4px", cursor: "pointer" } }, /* @__PURE__ */ React.createElement("input", { type: "radio", name: "brainmode", checked: mode === val, onChange: () => setMode(val), style: { marginTop: 3 } }), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("span", { style: { display: "block", fontSize: 13.5, fontWeight: 700, color: "#243b2e" } }, title), /* @__PURE__ */ React.createElement("span", { style: { display: "block", fontSize: 11.5, color: "#8A968D", marginTop: 1 } }, desc)));
-  return /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 4e3, display: "flex", alignItems: "flex-end", justifyContent: "center" }, onClick: onClose }, /* @__PURE__ */ React.createElement("div", { onClick: (e) => e.stopPropagation(), style: { width: "100%", maxWidth: 520, maxHeight: "92vh", overflowY: "auto", background: "#F4F7F4", borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { flex: 1, fontSize: 16, fontWeight: 800, color: "#1F5130" } }, "⚙️ AI 두뇌 설정"), /* @__PURE__ */ React.createElement("button", { onClick: onClose, style: { border: "none", background: "none", fontSize: 20, color: "#7B8A80", cursor: "pointer" } }, "✕")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "#5B7A63", marginBottom: 12 } }, "무료로 테스트하다가, 한도가 넘으면 자동으로 다른 두뇌로 넘어가요. 키는 이 기기에만 저장됩니다."), /* @__PURE__ */ React.createElement("div", { style: box }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 8 } }, "사용 방식"), Radio("free", "무료 테스트 (추천)", "Gemini 무료 → 한도 넘으면 Mock(무료·무제한)로 자동 전환. 돈 안 듦."), Radio("paid", "유료 우선 (ChatGPT)", "OpenAI → 실패 시 Gemini → Mock. 가장 자연스러움. 소액 비용 발생."), Radio("mockonly", "Mock만 (완전 무료)", "인터넷 없어도 되는 기본 두뇌. 업무 명령엔 강함, 잡담은 제한적.")), (mode === "free" || mode === "paid") && /* @__PURE__ */ React.createElement("div", { style: box }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 8 } }, "Gemini 키 (무료 · aistudio.google.com에서 발급)"), /* @__PURE__ */ React.createElement("textarea", { style: { ...inp, minHeight: 72, resize: "vertical", fontFamily: "monospace" }, placeholder: "AIza... 붙여넣기\n(여러 개면 한 줄에 하나씩 — 번갈아 써서 무료 한도가 늘어요)", value: gKey, onChange: (e) => setGKey(e.target.value) }), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#5B7A63" } }, "💡 키를 ", /* @__PURE__ */ React.createElement("b", null, "여러 개"), " 넣으면(한 줄에 하나씩) 한도가 차도 다음 키로 자동 전환돼 잘 안 끊겨요. 키는 반드시 ", /* @__PURE__ */ React.createElement("b", null, "AIza"), "로 시작하는 전체를 복사 아이콘으로 붙여넣으세요.", (function() {
+  return /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 4e3, display: "flex", alignItems: "flex-end", justifyContent: "center" }, onClick: onClose }, /* @__PURE__ */ React.createElement("div", { onClick: (e) => e.stopPropagation(), style: { width: "100%", maxWidth: 520, maxHeight: "92vh", overflowY: "auto", background: "#F4F7F4", borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { flex: 1, fontSize: 16, fontWeight: 800, color: "#1F5130" } }, "⚙️ AI 두뇌 설정"), /* @__PURE__ */ React.createElement("button", { onClick: onClose, style: { border: "none", background: "none", fontSize: 20, color: "#7B8A80", cursor: "pointer" } }, "✕")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "#5B7A63", marginBottom: 12 } }, "무료로 테스트하다가, 한도가 넘으면 자동으로 다른 두뇌로 넘어가요. 키는 이 기기에만 저장됩니다."), /* @__PURE__ */ React.createElement("div", { style: box }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 8 } }, "사용 방식"), Radio("free", "무료 테스트 (추천)", "Gemini 무료 → 한도 넘으면 Mock(무료·무제한)로 자동 전환. 돈 안 듦."), Radio("paid", "유료 우선 (ChatGPT)", "OpenAI → 실패 시 Gemini → Mock. 가장 자연스러움. 소액 비용 발생."), Radio("mockonly", "Mock만 (완전 무료)", "인터넷 없어도 되는 기본 두뇌. 업무 명령엔 강함, 잡담은 제한적.")), (mode === "free" || mode === "paid") && /* @__PURE__ */ React.createElement("div", { style: box }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 8 } }, "Gemini 키 (무료 · aistudio.google.com에서 발급)"), /* @__PURE__ */ React.createElement("textarea", { style: { ...inp, minHeight: 72, resize: "vertical", fontFamily: "monospace" }, placeholder: "AI Studio의 '키 복사'로 복사한 키 전체를 붙여넣기\n(여러 개면 한 줄에 하나씩 — 번갈아 써서 무료 한도가 늘어요)", value: gKey, onChange: (e) => setGKey(e.target.value) }), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#5B7A63" } }, "💡 키를 ", /* @__PURE__ */ React.createElement("b", null, "여러 개"), " 넣으면(한 줄에 하나씩) 한도가 차도 다음 키로 자동 전환돼 잘 안 끊겨요. AI Studio에서 ", /* @__PURE__ */ React.createElement("b", null, "'키 복사'"), " 버튼으로 복사한 전체를 붙여넣으세요 (AIza·AQ. 등 형식 상관없어요).", (function() {
     try {
-      const n = _splitGeminiKeys(gKey).filter((k) => /^AIza/.test(k)).length;
+      const n = _splitGeminiKeys(gKey).filter((k) => /^[A-Za-z0-9._\-]{20,}$/.test(k)).length;
       return n > 0 ? /* @__PURE__ */ React.createElement("span", { style: { color: "#1F5130", fontWeight: 700 } }, " · 현재 ", n, "개 인식됨") : null;
     } catch (e) {
       return null;
@@ -15883,7 +15884,7 @@ function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, 
         type: "password",
         value: draftGeminiKey,
         onChange: (e) => setDraftGeminiKey(e.target.value),
-        placeholder: "AIza...",
+        placeholder: "키 복사한 값 붙여넣기",
         style: { width: "100%", padding: "8px 10px", borderRadius: 7, border: "1px solid #D3D1C7", fontSize: 12, boxSizing: "border-box", marginBottom: 6, fontFamily: "monospace" }
       }
     ), /* @__PURE__ */ React.createElement(
