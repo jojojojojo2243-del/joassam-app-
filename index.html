@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 122;
+const APP_VERSION = 123;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 const STATUS = {
@@ -1761,7 +1761,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v122 (07-18 \uC8FC\uBB38\uC2DC \uC9C0\uC810\uD655\uC778\xB7\uB3D9\uBA85\uC774\uC778 \uAD6C\uBD84\xB7\uBCF4\uB0B4\uB294\uC774/\uBC1B\uB294\uBD84 \uBD84\uB9AC)";
+const APP_BUILD = "v123 (07-18 \uB3D9\uBA85\uC774\uC778\xB7\uC9C0\uC810 \uD654\uBA74\uC120\uD0DD \uBAA9\uB85D \u2014 \uD0ED\uC73C\uB85C \uACE0\uB974\uAE30)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -7288,7 +7288,7 @@ null       : \uC774\uB3D9 \uBD88\uD544\uC694\uD55C \uC77C\uBC18 \uB300\uD654
   const stripped = cleaned.replace(/^[^{]*\{/, "").replace(/["']?\s*text\s*["']?\s*:\s*["']?/i, "").replace(/["']?\s*,?\s*["']?action["']?\s*:[\s\S]*$/i, "").replace(/[{}"]/g, "").trim();
   return { text: stripped || "\uB2E4\uC2DC \uB9D0\uC500\uD574 \uC8FC\uC138\uC694.", action: null };
 }
-function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onClose, onAppCommand, subscriptions, openBundlePlanner, onSetOrderMemo }) {
+function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onClose, onAppCommand, subscriptions, openBundlePlanner, openPersonPicker, onSetOrderMemo }) {
   var _a, _b;
   const [phase, setPhase] = React.useState("idle");
   const [interim, setInterim] = React.useState("");
@@ -7977,6 +7977,68 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     }
     return `${orderReadback(d)}. \uB9DE\uC73C\uBA74 \uB4F1\uB85D, \uACE0\uCE60 \uAC74 \uB9D0\uC500\uD558\uC138\uC694.`;
   }
+  const sayStandalone = (userLabel, r) => {
+    try {
+      setLastAI(r);
+      pushExchange(userLabel, r);
+      processingRef.current = false;
+      speakThenListen(r);
+    } catch (e) {
+    }
+  };
+  function openDisambigPicker(cur) {
+    if (!openPersonPicker || !cur) return false;
+    if (cur._branchAmbiguous) {
+      const cands = cur._branchAmbiguous.branches.map((b) => {
+        const src = b.kind === "vendor" ? (vendors || []).find((x) => x.id === b.id) : (customers || []).find((x) => x.id === b.id);
+        return { kind: b.kind, id: b.id, name: b.name, phone: src && src.phone || "", address: src && src.address || "" };
+      });
+      openPersonPicker(cands, { mode: "branch", term: cur._branchAmbiguous.term }, (picked) => {
+        const c = orderDraftRef.current;
+        if (!c || !picked) return;
+        delete c._branchAmbiguous;
+        c.name = picked.name;
+        c._branchPicked = true;
+        if (picked.kind === "vendor") {
+          const v = (vendors || []).find((x) => x.id === picked.id);
+          if (v) {
+            c.vendorId = v.id;
+            c.customerId = null;
+            if (v.phone) c.phone = v.phone;
+            if (v.address) c.address = v.address;
+          }
+        } else {
+          const cc = (customers || []).find((x) => x.id === picked.id);
+          if (cc) {
+            c.customerId = cc.id;
+            c.vendorId = "";
+            if (cc.phone) c.phone = cc.phone;
+            if (cc.address) c.address = cc.address;
+          }
+        }
+        orderDraftRef.current = c;
+        sayStandalone(`(\uD654\uBA74\uC5D0\uC11C ${picked.name} \uC120\uD0DD)`, `${picked.name}\uB85C \uD560\uAC8C\uC694. ${orderNextPrompt(c)}`);
+      });
+      return true;
+    }
+    if (cur._dupCustomers) {
+      openPersonPicker(cur._dupCustomers, { mode: "dup", term: cur.name || "" }, (picked) => {
+        const c = orderDraftRef.current;
+        if (!c || !picked) return;
+        delete c._dupCustomers;
+        c.name = picked.name;
+        c.customerId = picked.id;
+        c._dupPicked = true;
+        c.vendorId = "";
+        if (picked.phone) c.phone = picked.phone;
+        if (picked.address) c.address = picked.address;
+        orderDraftRef.current = c;
+        sayStandalone(`(\uD654\uBA74\uC5D0\uC11C ${picked.name} \uB2D8 \uC120\uD0DD)`, `${picked.name} \uB2D8\uC73C\uB85C \uD560\uAC8C\uC694. ${orderNextPrompt(c)}`);
+      });
+      return true;
+    }
+    return false;
+  }
   function applyBundlePlanToDraft(planText) {
     const cur = orderDraftRef.current || { items: [] };
     const plan = parseBundleUtterance(planText, cur.items || []);
@@ -8057,6 +8119,11 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       return;
     }
     if (cur._branchAmbiguous) {
+      if (/화면|목록|리스트|보여|띄워|띄어|나열|선택창|골라|눌러/.test(t)) {
+        openDisambigPicker(cur);
+        say("\uD654\uBA74\uC5D0 \uC9C0\uC810 \uBAA9\uB85D\uC744 \uB744\uC6E0\uC5B4\uC694. \uC8FC\uBB38\uD560 \uC9C0\uC810\uC744 \uB20C\uB7EC \uC8FC\uC138\uC694.");
+        return;
+      }
       const amb = cur._branchAmbiguous;
       let picked = amb.branches.find((b) => {
         const full = b.name.replace(/\s/g, "");
@@ -8098,6 +8165,11 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       return;
     }
     if (cur._dupCustomers) {
+      if (/화면|목록|리스트|보여|띄워|띄어|나열|선택창|골라|눌러|사람들/.test(t)) {
+        openDisambigPicker(cur);
+        say("\uD654\uBA74\uC5D0 \uBAA9\uB85D\uC744 \uB744\uC6E0\uC5B4\uC694. \uC8FC\uBB38\uD560 \uBD84\uC744 \uB20C\uB7EC \uC8FC\uC138\uC694.");
+        return;
+      }
       const dups = cur._dupCustomers;
       const digits = (t.match(/\d+/g) || []).join("");
       let picked = null;
@@ -8465,6 +8537,12 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     }
     orderDraftRef.current = linked;
     say(orderNextPrompt(linked));
+    if (linked._branchAmbiguous || linked._dupCustomers) {
+      try {
+        openDisambigPicker(linked);
+      } catch (e) {
+      }
+    }
   }
   function pushExchange(userText, aiText) {
     const updated = [
@@ -9239,7 +9317,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         @keyframes jsOrbIdle   { 0%{opacity:0.7} 50%{opacity:1} 100%{opacity:0.7} }
       `));
 }
-function JarvisButton({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onAppCommand, subscriptions, openBundlePlanner, onSetOrderMemo }) {
+function JarvisButton({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onAppCommand, subscriptions, openBundlePlanner, openPersonPicker, onSetOrderMemo }) {
   const [sheetOpen, setSheetOpen] = React.useState(false);
   const [wakeActive, setWakeActive] = React.useState(false);
   const [toastMsg, setToastMsg] = React.useState("");
@@ -9378,6 +9456,7 @@ function JarvisButton({ orders, customers, products, tab, setTab, geminiKey, set
       onAppCommand,
       subscriptions,
       openBundlePlanner,
+      openPersonPicker,
       onSetOrderMemo,
       onClose: () => {
         setSheetOpen(false);
@@ -9744,6 +9823,47 @@ function App() {
       },
       onCancel: () => {
         setBundleModal(null);
+        if (cb) cb(null);
+      }
+    });
+  }
+  const [personPicker, setPersonPicker] = useState(null);
+  function openPersonPicker(candidates, meta, cb) {
+    const list = (candidates || []).map((c) => {
+      let last = null;
+      try {
+        const mine = (orders || []).filter((o) => {
+          const nm = orderRecipientName(o).replace(/\s/g, "");
+          const cn = String(c.name || "").replace(/\s/g, "");
+          if (nm !== cn) return false;
+          if (c.id && (o.customerId === c.id || o.vendorId === c.id)) return true;
+          const ph = String(c.phone || "").replace(/[^0-9]/g, "");
+          const oph = String(o.recipient && o.recipient.phone || o.sender && o.sender.phone || "").replace(/[^0-9]/g, "");
+          if (ph && oph && ph === oph) return true;
+          const ad = String(c.address || "").replace(/\s/g, "");
+          const oad = String(o.recipient && o.recipient.address || "").replace(/\s/g, "");
+          if (ad && oad && ad === oad) return true;
+          return !c.id;
+        });
+        mine.sort((a, b) => String(b.orderDate || b.createdAt || "").localeCompare(String(a.orderDate || a.createdAt || "")));
+        if (mine.length) {
+          const m0 = mine[0];
+          const it = (m0.items || [])[0];
+          last = { date: m0.orderDate || (m0.createdAt || "").slice(0, 10), product: it ? it.name : "", count: mine.length };
+        }
+      } catch (e) {
+      }
+      return __spreadProps(__spreadValues({}, c), { last });
+    });
+    setPersonPicker({
+      meta: meta || {},
+      list,
+      onChoose: (picked) => {
+        setPersonPicker(null);
+        if (cb) cb(picked);
+      },
+      onCancel: () => {
+        setPersonPicker(null);
         if (cb) cb(null);
       }
     });
@@ -13809,6 +13929,15 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         onChoose: bundleModal.onChoose
       }
     ),
+    personPicker && /* @__PURE__ */ React.createElement(
+      PersonPickerModal,
+      {
+        meta: personPicker.meta,
+        list: personPicker.list,
+        onCancel: personPicker.onCancel,
+        onChoose: personPicker.onChoose
+      }
+    ),
     aiMemOpen && aiMemData && /* @__PURE__ */ React.createElement(
       PersonalMemoryModal,
       {
@@ -14009,6 +14138,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         onAppCommand: runLocalVoiceCommand,
         subscriptions,
         openBundlePlanner,
+        openPersonPicker,
         onSetOrderMemo: setLastOrderMemo
       }
     ),
@@ -16018,6 +16148,20 @@ function BundleConfirmModal({ name, classes, onCancel, onChoose }) {
       cursor: "pointer"
     } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 7 } }, /* @__PURE__ */ React.createElement("span", { style: { width: 15, height: 15, borderRadius: "50%", border: "2px solid " + (on ? "#2F6F4E" : "#C7C9C0"), background: on ? "#2F6F4E" : "#fff", flexShrink: 0 } }), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12.5, fontWeight: 700, color: "#1B2430" } }, o.label), o.recommended ? /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10, fontWeight: 700, color: "#2F6F4E", background: "#EAF5EC", padding: "1px 6px", borderRadius: 8 } }, "\uCD94\uCC9C") : null, /* @__PURE__ */ React.createElement("span", { style: { marginLeft: "auto", fontSize: 11, color: "#888780" } }, o.parcels.length, "\uBC15\uC2A4")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#6a6a63", marginTop: 4, paddingLeft: 22, lineHeight: 1.5 } }, o.parcels.map((px, pi) => /* @__PURE__ */ React.createElement("div", { key: pi }, "\uBB36\uC74C ", pi + 1, ": ", describeParcel(px)))));
   }))))), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 10 } }, /* @__PURE__ */ React.createElement("button", { onClick: onCancel, style: { flex: 1, border: "1px solid #E2E4DD", background: "#fff", color: "#5F5E5A", fontWeight: 700, fontSize: 13, borderRadius: 10, padding: "11px 0", cursor: "pointer" } }, "\uCDE8\uC18C"), /* @__PURE__ */ React.createElement("button", { onClick: apply, style: { flex: 2, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 13, borderRadius: 10, padding: "11px 0", cursor: "pointer" } }, "\uC774\uB300\uB85C ", totalBoxes, "\uBC15\uC2A4\uB85C \uB4F1\uB85D"))));
+}
+function PersonPickerModal({ meta, list, onCancel, onChoose }) {
+  const m = meta || {};
+  const isBranch = m.mode === "branch";
+  const title = isBranch ? `\u{1F3E2} \uC5B4\uB290 \uC9C0\uC810\uC778\uAC00\uC694?` : `\u{1F464} \uC5B4\uB290 \uBD84\uC778\uAC00\uC694?`;
+  const term = m.term || "";
+  return /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 33e4, padding: 18 }, onClick: onCancel }, /* @__PURE__ */ React.createElement("div", { onClick: (e) => e.stopPropagation(), style: { background: "#fff", borderRadius: 16, padding: "18px 16px", maxWidth: 430, width: "100%", maxHeight: "88vh", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 16, fontWeight: 700 } }, title), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, fontWeight: 700, color: "#185FA5", background: "#E6F1FB", padding: "3px 10px", borderRadius: 20 } }, (list || []).length, "\uBA85")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "#888780", marginBottom: 10, lineHeight: 1.5 } }, isBranch ? `"${term}"\uC740 \uC9C0\uC810\uC774 \uC5EC\uB7EC \uACF3\uC774\uC5D0\uC694. \uC8FC\uBB38\uD560 \uC9C0\uC810\uC744 \uD0ED\uD558\uAC70\uB098, \uC74C\uC131\uC73C\uB85C "\uB3D9\uB0A8\uC810"\uCC98\uB7FC \uB9D0\uC500\uD558\uC154\uB3C4 \uB3FC\uC694.` : `"${term}" \uB2D8\uC774 \uC5EC\uB7EC \uBD84 \uACC4\uC138\uC694. \uC8FC\uBB38\uD560 \uBD84\uC744 \uD0ED\uD558\uAC70\uB098, \uC74C\uC131\uC73C\uB85C \uC804\uD654 \uB4B7\uC790\uB9AC\xB7\uC8FC\uC18C\uB97C \uB9D0\uC500\uD558\uC154\uB3C4 \uB3FC\uC694.`), /* @__PURE__ */ React.createElement("div", { style: { overflowY: "auto", flex: 1, borderTop: "1px solid #F1F2EC", paddingTop: 8, display: "flex", flexDirection: "column", gap: 7 } }, (list || []).map((c, i) => /* @__PURE__ */ React.createElement("button", { key: i, onClick: () => onChoose(c), style: {
+    textAlign: "left",
+    border: "1px solid #E2E4DD",
+    background: "#fff",
+    borderRadius: 11,
+    padding: "11px 12px",
+    cursor: "pointer"
+  } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } }, /* @__PURE__ */ React.createElement("span", { style: { width: 22, height: 22, borderRadius: "50%", background: isBranch ? "#EAF5EC" : "#E6F1FB", color: isBranch ? "#2F6F4E" : "#185FA5", fontSize: 12, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } }, i + 1), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 14, fontWeight: 800, color: "#1B2430" } }, c.name), c.phone ? /* @__PURE__ */ React.createElement("span", { style: { marginLeft: "auto", fontSize: 12, color: "#5F5E5A", fontWeight: 600 } }, c.phone) : null), c.address ? /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "#6a6a63", marginTop: 5, paddingLeft: 30, lineHeight: 1.5 } }, "\u{1F4CD} ", c.address) : null, c.last ? /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#8a8a80", marginTop: 3, paddingLeft: 30 } }, "\u{1F558} \uCD5C\uADFC ", c.last.date, c.last.product ? ` \xB7 ${c.last.product}` : "", c.last.count > 1 ? ` (\uCD1D ${c.last.count}\uAC74)` : "") : null))), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 10 } }, /* @__PURE__ */ React.createElement("button", { onClick: onCancel, style: { flex: 1, border: "1px solid #E2E4DD", background: "#fff", color: "#5F5E5A", fontWeight: 700, fontSize: 13, borderRadius: 10, padding: "11px 0", cursor: "pointer" } }, "\uCDE8\uC18C"))));
 }
 function AiDashboardModal({ fireToast, onClose }) {
   const toast = (m) => {
