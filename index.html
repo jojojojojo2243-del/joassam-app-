@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 123;
+const APP_VERSION = 127;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 const STATUS = {
@@ -1761,7 +1761,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v123 (07-18 \uB3D9\uBA85\uC774\uC778\xB7\uC9C0\uC810 \uD654\uBA74\uC120\uD0DD \uBAA9\uB85D \u2014 \uD0ED\uC73C\uB85C \uACE0\uB974\uAE30)";
+const APP_BUILD = "v127 (07-18 \uC5EC\uB7EC\uBA85 \uC120\uBB3C \uC2DC\uC791\uBB38\uAD6C \uC778\uC2DD \uD655\uB300 \u2014 v126 \uAE30\uB2A5 \uB3D9\uC77C)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -6606,6 +6606,29 @@ function findAmbiguousBranches(spokenName, vendors, customers) {
   if (branches.length >= 2) return { term: spoken, branches };
   return null;
 }
+function detectBranchTermForOrder(text, vendors, customers) {
+  const t = String(text || "").replace(/\s/g, "");
+  if (t.length < 2) return null;
+  const names = [...new Set([
+    ...(vendors || []).map((v) => v && v.name),
+    ...(customers || []).map((c) => c && c.name)
+  ].filter(Boolean).map((n) => String(n).trim()))];
+  const nsList = names.map((n) => n.replace(/\s/g, ""));
+  const prefixes = {};
+  for (let i = 0; i < nsList.length; i++) {
+    for (let j = i + 1; j < nsList.length; j++) {
+      const a = nsList[i], b = nsList[j];
+      let k = 0;
+      while (k < a.length && k < b.length && a[k] === b[k]) k++;
+      if (k >= 2) {
+        const p = a.slice(0, k);
+        prefixes[p] = (prefixes[p] || 0) + 1;
+      }
+    }
+  }
+  const cand = Object.keys(prefixes).filter((p) => t.indexOf(p) >= 0 && nsList.indexOf(p) < 0 && !nsList.some((ns) => ns.length > p.length && ns.indexOf(p) === 0 && t.indexOf(ns) >= 0)).sort((a, b) => b.length - a.length);
+  return cand.length ? cand[0] : null;
+}
 function findDuplicateCustomers(name, customers) {
   const ns = String(name || "").replace(/\s/g, "");
   if (ns.length < 2) return null;
@@ -7288,7 +7311,7 @@ null       : \uC774\uB3D9 \uBD88\uD544\uC694\uD55C \uC77C\uBC18 \uB300\uD654
   const stripped = cleaned.replace(/^[^{]*\{/, "").replace(/["']?\s*text\s*["']?\s*:\s*["']?/i, "").replace(/["']?\s*,?\s*["']?action["']?\s*:[\s\S]*$/i, "").replace(/[{}"]/g, "").trim();
   return { text: stripped || "\uB2E4\uC2DC \uB9D0\uC500\uD574 \uC8FC\uC138\uC694.", action: null };
 }
-function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onClose, onAppCommand, subscriptions, openBundlePlanner, openPersonPicker, onSetOrderMemo }) {
+function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onClose, onAppCommand, subscriptions, openBundlePlanner, openPersonPicker, openBulkModeChoice, closeOrderPickers, onSetOrderMemo }) {
   var _a, _b;
   const [phase, setPhase] = React.useState("idle");
   const [interim, setInterim] = React.useState("");
@@ -7322,6 +7345,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   const geminiBackoffUntilRef = React.useRef(0);
   const silenceCountRef = React.useRef(0);
   const wantListenCueRef = React.useRef(false);
+  const pendingBulkChoiceRef = React.useRef(null);
   const accumBufRef = React.useRef("");
   const accumTimerRef = React.useRef(null);
   const speakTextRef = React.useRef("");
@@ -7856,17 +7880,25 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     if (/저번처럼|지난번처럼|늘하던|평소처럼|하던대로/.test(t) && findKnownNameIn(text, customers, vendors, products)) return true;
     return false;
   }
+  function detectMultiGiftIntent(text) {
+    const t = (text || "").replace(/\s/g, "");
+    if (/(보여|알려|조회|내역|현황|목록|리스트|얼마|몇건|몇개|몇명이|검색|화면|수정|삭제|취소|누구야|누구니)/.test(t)) return false;
+    const multi = /(여러명|여러분|여럿|여러사람|여러곳|여러군데|다수인|여러명한테|여러명에게)/.test(t);
+    const giftOrder = /(선물|보내|배송|택배|주문|줄게|줄거|보낼|등록)/.test(t);
+    return multi && giftOrder;
+  }
   function resolveOrderLinks(d) {
     const draft = __spreadProps(__spreadValues({}, d), { items: (d.items || []).map((it) => __spreadValues({}, it)) });
     const _branchResolved = !!draft._branchPicked;
     const _dupResolved = !!draft._dupPicked;
-    if (draft.name && !_branchResolved) {
+    const _identityFixed = (draft._dupPicked || draft._branchPicked) && (draft.customerId || draft.vendorId || draft._isNewName);
+    if (draft.name && !_branchResolved && !_identityFixed) {
       const amb = findAmbiguousBranches(draft.name, vendors, customers);
       if (amb) {
         draft._branchAmbiguous = amb;
       }
     }
-    if (draft.name && !draft._branchAmbiguous) {
+    if (draft.name && !draft._branchAmbiguous && !_identityFixed) {
       const vNames = (vendors || []).map((v) => v.name).filter(Boolean);
       const cNames = (customers || []).map((c) => c.name).filter(Boolean);
       let vHit = matchName(draft.name, vNames);
@@ -7947,7 +7979,14 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   }
   function orderReadback(d) {
     const parts = [];
-    if (d.name) parts.push(`${d.name} \uB2D8${d._nameGuessed && d._nameGuessed.replace(/\s/g, "") !== d.name.replace(/\s/g, "") ? "(\uB9DE\uB098\uC694?)" : ""}`);
+    if (d._bulkRecipients && d._bulkRecipients.length) {
+      const nm = d._bulkRecipients.map((r) => r.name).slice(0, 3).join(", ");
+      parts.push(`${d._sender ? d._sender.name + " \uB2D8 \u2192 " : ""}${d._bulkRecipients.length}\uBA85 \uC77C\uAD04(${nm}${d._bulkRecipients.length > 3 ? " \uC678" : ""})`);
+      if (d.items && d.items.length) parts.push(d.items.map((i) => `${i.name} ${i.qty}\uAC1C`).join(", "));
+      if (d.reserveDate) parts.push(`\uBC1C\uC1A1 ${d.reserveDate}`);
+      return parts.join(", ");
+    }
+    if (d.name) parts.push(`${d.name} \uB2D8${d._eachTotal ? `(${(d._eachDone || 0) + 1}/${d._eachTotal})` : ""}${d._nameGuessed && d._nameGuessed.replace(/\s/g, "") !== d.name.replace(/\s/g, "") ? "(\uB9DE\uB098\uC694?)" : ""}`);
     if (d._senderName && d._recipientName && d._senderName.replace(/\s/g, "") !== d._recipientName.replace(/\s/g, "")) parts.push(`\uBCF4\uB0B4\uB294\uBD84 ${d._senderName}\xB7\uBC1B\uB294\uBD84 ${d._recipientName}`);
     if (d.items && d.items.length) parts.push(d.items.map((i) => `${i.name} ${i.qty}\uAC1C`).join(", "));
     if (d.reserveDate) parts.push(`\uBC1C\uC1A1 ${d.reserveDate}`);
@@ -7965,6 +8004,9 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     }
     if (d._askGift && (!d._recipientName || !d._senderName)) {
       return `\uBCF4\uB0B4\uB294 \uBD84\uACFC \uBC1B\uB294 \uBD84\uC774 \uB2E4\uB978\uAC00\uC694? \uB2E4\uB974\uBA74 "\u25CB\u25CB\uAC00 \uBCF4\uB0B4\uACE0 \u25CB\u25CB\uAC00 \uBC1B\uC544\uC694"\uCC98\uB7FC \uB9D0\uC500\uD574 \uC8FC\uC138\uC694. \uAC19\uC73C\uBA74 "\uAC19\uC544\uC694"\uB77C\uACE0 \uD558\uC138\uC694.`;
+    }
+    if (d._bulkMode && d._bulkRecipients && (!d.items || !d.items.length)) {
+      return `${d._bulkRecipients.length}\uBA85 \uBAA8\uB450\uC5D0\uAC8C \uBCF4\uB0BC \uC0C1\uD488\uC744 \uB9D0\uC500\uD574 \uC8FC\uC138\uC694.`;
     }
     if (!d.name) return "\uB204\uAD6C \uC8FC\uBB38\uC778\uAC00\uC694?";
     if (!d.items || !d.items.length) {
@@ -7986,6 +8028,23 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     } catch (e) {
     }
   };
+  function startNewNameFlow(nm) {
+    const c = orderDraftRef.current || { items: [] };
+    const clean = String(nm || c.name || "").trim();
+    delete c._branchAmbiguous;
+    delete c._dupCustomers;
+    delete c._askGift;
+    c.name = clean;
+    c.customerId = null;
+    c.vendorId = "";
+    c.phone = "";
+    c.address = "";
+    c._dupPicked = true;
+    c._branchPicked = true;
+    c._isNewName = true;
+    orderDraftRef.current = c;
+    return c;
+  }
   function openDisambigPicker(cur) {
     if (!openPersonPicker || !cur) return false;
     if (cur._branchAmbiguous) {
@@ -7996,6 +8055,11 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       openPersonPicker(cands, { mode: "branch", term: cur._branchAmbiguous.term }, (picked) => {
         const c = orderDraftRef.current;
         if (!c || !picked) return;
+        if (picked.__new) {
+          const cc = startNewNameFlow(cur._branchAmbiguous ? cur._branchAmbiguous.term : c.name);
+          sayStandalone("(\uBAA9\uB85D\uC5D0 \uC5C6\uC74C\xB7\uC0C8\uB85C \uC785\uB825)", `\uBAA9\uB85D\uC5D0 \uC5C6\uC73C\uC2DC\uAD70\uC694. "${cc.name}"\uC73C\uB85C \uC0C8\uB85C \uB4F1\uB85D\uD560\uAC8C\uC694. \uC5B4\uB5A4 \uC0C1\uD488 \uBA87 \uAC1C \uB4DC\uB9B4\uAE4C\uC694?`);
+          return;
+        }
         delete c._branchAmbiguous;
         c.name = picked.name;
         c._branchPicked = true;
@@ -8022,9 +8086,19 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       return true;
     }
     if (cur._dupCustomers) {
-      openPersonPicker(cur._dupCustomers, { mode: "dup", term: cur.name || "" }, (picked) => {
+      openPersonPicker(cur._dupCustomers, { mode: "dup", term: cur.name || "", multi: true }, (picked) => {
         const c = orderDraftRef.current;
         if (!c || !picked) return;
+        if (picked.__new) {
+          const cc = startNewNameFlow(c.name);
+          sayStandalone("(\uBAA9\uB85D\uC5D0 \uC5C6\uC74C\xB7\uC0C8\uB85C \uC785\uB825)", `\uBAA9\uB85D\uC5D0 \uC5C6\uC73C\uC2DC\uAD70\uC694. "${cc.name}" \uB2D8\uC73C\uB85C \uC0C8\uB85C \uB4F1\uB85D\uD560\uAC8C\uC694. \uC5B4\uB5A4 \uC0C1\uD488 \uBA87 \uAC1C \uB4DC\uB9B4\uAE4C\uC694?`);
+          return;
+        }
+        if (Array.isArray(picked)) {
+          const recips = picked.map((p) => ({ kind: "customer", id: p.id, name: p.name, phone: p.phone || "", address: p.address || "" }));
+          startMultiRecipients(c, recips);
+          return;
+        }
         delete c._dupCustomers;
         c.name = picked.name;
         c.customerId = picked.id;
@@ -8038,6 +8112,84 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       return true;
     }
     return false;
+  }
+  function buildRecipientVo(base, r, sender) {
+    const vo = {
+      name: r.name,
+      customerId: r.kind === "vendor" ? null : r.id || null,
+      vendorId: r.kind === "vendor" ? r.id || "" : "",
+      phone: r.phone || "",
+      address: r.address || "",
+      items: (base.items || []).map((it) => ({ productId: it.productId || null, name: it.name, qty: Number(it.qty) || 1 })),
+      reserveDate: base.reserveDate || "",
+      deliveryMessage: base.deliveryMessage || "",
+      boxPlan: base.boxPlan || null,
+      boxMode: base.boxMode || null,
+      boxList: base.boxList || null
+    };
+    if (sender && sender.name) {
+      vo._senderName = sender.name;
+      vo._senderPhone = sender.phone || "";
+      vo._recipientName = r.name;
+      vo._recipientPhone = r.phone || "";
+      vo._recipientAddress = r.address || "";
+    }
+    return vo;
+  }
+  function buildNextRecipientDraft(r, restQueue, sender, total, doneCount) {
+    const d = {
+      items: [],
+      name: r.name,
+      customerId: r.kind === "vendor" ? null : r.id || null,
+      vendorId: r.kind === "vendor" ? r.id || "" : "",
+      phone: r.phone || "",
+      address: r.address || "",
+      _recipientQueue: restQueue || [],
+      _sender: sender || null,
+      _eachTotal: total || 0,
+      _eachDone: doneCount || 0,
+      _dupPicked: true,
+      _branchPicked: true,
+      // 이미 확정된 수령인 → 재질문 방지
+      _isNewName: !r.id
+      // ★ v126: 신규 수령인은 퍼지 매칭으로 다른 사람에 붙지 않게
+    };
+    if (sender && sender.name) {
+      d._senderName = sender.name;
+      d._senderPhone = sender.phone || "";
+      d._recipientName = r.name;
+      d._recipientPhone = r.phone || "";
+      d._recipientAddress = r.address || "";
+    }
+    return d;
+  }
+  function startMultiRecipients(baseDraft, recipients) {
+    const sender = baseDraft && baseDraft._senderName ? { name: baseDraft._senderName, phone: baseDraft._senderPhone || "" } : null;
+    let done = false;
+    const go = (mode) => {
+      if (done) return;
+      done = true;
+      pendingBulkChoiceRef.current = null;
+      if (!mode) {
+        sayStandalone("(\uB2E4\uC911 \uC8FC\uBB38 \uCDE8\uC18C)", "\uB2E4\uC911 \uC8FC\uBB38\uC744 \uCDE8\uC18C\uD588\uC5B4\uC694. \uACC4\uC18D \uC9C4\uD589\uD558\uC138\uC694.");
+        return;
+      }
+      if (mode === "bulk") {
+        orderDraftRef.current = { items: [], name: `${recipients.length}\uBA85`, _bulkRecipients: recipients, _sender: sender, _bulkMode: true, reserveDate: baseDraft && baseDraft.reserveDate || "", deliveryMessage: baseDraft && baseDraft.deliveryMessage || "" };
+        sayStandalone(`(${recipients.length}\uBA85\xB7\uC77C\uAD04)`, `${recipients.length}\uBA85 \uBAA8\uB450\uC5D0\uAC8C \uAC19\uC740 \uC0C1\uD488\uC73C\uB85C \uBCF4\uB0BC\uAC8C\uC694. \uC5B4\uB5A4 \uC0C1\uD488\uC744 \uBA87 \uAC1C\uC529 \uB4DC\uB9B4\uAE4C\uC694?`);
+      } else {
+        const first = recipients[0];
+        orderDraftRef.current = buildNextRecipientDraft(first, recipients.slice(1), sender, recipients.length, 0);
+        sayStandalone(`(${recipients.length}\uBA85\xB7\uAC01\uAC01)`, `${recipients.length}\uBA85\uC744 \uAC01\uAC01 \uB4F1\uB85D\uD560\uAC8C\uC694. \uBA3C\uC800 ${first.name} \uB2D8, \uC5B4\uB5A4 \uC0C1\uD488 \uBA87 \uAC1C \uB4DC\uB9B4\uAE4C\uC694?`);
+      }
+    };
+    if (openBulkModeChoice) {
+      pendingBulkChoiceRef.current = go;
+      openBulkModeChoice(recipients.length, go);
+      sayStandalone(`(${recipients.length}\uBA85)`, `\uBC1B\uB294 \uBD84 ${recipients.length}\uBA85\uC744 \uB4F1\uB85D\uD560\uAC8C\uC694. \uC0C1\uD488\uC744 \uBAA8\uB450 \uAC19\uAC8C \uD558\uB824\uBA74 "\uC77C\uAD04", \uC0AC\uB78C\uB9C8\uB2E4 \uB2E4\uB974\uAC8C \uD558\uB824\uBA74 "\uAC01\uAC01"\uC774\uB77C\uACE0 \uB9D0\uC500\uD558\uC2DC\uAC70\uB098 \uD654\uBA74\uC5D0\uC11C \uACE8\uB77C \uC8FC\uC138\uC694.`);
+    } else {
+      go("each");
+    }
   }
   function applyBundlePlanToDraft(planText) {
     const cur = orderDraftRef.current || { items: [] };
@@ -8080,9 +8232,66 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       linked2.boxPlan = cur2.boxPlan || null;
       linked2.boxMode = cur2.boxMode || null;
       linked2.boxList = cur2.boxList || null;
+      if (Array.isArray(cur2._bulkRecipients) && cur2._bulkRecipients.length) {
+        if (!linked2.items || !linked2.items.length) {
+          say("\uBA3C\uC800 \uBCF4\uB0BC \uC0C1\uD488\uC744 \uB9D0\uC500\uD574 \uC8FC\uC138\uC694.");
+          return;
+        }
+        const recs = cur2._bulkRecipients;
+        const sender = cur2._sender || null;
+        const names = [];
+        let okCount = 0;
+        recs.forEach((r) => {
+          const vo = buildRecipientVo(linked2, r, sender);
+          const a = createVoiceOrder ? createVoiceOrder(vo) : null;
+          if (a) {
+            okCount++;
+            names.push(r.name);
+          }
+        });
+        orderModeRef.current = false;
+        orderDraftRef.current = null;
+        if (okCount) {
+          if (setSearchQuery) setSearchQuery("");
+          if (setStatusFilter) setStatusFilter("all");
+          if (setDateFilter) setDateFilter("all");
+          setTab("orders");
+          setMinimized(true);
+          const itemsTxt = (linked2.items || []).map((i) => `${i.name} ${i.qty}\uAC1C`).join(", ");
+          say(`${sender ? sender.name + " \uB2D8\uC774 \uBCF4\uB0B4\uB294 \uAC78\uB85C, " : ""}${okCount}\uBA85(${names.slice(0, 4).join(", ")}${names.length > 4 ? " \uC678" : ""})\uC5D0\uAC8C ${itemsTxt} \uC8FC\uBB38\uC744 \uD55C \uBC88\uC5D0 \uB4F1\uB85D\uD588\uC5B4\uC694.`);
+        } else {
+          say("\uB4F1\uB85D\uC5D0 \uC2E4\uD328\uD588\uC5B4\uC694. \uC0C1\uD488\uACFC \uBC1B\uB294 \uBD84\uC744 \uB2E4\uC2DC \uD655\uC778\uD574 \uC8FC\uC138\uC694.");
+        }
+        return;
+      }
+      const _queue = Array.isArray(cur2._recipientQueue) ? cur2._recipientQueue.slice() : null;
+      const _sender = cur2._sender || null;
+      const _eachTotal = cur2._eachTotal || 0;
+      const _eachDone = cur2._eachDone || 0;
       const createdArr = createVoiceOrder ? createVoiceOrder(linked2) : null;
       const created = Array.isArray(createdArr) ? createdArr[0] : createdArr;
       const boxN = Array.isArray(createdArr) ? createdArr.length : 1;
+      if (_eachTotal) {
+        if (!created) {
+          say("\uC774 \uBD84 \uB4F1\uB85D\uC5D0 \uC2E4\uD328\uD588\uC5B4\uC694. \uC0C1\uD488\uC744 \uB2E4\uC2DC \uB9D0\uC500\uD574 \uC8FC\uC138\uC694.");
+          return;
+        }
+        if (_queue && _queue.length) {
+          const next = _queue[0];
+          orderDraftRef.current = buildNextRecipientDraft(next, _queue.slice(1), _sender, _eachTotal, _eachDone + 1);
+          say(`${linked2.name} \uB2D8 \uB4F1\uB85D \uC644\uB8CC (${_eachDone + 1}/${_eachTotal}). \uB2E4\uC74C, ${next.name} \uB2D8, \uC5B4\uB5A4 \uC0C1\uD488 \uBA87 \uAC1C \uB4DC\uB9B4\uAE4C\uC694?`);
+          return;
+        }
+        orderModeRef.current = false;
+        orderDraftRef.current = null;
+        if (setSearchQuery) setSearchQuery("");
+        if (setStatusFilter) setStatusFilter("all");
+        if (setDateFilter) setDateFilter("all");
+        setTab("orders");
+        setMinimized(true);
+        say(`${linked2.name} \uB2D8\uAE4C\uC9C0 ${_eachTotal}\uBA85 \uAC01\uAC01 \uC8FC\uBB38\uC744 \uBAA8\uB450 \uB4F1\uB85D\uD588\uC5B4\uC694.`);
+        return;
+      }
       orderModeRef.current = false;
       orderDraftRef.current = null;
       if (created) {
@@ -8110,18 +8319,125 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     if (/그만|관둬|중단|하지마|안할래|주문취소|취소할|다취소|취소해/.test(t) || /취소/.test(t) && !hasProd) {
       orderModeRef.current = false;
       orderDraftRef.current = null;
+      pendingBulkChoiceRef.current = null;
+      if (closeOrderPickers) closeOrderPickers();
       say("\uC8FC\uBB38 \uB4F1\uB85D\uC744 \uCDE8\uC18C\uD588\uC5B4\uC694.");
       return;
     }
     if (/처음부터|다시주문|새로주문|리셋|다시시작|새로시작/.test(t)) {
       orderDraftRef.current = { items: [] };
+      pendingBulkChoiceRef.current = null;
       say("\uB124, \uCC98\uC74C\uBD80\uD130 \uB2E4\uC2DC \uD560\uAC8C\uC694. \uB204\uAD6C \uC8FC\uBB38\uC778\uAC00\uC694?");
+      return;
+    }
+    if (pendingBulkChoiceRef.current) {
+      if (/일괄|같은상품|모두같|다같|한번에|일괄로|다똑같|전부같/.test(t)) {
+        const g = pendingBulkChoiceRef.current;
+        if (closeOrderPickers) closeOrderPickers();
+        g("bulk");
+        return;
+      }
+      if (/각각|따로|개별|사람마다|하나씩|한명씩|한분씩|각자|따로따로/.test(t)) {
+        const g = pendingBulkChoiceRef.current;
+        if (closeOrderPickers) closeOrderPickers();
+        g("each");
+        return;
+      }
+      say('\uC0C1\uD488\uC744 \uBAA8\uB450 \uAC19\uAC8C \uD558\uB824\uBA74 "\uC77C\uAD04", \uC0AC\uB78C\uB9C8\uB2E4 \uB2E4\uB974\uAC8C \uD558\uB824\uBA74 "\uAC01\uAC01"\uC774\uB77C\uACE0 \uB9D0\uC500\uD574 \uC8FC\uC138\uC694.');
+      return;
+    }
+    if (cur._recipCollect) {
+      const rc = cur._recipCollect;
+      const raw = (text || "").trim();
+      const isNone = /^(없어|없음|없다|모름|몰라|스킵|넘어가|패스|생략|안적|비워)/.test(t);
+      const pickName = (s) => {
+        const mm = String(s).match(/[가-힣]+/);
+        if (!mm) return "";
+        const nm = mm[0].replace(/(입니다|이에요|예요|이요|이야|님|씨|은|는|이|가|요)$/, "");
+        return nm.length >= 2 ? nm.slice(0, 5) : "";
+      };
+      const pickPhone = (s) => {
+        let str = String(s);
+        if (str.replace(/[^0-9]/g, "").length < 9) {
+          const map = { \uACF5: "0", \uC601: "0", \uC77C: "1", \uC774: "2", \uC0BC: "3", \uC0AC: "4", \uC624: "5", \uC721: "6", \uCE60: "7", \uD314: "8", \uAD6C: "9" };
+          str = str.replace(/[공영일이삼사오육칠팔구]/g, (m) => map[m]);
+        }
+        const d = str.replace(/[^0-9]/g, "");
+        return d.length >= 9 ? d : "";
+      };
+      const fmtPhone = (d) => d ? d.replace(/^(\d{2,3})(\d{3,4})(\d{4})$/, "$1-$2-$3") : "";
+      if (/^(끝|끝났|그만끝|다했|다됐|완료|등록끝|이제끝|다입력|여기까지|끝이야|끝이에요|다야)/.test(t) && rc.stage === "recipName") {
+        if (!rc.recips.length) {
+          say("\uC544\uC9C1 \uB4F1\uB85D\uB41C \uBC1B\uB294 \uBD84\uC774 \uC5C6\uC5B4\uC694. \uBC1B\uB294 \uBD84 \uC131\uD568\uC744 \uB9D0\uC500\uD574 \uC8FC\uC138\uC694.");
+          return;
+        }
+        const recips = rc.recips.map((r) => ({ kind: "customer", id: null, name: r.name, phone: r.phone, address: r.address }));
+        delete cur._recipCollect;
+        orderDraftRef.current = cur;
+        startMultiRecipients({ _senderName: rc.sender.name, _senderPhone: rc.sender.phone }, recips);
+        return;
+      }
+      if (rc.stage === "senderName") {
+        const nm = pickName(raw);
+        if (!nm) {
+          say("\uBCF4\uB0B4\uB294 \uBD84 \uC131\uD568\uC744 \uB2E4\uC2DC \uB9D0\uC500\uD574 \uC8FC\uC138\uC694.");
+          return;
+        }
+        rc.sender.name = nm;
+        rc.stage = "senderPhone";
+        orderDraftRef.current = cur;
+        say(`\uBCF4\uB0B4\uB294 \uBD84 ${nm} \uB2D8. \uC804\uD654\uBC88\uD638\uB97C \uB9D0\uC500\uD574 \uC8FC\uC138\uC694. \uC5C6\uC73C\uBA74 "\uC5C6\uC74C"\uC774\uB77C\uACE0 \uD558\uC138\uC694.`);
+        return;
+      }
+      if (rc.stage === "senderPhone") {
+        rc.sender.phone = isNone ? "" : fmtPhone(pickPhone(raw));
+        rc.stage = "recipName";
+        orderDraftRef.current = cur;
+        say("\uC774\uC81C \uBC1B\uB294 \uBD84\uC744 \uD55C \uBD84\uC529 \uB4F1\uB85D\uD560\uAC8C\uC694. \uCCAB \uBC88\uC9F8 \uBC1B\uB294 \uBD84 \uC131\uD568\uC744 \uB9D0\uC500\uD574 \uC8FC\uC138\uC694.");
+        return;
+      }
+      if (rc.stage === "recipName") {
+        const nm = pickName(raw);
+        if (!nm) {
+          say('\uBC1B\uB294 \uBD84 \uC131\uD568\uC744 \uB9D0\uC500\uD574 \uC8FC\uC138\uC694. \uB2E4 \uB418\uC5C8\uC73C\uBA74 "\uB05D"\uC774\uB77C\uACE0 \uD558\uC138\uC694.');
+          return;
+        }
+        rc.tmp = { name: nm, phone: "", address: "" };
+        rc.stage = "recipPhone";
+        orderDraftRef.current = cur;
+        say(`${nm} \uB2D8 \uC804\uD654\uBC88\uD638\uB97C \uB9D0\uC500\uD574 \uC8FC\uC138\uC694. \uC5C6\uC73C\uBA74 "\uC5C6\uC74C".`);
+        return;
+      }
+      if (rc.stage === "recipPhone") {
+        rc.tmp.phone = isNone ? "" : fmtPhone(pickPhone(raw));
+        rc.stage = "recipAddr";
+        orderDraftRef.current = cur;
+        say(`${rc.tmp.name} \uB2D8 \uC8FC\uC18C\uB97C \uB9D0\uC500\uD574 \uC8FC\uC138\uC694. \uC5C6\uC73C\uBA74 "\uC5C6\uC74C".`);
+        return;
+      }
+      if (rc.stage === "recipAddr") {
+        rc.tmp.address = isNone ? "" : raw;
+        rc.recips.push(__spreadValues({}, rc.tmp));
+        const n = rc.recips.length;
+        const nm = rc.tmp.name;
+        rc.tmp = {};
+        rc.stage = "recipName";
+        orderDraftRef.current = cur;
+        say(`${nm} \uB2D8 \uCD94\uAC00\uD588\uC5B4\uC694 (\uCD1D ${n}\uBD84). \uB2E4\uC74C \uBD84 \uC131\uD568\uC744 \uB9D0\uC500\uD558\uC2DC\uAC70\uB098, \uB2E4 \uB418\uC5C8\uC73C\uBA74 "\uB05D"\uC774\uB77C\uACE0 \uD558\uC138\uC694.`);
+        return;
+      }
       return;
     }
     if (cur._branchAmbiguous) {
       if (/화면|목록|리스트|보여|띄워|띄어|나열|선택창|골라|눌러/.test(t)) {
         openDisambigPicker(cur);
         say("\uD654\uBA74\uC5D0 \uC9C0\uC810 \uBAA9\uB85D\uC744 \uB744\uC6E0\uC5B4\uC694. \uC8FC\uBB38\uD560 \uC9C0\uC810\uC744 \uB20C\uB7EC \uC8FC\uC138\uC694.");
+        return;
+      }
+      if (/없어|없다|없네|없음|없는|해당없|새로|신규|새고객|새업체|처음/.test(t)) {
+        if (closeOrderPickers) closeOrderPickers();
+        const cc = startNewNameFlow(cur._branchAmbiguous.term);
+        say(`\uBAA9\uB85D\uC5D0 \uC5C6\uC73C\uC2DC\uAD70\uC694. "${cc.name}"\uC73C\uB85C \uC0C8\uB85C \uB4F1\uB85D\uD560\uAC8C\uC694. \uC5B4\uB5A4 \uC0C1\uD488 \uBA87 \uAC1C \uB4DC\uB9B4\uAE4C\uC694?`);
         return;
       }
       const amb = cur._branchAmbiguous;
@@ -8136,6 +8452,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         if (mm) picked = amb.branches[shorts.indexOf(mm)];
       }
       if (picked) {
+        if (closeOrderPickers) closeOrderPickers();
         delete cur._branchAmbiguous;
         cur.name = picked.name;
         cur._branchPicked = true;
@@ -8161,13 +8478,19 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         return;
       }
       const opts = amb.branches.map((b) => branchShort(b.name, amb.term));
-      say(`\uC5B4\uB290 \uC9C0\uC810\uC778\uC9C0 \uB2E4\uC2DC \uB9D0\uC500\uD574 \uC8FC\uC138\uC694. ${opts.join(", ")} \uC911\uC5D0\uC11C\uC694.`);
+      say(`\uC5B4\uB290 \uC9C0\uC810\uC778\uC9C0 \uB2E4\uC2DC \uB9D0\uC500\uD574 \uC8FC\uC138\uC694. ${opts.join(", ")} \uC911\uC5D0\uC11C, \uC5C6\uC73C\uBA74 "\uC5C6\uC5B4"\uB77C\uACE0 \uD558\uC138\uC694.`);
       return;
     }
     if (cur._dupCustomers) {
       if (/화면|목록|리스트|보여|띄워|띄어|나열|선택창|골라|눌러|사람들/.test(t)) {
         openDisambigPicker(cur);
         say("\uD654\uBA74\uC5D0 \uBAA9\uB85D\uC744 \uB744\uC6E0\uC5B4\uC694. \uC8FC\uBB38\uD560 \uBD84\uC744 \uB20C\uB7EC \uC8FC\uC138\uC694.");
+        return;
+      }
+      if (/없어|없다|없네|없음|없는|해당없|새로|신규|새고객|처음/.test(t)) {
+        if (closeOrderPickers) closeOrderPickers();
+        const cc = startNewNameFlow(cur.name);
+        say(`\uBAA9\uB85D\uC5D0 \uC5C6\uC73C\uC2DC\uAD70\uC694. "${cc.name}" \uB2D8\uC73C\uB85C \uC0C8\uB85C \uB4F1\uB85D\uD560\uAC8C\uC694. \uC5B4\uB5A4 \uC0C1\uD488 \uBA87 \uAC1C \uB4DC\uB9B4\uAE4C\uC694?`);
         return;
       }
       const dups = cur._dupCustomers;
@@ -8192,6 +8515,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         });
       }
       if (picked) {
+        if (closeOrderPickers) closeOrderPickers();
         delete cur._dupCustomers;
         cur.name = picked.name;
         cur.customerId = picked.id;
@@ -8204,7 +8528,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         return;
       }
       const opts = dups.map((c, i) => `${i + 1}\uBC88(${customerDistinguish(c)})`);
-      say(`\uC5B4\uB290 \uBD84\uC778\uC9C0 \uB2E4\uC2DC \uB9D0\uC500\uD574 \uC8FC\uC138\uC694. ${opts.join(", ")}.`);
+      say(`\uC5B4\uB290 \uBD84\uC778\uC9C0 \uB2E4\uC2DC \uB9D0\uC500\uD574 \uC8FC\uC138\uC694. ${opts.join(", ")}. \uC774 \uC911\uC5D0 \uC5C6\uC73C\uBA74 "\uC5C6\uC5B4"\uB77C\uACE0 \uD558\uC138\uC694.`);
       return;
     }
     if (cur._askGift) {
@@ -8401,6 +8725,10 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         say("\uC0C1\uD488\uC744 \uBA3C\uC800 \uB9D0\uC500\uD574 \uC8FC\uC138\uC694.");
         return;
       }
+      if (Array.isArray(cur._bulkRecipients) || cur._eachTotal) {
+        finalizeRegister();
+        return;
+      }
       if (cur.awaitingBundle && !cur.boxPlan && !cur.boxMode && !cur.boxList) {
         cur.awaitingBundle = false;
         cur.boxMode = "auto";
@@ -8504,6 +8832,14 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       }
       draft = res.draft;
     }
+    if (draft && !cur._branchPicked && !cur._dupPicked && !cur._bulkMode && !cur._eachTotal) {
+      const btTerm = detectBranchTermForOrder(text, vendors, customers);
+      if (btTerm) {
+        const nameNS = String(draft.name || "").replace(/\s/g, "");
+        const isRegistered = (vendors || []).concat(customers || []).some((e) => e && e.name && e.name.replace(/\s/g, "") === nameNS);
+        if (!draft.name || !isRegistered) draft.name = btTerm;
+      }
+    }
     const linked = resolveOrderLinks(draft);
     const sameName = cur.name && linked.name && cur.name.replace(/\s/g, "") === linked.name.replace(/\s/g, "");
     if (cur._branchPicked && sameName) {
@@ -8527,6 +8863,22 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       linked._recipientName = cur._recipientName;
       linked._recipientPhone = cur._recipientPhone;
       linked._recipientAddress = cur._recipientAddress;
+    }
+    ["_bulkRecipients", "_sender", "_recipientQueue", "_eachTotal", "_eachDone", "_bulkMode", "_isNewName"].forEach((k) => {
+      if (cur[k] !== void 0) linked[k] = cur[k];
+    });
+    if (cur._bulkMode) {
+      linked.name = cur.name;
+      linked._dupPicked = true;
+      linked._branchPicked = true;
+      delete linked._dupCustomers;
+      delete linked._branchAmbiguous;
+    }
+    if (cur._eachTotal) {
+      linked._dupPicked = true;
+      linked._branchPicked = true;
+      delete linked._dupCustomers;
+      delete linked._branchAmbiguous;
     }
     if (!cur._askGift && !linked._senderName && !linked._recipientName && !linked._branchAmbiguous && !linked._dupCustomers && detectGiftIntent(text)) {
       linked._askGift = true;
@@ -8669,6 +9021,18 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       clearInterval(countdownRef.current);
       setRetryCountdown(0);
       safeOrderTurn(text);
+      return;
+    }
+    if (!orderModeRef.current && detectMultiGiftIntent(text)) {
+      orderModeRef.current = true;
+      orderDraftRef.current = { items: [], _recipCollect: { stage: "senderName", sender: { name: "", phone: "" }, recips: [], tmp: {} } };
+      clearInterval(countdownRef.current);
+      setRetryCountdown(0);
+      const m = "\uC5EC\uB7EC \uBD84\uAED8 \uC120\uBB3C \uBCF4\uB0B4\uAE30\uB97C \uC2DC\uC791\uD560\uAC8C\uC694. \uBA3C\uC800 \uBCF4\uB0B4\uB294 \uBD84 \uC131\uD568\uC744 \uB9D0\uC500\uD574 \uC8FC\uC138\uC694.";
+      setLastAI(m);
+      pushExchange(text, m);
+      processingRef.current = false;
+      speakThenListen(m);
       return;
     }
     if (detectVoiceOrderIntent(text)) {
@@ -9317,7 +9681,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         @keyframes jsOrbIdle   { 0%{opacity:0.7} 50%{opacity:1} 100%{opacity:0.7} }
       `));
 }
-function JarvisButton({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onAppCommand, subscriptions, openBundlePlanner, openPersonPicker, onSetOrderMemo }) {
+function JarvisButton({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onAppCommand, subscriptions, openBundlePlanner, openPersonPicker, openBulkModeChoice, closeOrderPickers, onSetOrderMemo }) {
   const [sheetOpen, setSheetOpen] = React.useState(false);
   const [wakeActive, setWakeActive] = React.useState(false);
   const [toastMsg, setToastMsg] = React.useState("");
@@ -9457,6 +9821,8 @@ function JarvisButton({ orders, customers, products, tab, setTab, geminiKey, set
       subscriptions,
       openBundlePlanner,
       openPersonPicker,
+      openBulkModeChoice,
+      closeOrderPickers,
       onSetOrderMemo,
       onClose: () => {
         setSheetOpen(false);
@@ -9867,6 +10233,24 @@ function App() {
         if (cb) cb(null);
       }
     });
+  }
+  const [bulkModeModal, setBulkModeModal] = useState(null);
+  function openBulkModeChoice(count, cb) {
+    setBulkModeModal({
+      count: count || 0,
+      onPick: (mode) => {
+        setBulkModeModal(null);
+        if (cb) cb(mode);
+      },
+      onCancel: () => {
+        setBulkModeModal(null);
+        if (cb) cb(null);
+      }
+    });
+  }
+  function closeOrderPickers() {
+    setPersonPicker(null);
+    setBulkModeModal(null);
   }
   const [selfTestResult, setSelfTestResult] = useState(null);
   function runSelfTestAndShow() {
@@ -12517,6 +12901,10 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     const recipAddr = vo._recipientAddress || vo.address || "";
     const recipient = { name: recipName, phone: recipPhone, address: recipAddr, postalCode: estimatePostalCode(recipAddr) };
     const sender = { name: vo._senderName || vo.name, phone: vo._senderPhone || vo.phone || "" };
+    let autoMemo = vo.memo || "";
+    if (sender.name && recipName && sender.name.replace(/\s/g, "") !== String(recipName).replace(/\s/g, "")) {
+      autoMemo = `\uBCF4\uB0B4\uB294\uBD84 ${sender.name}\uB2D8${sender.phone ? " " + sender.phone : ""} \uC8FC\uBB38\uD558\uC168\uC2B5\uB2C8\uB2E4.`;
+    }
     const total = boxList.length;
     const batchId = total > 1 ? uid("batch") : "";
     const newOrders = boxList.map((box, i) => ({
@@ -12534,7 +12922,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       reserveDate: vo.reserveDate || "",
       boxVolume: "",
       deliveryMessage: vo.deliveryMessage || "",
-      memo: "",
+      memo: autoMemo,
       boxInfo: total > 1 ? `${i + 1}/${total}\uBC15\uC2A4` : "",
       message: "",
       isBusiness: !!vo.vendorId,
@@ -13938,6 +14326,14 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         onChoose: personPicker.onChoose
       }
     ),
+    bulkModeModal && /* @__PURE__ */ React.createElement(
+      BulkModeModal,
+      {
+        count: bulkModeModal.count,
+        onPick: bulkModeModal.onPick,
+        onCancel: bulkModeModal.onCancel
+      }
+    ),
     aiMemOpen && aiMemData && /* @__PURE__ */ React.createElement(
       PersonalMemoryModal,
       {
@@ -14139,6 +14535,8 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         subscriptions,
         openBundlePlanner,
         openPersonPicker,
+        openBulkModeChoice,
+        closeOrderPickers,
         onSetOrderMemo: setLastOrderMemo
       }
     ),
@@ -16152,16 +16550,43 @@ function BundleConfirmModal({ name, classes, onCancel, onChoose }) {
 function PersonPickerModal({ meta, list, onCancel, onChoose }) {
   const m = meta || {};
   const isBranch = m.mode === "branch";
+  const allowMulti = !isBranch && m.multi;
   const title = isBranch ? `\u{1F3E2} \uC5B4\uB290 \uC9C0\uC810\uC778\uAC00\uC694?` : `\u{1F464} \uC5B4\uB290 \uBD84\uC778\uAC00\uC694?`;
   const term = m.term || "";
-  return /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 33e4, padding: 18 }, onClick: onCancel }, /* @__PURE__ */ React.createElement("div", { onClick: (e) => e.stopPropagation(), style: { background: "#fff", borderRadius: 16, padding: "18px 16px", maxWidth: 430, width: "100%", maxHeight: "88vh", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 16, fontWeight: 700 } }, title), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, fontWeight: 700, color: "#185FA5", background: "#E6F1FB", padding: "3px 10px", borderRadius: 20 } }, (list || []).length, "\uBA85")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "#888780", marginBottom: 10, lineHeight: 1.5 } }, isBranch ? `"${term}"\uC740 \uC9C0\uC810\uC774 \uC5EC\uB7EC \uACF3\uC774\uC5D0\uC694. \uC8FC\uBB38\uD560 \uC9C0\uC810\uC744 \uD0ED\uD558\uAC70\uB098, \uC74C\uC131\uC73C\uB85C "\uB3D9\uB0A8\uC810"\uCC98\uB7FC \uB9D0\uC500\uD558\uC154\uB3C4 \uB3FC\uC694.` : `"${term}" \uB2D8\uC774 \uC5EC\uB7EC \uBD84 \uACC4\uC138\uC694. \uC8FC\uBB38\uD560 \uBD84\uC744 \uD0ED\uD558\uAC70\uB098, \uC74C\uC131\uC73C\uB85C \uC804\uD654 \uB4B7\uC790\uB9AC\xB7\uC8FC\uC18C\uB97C \uB9D0\uC500\uD558\uC154\uB3C4 \uB3FC\uC694.`), /* @__PURE__ */ React.createElement("div", { style: { overflowY: "auto", flex: 1, borderTop: "1px solid #F1F2EC", paddingTop: 8, display: "flex", flexDirection: "column", gap: 7 } }, (list || []).map((c, i) => /* @__PURE__ */ React.createElement("button", { key: i, onClick: () => onChoose(c), style: {
-    textAlign: "left",
-    border: "1px solid #E2E4DD",
-    background: "#fff",
-    borderRadius: 11,
-    padding: "11px 12px",
-    cursor: "pointer"
-  } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } }, /* @__PURE__ */ React.createElement("span", { style: { width: 22, height: 22, borderRadius: "50%", background: isBranch ? "#EAF5EC" : "#E6F1FB", color: isBranch ? "#2F6F4E" : "#185FA5", fontSize: 12, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } }, i + 1), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 14, fontWeight: 800, color: "#1B2430" } }, c.name), c.phone ? /* @__PURE__ */ React.createElement("span", { style: { marginLeft: "auto", fontSize: 12, color: "#5F5E5A", fontWeight: 600 } }, c.phone) : null), c.address ? /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "#6a6a63", marginTop: 5, paddingLeft: 30, lineHeight: 1.5 } }, "\u{1F4CD} ", c.address) : null, c.last ? /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#8a8a80", marginTop: 3, paddingLeft: 30 } }, "\u{1F558} \uCD5C\uADFC ", c.last.date, c.last.product ? ` \xB7 ${c.last.product}` : "", c.last.count > 1 ? ` (\uCD1D ${c.last.count}\uAC74)` : "") : null))), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 10 } }, /* @__PURE__ */ React.createElement("button", { onClick: onCancel, style: { flex: 1, border: "1px solid #E2E4DD", background: "#fff", color: "#5F5E5A", fontWeight: 700, fontSize: 13, borderRadius: 10, padding: "11px 0", cursor: "pointer" } }, "\uCDE8\uC18C"))));
+  const [checked, setChecked] = React.useState(() => (list || []).map(() => false));
+  const toggle = (i) => setChecked((prev) => {
+    const n = prev.slice();
+    n[i] = !n[i];
+    return n;
+  });
+  const checkedCount = checked.filter(Boolean).length;
+  const multiActive = allowMulti && checkedCount > 0;
+  const onCard = (i, c) => {
+    if (multiActive) toggle(i);
+    else onChoose(c);
+  };
+  const confirmMulti = () => {
+    const sel = (list || []).filter((_, i) => checked[i]);
+    if (sel.length) onChoose(sel.length > 1 ? sel : sel[0]);
+  };
+  return /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 33e4, padding: 18 }, onClick: onCancel }, /* @__PURE__ */ React.createElement("div", { onClick: (e) => e.stopPropagation(), style: { background: "#fff", borderRadius: 16, padding: "18px 16px", maxWidth: 430, width: "100%", maxHeight: "88vh", display: "flex", flexDirection: "column", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 16, fontWeight: 700 } }, title), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, fontWeight: 700, color: "#185FA5", background: "#E6F1FB", padding: "3px 10px", borderRadius: 20 } }, (list || []).length, "\uBA85")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "#888780", marginBottom: 10, lineHeight: 1.5 } }, isBranch ? `"${term}"\uC740 \uC9C0\uC810\uC774 \uC5EC\uB7EC \uACF3\uC774\uC5D0\uC694. \uC8FC\uBB38\uD560 \uC9C0\uC810\uC744 \uD0ED\uD558\uAC70\uB098, \uC74C\uC131\uC73C\uB85C "\uB3D9\uB0A8\uC810"\uCC98\uB7FC \uB9D0\uC500\uD558\uC154\uB3C4 \uB3FC\uC694.` : allowMulti ? `"${term}" \uB2D8\uC774 \uC5EC\uB7EC \uBD84 \uACC4\uC138\uC694. \uD55C \uBD84\uC740 \uADF8\uB0E5 \uD0ED, \uC5EC\uB7EC \uBD84\uAED8 \uBCF4\uB0B4\uB824\uBA74 \uC67C\uCABD \uCCB4\uD06C\uB85C \uACE0\uB978 \uB4A4 \uC544\uB798 \uBC84\uD2BC\uC744 \uB204\uB974\uC138\uC694.` : `"${term}" \uB2D8\uC774 \uC5EC\uB7EC \uBD84 \uACC4\uC138\uC694. \uC8FC\uBB38\uD560 \uBD84\uC744 \uD0ED\uD558\uAC70\uB098, \uC74C\uC131\uC73C\uB85C \uC804\uD654 \uB4B7\uC790\uB9AC\xB7\uC8FC\uC18C\uB97C \uB9D0\uC500\uD558\uC154\uB3C4 \uB3FC\uC694.`), /* @__PURE__ */ React.createElement("div", { style: { overflowY: "auto", flex: 1, borderTop: "1px solid #F1F2EC", paddingTop: 8, display: "flex", flexDirection: "column", gap: 7 } }, (list || []).map((c, i) => {
+    const on = allowMulti && checked[i];
+    return /* @__PURE__ */ React.createElement("button", { key: i, onClick: () => onCard(i, c), style: {
+      textAlign: "left",
+      border: "1px solid " + (on ? "#185FA5" : "#E2E4DD"),
+      background: on ? "#F0F6FC" : "#fff",
+      borderRadius: 11,
+      padding: "11px 12px",
+      cursor: "pointer"
+    } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } }, allowMulti ? /* @__PURE__ */ React.createElement("span", { onClick: (e) => {
+      e.stopPropagation();
+      toggle(i);
+    }, style: { width: 20, height: 20, borderRadius: 6, border: "2px solid " + (on ? "#185FA5" : "#C7C9C0"), background: on ? "#185FA5" : "#fff", color: "#fff", fontSize: 13, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } }, on ? "\u2713" : "") : null, /* @__PURE__ */ React.createElement("span", { style: { width: 22, height: 22, borderRadius: "50%", background: isBranch ? "#EAF5EC" : "#E6F1FB", color: isBranch ? "#2F6F4E" : "#185FA5", fontSize: 12, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } }, i + 1), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 14, fontWeight: 800, color: "#1B2430" } }, c.name), c.phone ? /* @__PURE__ */ React.createElement("span", { style: { marginLeft: "auto", fontSize: 12, color: "#5F5E5A", fontWeight: 600 } }, c.phone) : null), c.address ? /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "#6a6a63", marginTop: 5, paddingLeft: allowMulti ? 52 : 30, lineHeight: 1.5 } }, "\u{1F4CD} ", c.address) : null, c.last ? /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#8a8a80", marginTop: 3, paddingLeft: allowMulti ? 52 : 30 } }, "\u{1F558} \uCD5C\uADFC ", c.last.date, c.last.product ? ` \xB7 ${c.last.product}` : "", c.last.count > 1 ? ` (\uCD1D ${c.last.count}\uAC74)` : "") : null);
+  })), /* @__PURE__ */ React.createElement("button", { onClick: () => onChoose({ __new: true }), style: { marginTop: 9, width: "100%", border: "1px dashed #C7A15A", background: "#FBF6EC", color: "#8A6D2F", fontWeight: 700, fontSize: 12.5, borderRadius: 10, padding: "10px 0", cursor: "pointer" } }, "\u{1F195} ", isBranch ? "\uC774 \uC911\uC5D0 \uC5C6\uC5B4\uC694 \xB7 \uC0C8 \uC5C5\uCCB4\uB85C \uC785\uB825" : "\uC774 \uC911\uC5D0 \uC5C6\uC5B4\uC694 \xB7 \uC0C8\uB85C \uC785\uB825"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, marginTop: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: onCancel, style: { flex: 1, border: "1px solid #E2E4DD", background: "#fff", color: "#5F5E5A", fontWeight: 700, fontSize: 13, borderRadius: 10, padding: "11px 0", cursor: "pointer" } }, "\uCDE8\uC18C"), multiActive ? /* @__PURE__ */ React.createElement("button", { onClick: confirmMulti, style: { flex: 2, border: "none", background: "#185FA5", color: "#fff", fontWeight: 700, fontSize: 13, borderRadius: 10, padding: "11px 0", cursor: "pointer" } }, "\uC120\uD0DD\uD55C ", checkedCount, "\uBA85\uC5D0\uAC8C \uC8FC\uBB38") : null)));
+}
+function BulkModeModal({ count, onPick, onCancel }) {
+  const opt = (color, bg, emoji, title, desc, onClick) => /* @__PURE__ */ React.createElement("button", { onClick, style: { textAlign: "left", border: "1px solid " + color, background: bg, borderRadius: 12, padding: "14px 14px", cursor: "pointer", width: "100%" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 14.5, fontWeight: 800, color: "#1B2430" } }, emoji, " ", title), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "#6a6a63", marginTop: 5, lineHeight: 1.5 } }, desc));
+  return /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 34e4, padding: 18 }, onClick: onCancel }, /* @__PURE__ */ React.createElement("div", { onClick: (e) => e.stopPropagation(), style: { background: "#fff", borderRadius: 16, padding: "18px 16px", maxWidth: 400, width: "100%", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 16, fontWeight: 700, marginBottom: 4 } }, "\u{1F9FE} \uC0C1\uD488\uC744 \uC5B4\uB5BB\uAC8C \uB4F1\uB85D\uD560\uAE4C\uC694?"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "#888780", marginBottom: 12, lineHeight: 1.5 } }, "\uC120\uD0DD\uD55C ", count, "\uBA85\uC5D0\uAC8C \uC8FC\uBB38\uC744 \uB4F1\uB85D\uD569\uB2C8\uB2E4. \uC0C1\uD488 \uB4F1\uB85D \uBC29\uC2DD\uC744 \uACE8\uB77C \uC8FC\uC138\uC694."), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 9 } }, opt("#185FA5", "#F0F6FC", "\u{1F4E6}", "\uC77C\uAD04 \uB4F1\uB85D (\uBAA8\uB450 \uAC19\uC740 \uC0C1\uD488)", `\uC0C1\uD488\uC744 \uD55C \uBC88\uB9CC \uB9D0\uD558\uBA74 ${count}\uBA85 \uBAA8\uB450\uC5D0\uAC8C \uAC19\uC740 \uC0C1\uD488\uC73C\uB85C \uB4F1\uB85D\uD574\uC694.`, () => onPick("bulk")), opt("#2F6F4E", "#F0F7F1", "\u{1F9CD}", "\uAC01\uAC01 \uB4F1\uB85D (\uC0AC\uB78C\uB9C8\uB2E4 \uB530\uB85C)", `${count}\uBA85\uC744 \uD55C \uBD84\uC529 \uCC28\uB840\uB85C, \uC0AC\uB78C\uB9C8\uB2E4 \uB2E4\uB978 \uC0C1\uD488\uC744 \uB4F1\uB85D\uD574\uC694.`, () => onPick("each"))), /* @__PURE__ */ React.createElement("button", { onClick: onCancel, style: { marginTop: 12, width: "100%", border: "1px solid #E2E4DD", background: "#fff", color: "#5F5E5A", fontWeight: 700, fontSize: 13, borderRadius: 10, padding: "11px 0", cursor: "pointer" } }, "\uCDE8\uC18C")));
 }
 function AiDashboardModal({ fireToast, onClose }) {
   const toast = (m) => {
