@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 127;
+const APP_VERSION = 128;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 const STATUS = {
@@ -1761,7 +1761,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v127 (07-18 \uC5EC\uB7EC\uBA85 \uC120\uBB3C \uC2DC\uC791\uBB38\uAD6C \uC778\uC2DD \uD655\uB300 \u2014 v126 \uAE30\uB2A5 \uB3D9\uC77C)";
+const APP_BUILD = "v128 (07-18 \uAC00\uB974\uCE5C \uB9D0 \uC804\uC5ED \uC801\uC6A9 \u2014 \uC8FC\uBB38\xB7\uC870\uD68C\xB7\uC7A1\uB2F4 \uBAA8\uB450 \uBB34\uB8CC \uC778\uC2DD \uAC15\uD654)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -5371,6 +5371,30 @@ function canonicalizeSpoken(q) {
   }
   return null;
 }
+function applyLearnedAliasesToText(text) {
+  const learned = getLearnedAliases();
+  const keys = Object.keys(learned || {}).filter((k) => k && k.length >= 2);
+  if (!keys.length) return text;
+  const toks = String(text || "").split(/(\s+)/);
+  let changed = false;
+  const out = toks.map((tok) => {
+    if (/^\s*$/.test(tok)) return tok;
+    const compact = tok.replace(/\s/g, "");
+    if (compact.length < 2) return tok;
+    if (learned[compact]) {
+      changed = true;
+      return learned[compact];
+    }
+    for (const k of keys) {
+      if (compact === k || typeof simJamo === "function" && simJamo(compact, k) >= 0.9) {
+        changed = true;
+        return learned[k];
+      }
+    }
+    return tok;
+  });
+  return changed ? out.join("") : text;
+}
 function runSelfTests() {
   const cases = [];
   const T = (name, fn, expect) => {
@@ -5396,6 +5420,7 @@ function runSelfTests() {
     return r && r.name;
   }, "\uCE74\uC774\uD53C\uB77C 1kg");
   T("\uBCC4\uCE6D canonicalize \uC0B0\uCCB4\uC218\u2192\uCC44\uC18C", () => canonicalizeSpoken("\uC0B0\uCCB4\uC218"), "\uCC44\uC18C");
+  T("v128 \uD559\uC2B5\uBCC4\uCE6D \uBE48\uB9F5\uC740 \uC6D0\uBB38\uC720\uC9C0", () => applyLearnedAliasesToText("\uB300\uC194 \uC8FC\uBB38 \uBC1B\uC544\uC918"), "\uB300\uC194 \uC8FC\uBB38 \uBC1B\uC544\uC918");
   T("\uBC15\uC2A4\uBD84\uD560 \uCC44\uC18C2kg\xD74\u21922\uBC15\uC2A4", () => splitIntoBoxes([{ productId: "p1", name: "\uCC44\uC18C2kg", qty: 4 }], {}).length, 2);
   T("\uB530\uB85C\uB530\uB85C 4\uB0B1\uAC1C\u21924\uBC15\uC2A4", () => buildBoxItems([{ name: "\uCC44\uC18C2kg", qty: 4 }], { mode: "each" }).length, 4);
   T("\uC804\uBD80 \uD55C \uBC15\uC2A4\u21921\uBC15\uC2A4", () => buildBoxItems([{ name: "\uCC44\uC18C2kg", qty: 4 }], { mode: "all" }).length, 1);
@@ -8923,6 +8948,10 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     processingRef.current = true;
     setInterim("");
     text = dedupCascade(text).slice(0, 200);
+    try {
+      text = applyLearnedAliasesToText(text);
+    } catch (e) {
+    }
     setLastUser(text);
     try {
       bumpWordFreq(text);
