@@ -33,7 +33,7 @@
 /* v108: 사전 컴파일됨 (esbuild). 브라우저 Babel 불필요. */
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 109;
+const APP_VERSION = 112;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 const STATUS = {
@@ -1405,6 +1405,13 @@ function geminiCooldownRemaining(key) {
   const rem = Math.ceil((t - Date.now()) / 1e3);
   return rem > 0 ? rem : 0;
 }
+let _geminiRR = 0;
+function geminiRotateOrder(pool) {
+  const live = pool.filter((k) => geminiCooldownRemaining(k) === 0);
+  if (live.length <= 1) return live.length ? live : [...pool].sort((a, b) => geminiCooldownRemaining(a) - geminiCooldownRemaining(b));
+  const start = _geminiRR++ % live.length;
+  return live.slice(start).concat(live.slice(0, start));
+}
 let _geminiModelCache = null;
 let _geminiModelCacheKey = null;
 const _geminiBlockedModels = /* @__PURE__ */ new Set();
@@ -1415,7 +1422,7 @@ function blockGeminiModel(model) {
 }
 async function getGeminiModel(apiKey) {
   if (_geminiModelCache && _geminiModelCacheKey === apiKey && !_geminiBlockedModels.has(_geminiModelCache)) return _geminiModelCache;
-  const preferred = ["gemini-2.0-flash", "gemini-flash-latest", "gemini-2.0-flash-001", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.5-pro", "gemini-1.5-pro"];
+  const preferred = ["gemini-2.0-flash", "gemini-2.5-flash-lite", "gemini-flash-latest", "gemini-2.0-flash-001", "gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.5-pro", "gemini-1.5-pro"];
   const pick = (arr) => arr.find((n) => !_geminiBlockedModels.has(n));
   try {
     const _c = new AbortController();
@@ -1727,7 +1734,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "✅ 주문서에 적용" : `⏳ ${pendingCount}개 확인 필요`
   ))));
 }
-const APP_BUILD = "v109 (07-18 Gemini 키 형식 AQ. 허용·키인식 수정)";
+const APP_BUILD = "v112 (07-18 키 라운드로빈·여러 프로젝트 한도 합산)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -6666,8 +6673,7 @@ JSON으로만:
 async function callGeminiJarvis(history, ctx, apiKey) {
   const pool = buildGeminiKeyPool(apiKey);
   if (!pool.length) throw new Error("Gemini API 키가 없습니다.");
-  const live = pool.filter((k) => geminiCooldownRemaining(k) === 0);
-  const order = live.length ? live : [...pool].sort((a, b) => geminiCooldownRemaining(a) - geminiCooldownRemaining(b));
+  const order = geminiRotateOrder(pool);
   let lastErr = null;
   for (const key of order) {
     try {
@@ -6689,8 +6695,7 @@ async function callGeminiJarvis(history, ctx, apiKey) {
 async function callGeminiOrderParse(utterance, draft, lists, apiKey) {
   const pool = buildGeminiKeyPool(apiKey);
   if (!pool.length) throw new Error("Gemini API 키가 없습니다.");
-  const live = pool.filter((k) => geminiCooldownRemaining(k) === 0);
-  const order = live.length ? live : [...pool].sort((a, b) => geminiCooldownRemaining(a) - geminiCooldownRemaining(b));
+  const order = geminiRotateOrder(pool);
   for (const key of order) {
     try {
       return await callGeminiOrderParseOnce(utterance, draft, lists, key);
@@ -8029,21 +8034,14 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
                 r = await callGeminiJarvis(nh, getCtx(), _gkey);
               } catch (err2) {
                 const isQuota2 = (err2 && err2.message || "").startsWith("QUOTA_EXCEEDED:");
+                const base = typeof _mockCasualText === "function" ? _mockCasualText(text) : "네, 말씀하세요.";
+                let m2;
                 if (isQuota2) {
                   geminiBackoffUntilRef.current = Date.now() + 6e4;
-                  let m22;
-                  if (typeof _mockCasualText === "function" && _intent === "일반대화") {
-                    m22 = _mockCasualText(text) + " (무료 AI가 잠깐 쉬는 중이라 잠시 뒤 더 자연스럽게 답할게요. 자동대화를 끄면 사용량을 아껴서 더 잘 됩니다.)";
-                  } else {
-                    m22 = "지금 무료 사용량이 가득 찼어요. 자동대화를 잠깐 끄고 1~2분 뒤 다시 말씀해 주세요. ⚙️ AI 두뇌 설정에 다른 Gemini 키를 하나 더 넣어두면 번갈아 써서 안 끊겨요.";
-                  }
-                  setLastAI(m22);
-                  pushExchange(text, m22);
-                  processingRef.current = false;
-                  speakThenListen(m22);
-                  return;
+                  m2 = base + " (지금은 무료 AI 사용량이 가득 차서 기본 답변으로 도와드려요. 자동대화를 끄고 잠시 뒤면 더 자연스럽게 답해요.)";
+                } else {
+                  m2 = base + " (AI 연결이 잠깐 불안정해서 기본 답변으로 도와드려요.)";
                 }
-                const m2 = "AI 대화 연결에 실패했어요 (" + (err2 && err2.message || "오류") + "). 인터넷 연결을 확인해 주세요.";
                 setLastAI(m2);
                 pushExchange(text, m2);
                 processingRef.current = false;
@@ -8051,8 +8049,9 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
                 return;
               }
             } else {
+              const base = typeof _mockCasualText === "function" ? _mockCasualText(text) : "네, 말씀하세요.";
               const isKey = /API key|API_KEY|invalid|PERMISSION|401|403|400/i.test(msg);
-              const em = isKey ? 'Gemini 키에 문제가 있어요. ⚙️ AI 두뇌 설정에서 키 전체를 복사해 다시 붙여넣고 "저장하기"를 눌러 주세요. (' + msg.slice(0, 60) + ")" : "AI 대화 연결에 실패했어요 (" + msg.slice(0, 80) + "). 인터넷 연결을 확인해 주세요.";
+              const em = isKey ? base + " (Gemini 키에 문제가 있을 수 있어요. ⚙️ AI 두뇌 설정에서 키를 다시 확인해 주세요.)" : base + " (AI 연결이 잠깐 불안정해서 기본 답변으로 도와드려요.)";
               setLastAI(em);
               pushExchange(text, em);
               processingRef.current = false;
