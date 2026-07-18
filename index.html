@@ -35,7 +35,7 @@
 /* v108: 사전 컴파일됨 (esbuild). 브라우저 Babel 불필요. */
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 116;
+const APP_VERSION = 119;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 const STATUS = {
@@ -1736,7 +1736,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "✅ 주문서에 적용" : `⏳ ${pendingCount}개 확인 필요`
   ))));
 }
-const APP_BUILD = "v116 (07-18 운전중 음성조회·고객업체 주문발송상태 읽어주기)";
+const APP_BUILD = "v119 (07-18 등록데이터 관대 매칭·뭉갠발음 업체상품 추정+확인)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -7154,6 +7154,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   const autoListenRef = React.useRef(false);
   const geminiBackoffUntilRef = React.useRef(0);
   const silenceCountRef = React.useRef(0);
+  const wantListenCueRef = React.useRef(false);
   const accumBufRef = React.useRef("");
   const accumTimerRef = React.useRef(null);
   const speakTextRef = React.useRef("");
@@ -7171,6 +7172,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     setAutoListen(next);
     silenceCountRef.current = 0;
     if (next) {
+      wantListenCueRef.current = true;
       if (activeRef.current && phaseRef.current === "idle") setTimeout(() => beginListening(), 150);
     } else {
       stopRec();
@@ -7371,6 +7373,34 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       }
     }
   }
+  function playListenCue() {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      const ctx = new AC();
+      const now = ctx.currentTime;
+      [[660, 0], [990, 0.12]].forEach(([f, t]) => {
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.type = "sine";
+        o.frequency.value = f;
+        g.gain.setValueAtTime(1e-4, now + t);
+        g.gain.exponentialRampToValueAtTime(0.18, now + t + 0.02);
+        g.gain.exponentialRampToValueAtTime(1e-4, now + t + 0.11);
+        o.connect(g);
+        g.connect(ctx.destination);
+        o.start(now + t);
+        o.stop(now + t + 0.12);
+      });
+      setTimeout(() => {
+        try {
+          ctx.close();
+        } catch (e) {
+        }
+      }, 400);
+    } catch (e) {
+    }
+  }
   function beginListening() {
     if (!activeRef.current) return;
     if (phaseRef.current === "thinking" || phaseRef.current === "speaking") return;
@@ -7465,6 +7495,13 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     recRef.current = rec;
     try {
       rec.start();
+      if (wantListenCueRef.current) {
+        wantListenCueRef.current = false;
+        try {
+          playListenCue();
+        } catch (e) {
+        }
+      }
     } catch (e) {
       recIdRef.current++;
       setPhaseSync("idle");
@@ -7647,8 +7684,27 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     if (draft.name) {
       const vNames = (vendors || []).map((v) => v.name).filter(Boolean);
       const cNames = (customers || []).map((c) => c.name).filter(Boolean);
-      const vHit = matchName(draft.name, vNames);
-      const cHit = vHit ? null : matchName(draft.name, cNames);
+      let vHit = matchName(draft.name, vNames);
+      let cHit = vHit ? null : matchName(draft.name, cNames);
+      if (!vHit && !cHit) {
+        const spoken = String(draft.name).replace(/\s/g, "");
+        const findContain = (names) => {
+          const hits = names.filter((n) => {
+            const ns = n.replace(/\s/g, "");
+            return spoken.length >= 2 && ns.length >= 2 && (ns.includes(spoken) || spoken.includes(ns));
+          });
+          return hits.sort((a, b) => a.length - b.length)[0] || null;
+        };
+        const vGuess = findContain(vNames) || matchName(draft.name, vNames, 0.45);
+        const cGuess = vGuess ? null : findContain(cNames) || matchName(draft.name, cNames, 0.45);
+        if (vGuess) {
+          vHit = vGuess;
+          draft._nameGuessed = draft.name;
+        } else if (cGuess) {
+          cHit = cGuess;
+          draft._nameGuessed = draft.name;
+        }
+      }
       if (vHit) {
         const v = (vendors || []).find((x) => x.name === vHit);
         if (v) {
@@ -7675,7 +7731,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       let prod = (products || []).find((pp) => pp.name && base && base.includes(pp.name.replace(/\s/g, "")));
       let viaFuzzy = false;
       if (!prod && typeof fuzzyProductMatch === "function") {
-        prod = fuzzyProductMatch(it.name || "", products, 0.62);
+        prod = fuzzyProductMatch(it.name || "", products, 0.52);
         viaFuzzy = !!prod;
       }
       if (prod) {
@@ -7695,7 +7751,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   }
   function orderReadback(d) {
     const parts = [];
-    if (d.name) parts.push(`${d.name} 님`);
+    if (d.name) parts.push(`${d.name} 님${d._nameGuessed && d._nameGuessed.replace(/\s/g, "") !== d.name.replace(/\s/g, "") ? "(맞나요?)" : ""}`);
     if (d.items && d.items.length) parts.push(d.items.map((i) => `${i.name} ${i.qty}개`).join(", "));
     if (d.reserveDate) parts.push(`발송 ${d.reserveDate}`);
     if (d.deliveryMessage) parts.push(`메시지 ${d.deliveryMessage}`);
@@ -8153,6 +8209,29 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         processingRef.current = false;
       }
     };
+    {
+      const _qt = String(text || "").replace(/\s/g, "");
+      const _strongQuery = /(들어왔|들어온|들온|발송됐|발송했나|발송했어|발송됐나|배송됐|배송중|보냈나|보냈어|주문있나|주문없|조회|현황|어떻게됐)/.test(_qt);
+      const _qName = typeof findKnownName === "function" ? findKnownName(text) : "";
+      if (_strongQuery && _qName) {
+        orderModeRef.current = false;
+        orderDraftRef.current = null;
+        clearInterval(countdownRef.current);
+        setRetryCountdown(0);
+        let ans = null;
+        try {
+          ans = runDataQuery(text);
+        } catch (e) {
+        }
+        if (ans) {
+          setLastAI(ans);
+          pushExchange(text, ans);
+          processingRef.current = false;
+          speakThenListen(ans);
+          return;
+        }
+      }
+    }
     if (orderModeRef.current) {
       clearInterval(countdownRef.current);
       setRetryCountdown(0);
@@ -8373,9 +8452,10 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       speakTextRef.current = "";
       setPhaseSync("idle");
       if (autoListenRef.current) {
+        wantListenCueRef.current = true;
         setTimeout(() => {
           if (activeRef.current && autoListenRef.current) beginListening();
-        }, 600);
+        }, 900);
       }
     };
     if (!clean) {
@@ -8520,7 +8600,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   }
   const orbColor = phase === "listening" ? "#4CAF50" : phase === "thinking" ? "#FF9800" : phase === "speaking" ? "#2196F3" : retryCountdown > 0 ? "#FF9800" : "#3d7a54";
   const orbAnim = phase === "listening" ? "jsOrbListen 0.9s ease-in-out infinite" : phase === "thinking" ? "jsOrbSpin 1.0s linear infinite" : phase === "speaking" ? "jsOrbSpeak 0.4s ease-in-out infinite" : "jsOrbIdle 2s ease-in-out infinite";
-  const statusText = phase === "listening" ? "듣는 중..." : phase === "thinking" ? "생각 중..." : phase === "speaking" ? "답변 중..." : retryCountdown > 0 ? "잠시 후 다시 시도합니다" : autoListen ? "대기 중 — 말씀해 보세요" : "눌러 말하기 — 마이크 버튼을 누르세요";
+  const statusText = phase === "listening" ? "🎤 지금 말씀하세요" : phase === "thinking" ? "생각 중… (잠시만요)" : phase === "speaking" ? "답변 중… (끝나면 말씀하세요)" : retryCountdown > 0 ? "잠시 후 다시 시도합니다" : autoListen ? "대기 중 — 말씀해 보세요" : "눌러 말하기 — 마이크 버튼을 누르세요";
   return /* @__PURE__ */ React.createElement("div", { style: {
     position: "fixed",
     left: 0,
@@ -8562,6 +8642,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
           setMinimized(false);
           autoListenRef.current = true;
           setAutoListen(true);
+          wantListenCueRef.current = true;
           if (!textMode && phaseRef.current === "idle") setTimeout(() => {
             if (activeRef.current) beginListening();
           }, 300);
@@ -8676,13 +8757,12 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         }
       },
       "✕"
-    )), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "center", padding: "4px 0" } }, /* @__PURE__ */ React.createElement("div", { style: {
-      width: 80,
-      height: 80,
+    )), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "center", padding: "1px 0" } }, /* @__PURE__ */ React.createElement("div", { style: {
+      width: 44,
+      height: 44,
       borderRadius: "50%",
       background: orbColor,
-      boxShadow: `0 0 30px ${orbColor}cc, 0 0 60px ${orbColor}66, 0 0 2px #fff4, inset 0 0 20px rgba(255,255,255,0.15)`,
-      // ★ v4 Fix
+      boxShadow: `0 0 12px ${orbColor}cc, 0 0 24px ${orbColor}55, inset 0 0 10px rgba(255,255,255,0.15)`,
       animation: orbAnim,
       transition: "background 0.4s, box-shadow 0.4s"
     } })), /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "#ddd", fontSize: 13, marginBottom: 2, fontWeight: 500 } }, statusText, retryCountdown > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: "#FF9800", marginLeft: 8 } }, retryCountdown, "초 후 재시도")), interim ? /* @__PURE__ */ React.createElement("div", { style: {
@@ -8759,6 +8839,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
           silenceCountRef.current = 0;
           autoListenRef.current = true;
           setAutoListen(true);
+          wantListenCueRef.current = true;
           beginListening();
         },
         style: {
