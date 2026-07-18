@@ -35,7 +35,7 @@
 /* v108: 사전 컴파일됨 (esbuild). 브라우저 Babel 불필요. */
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 115;
+const APP_VERSION = 116;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 const STATUS = {
@@ -1736,7 +1736,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "✅ 주문서에 적용" : `⏳ ${pendingCount}개 확인 필요`
   ))));
 }
-const APP_BUILD = "v115 (07-18 주문 발음인식도 Puter 사용·업체상품 매칭 향상)";
+const APP_BUILD = "v116 (07-18 운전중 음성조회·고객업체 주문발송상태 읽어주기)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -6460,6 +6460,49 @@ function orderHasAnyProduct(o, productNames) {
     return wanted.some((w) => nm.includes(w) || w.includes(nm) || typeof simJamo === "function" && simJamo(nm, w) >= 0.7);
   });
 }
+function _orderItemsSpoken(o, products) {
+  const pmap = {};
+  (products || []).forEach((p) => {
+    if (p && p.id) pmap[p.id] = p;
+  });
+  return (o && o.items || []).map((it) => {
+    const nm = it.name || (it.productId && pmap[it.productId] ? pmap[it.productId].name : "") || "상품";
+    return `${nm} ${it.qty || 1}개`;
+  }).join(", ");
+}
+function customerOrderStatusSpoken(name, data) {
+  const d = data || {};
+  const orders = d.orders || [], customers = d.customers || [], products = d.products || [];
+  const todayISO = d.todayISO || "";
+  const last = typeof lastOrderForName === "function" ? lastOrderForName(name, orders, customers) : null;
+  const q = String(name || "").replace(/\s/g, "");
+  if (!last) {
+    const shipped = (orders || []).filter((o) => o && o.status === "shipped" && orderRecipientName(o).replace(/\s/g, "").includes(q)).sort((a, b) => String(a.shippedAt || a.orderDate || "").localeCompare(String(b.shippedAt || b.orderDate || "")));
+    if (shipped.length) {
+      const sd = _fmtMD(shipped[shipped.length - 1].shippedAt || shipped[shipped.length - 1].orderDate);
+      return `${name} 님은 새 주문은 없어요. 마지막 발송은 ${sd || "-"}이었어요.`;
+    }
+    return `${name} 님은 주문 내역이 없어요.`;
+  }
+  const dateS = _fmtMD(last.orderDate || last.createdAt);
+  const items = _orderItemsSpoken(last, products);
+  const memo = String(last.memo || last.deliveryMessage || "").trim();
+  const memoPart = memo ? ` 메모는 "${memo}"예요.` : "";
+  if (last.status === "shipped") {
+    const shipISO = String(last.shippedAt || "").slice(0, 10);
+    const when = shipISO && shipISO === todayISO ? "오늘" : _fmtMD(last.shippedAt || last.orderDate) || "";
+    const conf = last.deliveryConfirmed ? " 배송완료로 확인됐어요." : " 지금 배송중이에요.";
+    const whenPart = when === "오늘" ? "오늘 " : when ? when + "에 " : "";
+    return `${name} 님, ${dateS ? dateS + " " : ""}주문이에요. 상품은 ${items}.${memoPart} ${whenPart}발송했어요.${conf}`;
+  }
+  if (last.status === "pending" || last.status === "ready") {
+    return `${name} 님, ${dateS ? dateS + " " : ""}주문이 들어왔어요. 상품은 ${items}.${memoPart} 아직 발송 전이에요, 곧 발송할 예정이에요.`;
+  }
+  if (last.status === "waiting") {
+    return `${name} 님, ${dateS ? dateS + " " : ""}주문이 있는데 아직 입금대기예요. 상품은 ${items}.${memoPart}`;
+  }
+  return `${name} 님, ${dateS ? dateS + " " : ""}주문 상품은 ${items}.${memoPart}`;
+}
 function dissolveLoneBundles(list) {
   const cnt = {};
   (list || []).forEach((o) => {
@@ -7563,14 +7606,14 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         }
         return `${name} 님 이름으로 된 주문은 아직 없어요.`;
       }
-      const byStatus = {};
-      matched.forEach((o) => {
-        byStatus[o.status] = (byStatus[o.status] || 0) + 1;
-      });
-      const parts = Object.keys(byStatus).map((s) => `${statusKo(s)} ${byStatus[s]}건`).join(", ");
-      const recent = matched.slice().sort((a, b) => String(b.orderDate || "").localeCompare(String(a.orderDate || "")))[0];
-      const addr = recent.recipient && recent.recipient.address ? `, 주소는 ${String(recent.recipient.address).slice(0, 20)}` : "";
-      return `${name} 님 주문은 모두 ${matched.length}건이에요. ${parts}. 가장 최근 주문은 ${recent.orderDate || ""}, ${statusKo(recent.status)} 상태${addr}예요. 화면에 목록을 띄웠어요.`;
+      const contactOnly = /연락처|전화|번호|주소/.test(t) && !/주문|배송|발송|들어왔|들어온|샀|시켰|뭐|상품|현황|내역/.test(t);
+      if (contactOnly && contact) {
+        const bits = [];
+        if (contact.phone) bits.push(`연락처는 ${contact.phone}`);
+        if (contact.address) bits.push(`주소는 ${String(contact.address).slice(0, 25)}`);
+        return `${name} ${contact.kind === "업체" ? "업체" : "님"} 정보예요. ${bits.join(", ") || "등록된 연락처가 없어요"}.`;
+      }
+      return customerOrderStatusSpoken(name, { orders: ords, customers, vendors, products, todayISO: today });
     }
     const isUnshippedAsk = /미발송|안발송/.test(t) || /발송|보내/.test(t) && /안한|안했|못한|못했|안보|못보|아직/.test(t);
     if (!isUnshippedAsk && (/(오늘|금일).*발송|오늘발송/.test(t) || /발송.*(리스트|목록|현황|보여|내역)/.test(t))) {
@@ -7595,7 +7638,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   function detectVoiceOrderIntent(text) {
     const t = (text || "").replace(/\s/g, "");
     if (/주문(을|를)?(등록|접수|받아|받을|받자|작성|넣어|만들|하려|할게|하자|해줘|하겠|넣을)|음성주문|음성으로주문|주문받아줘|주문접수/.test(t)) return true;
-    if (/주문/.test(t) && !/보여|알려|정보|조회|내역|현황|몇|건|어디|얼마|상태|목록|리스트|검색|취소|화면|열어|불러|폼|입력창|수정|고쳐|고칠|고치|바꿔|바꾸|변경|편집|삭제|빼|묶음|박스|통계|매출|정산|합계/.test(t)) return true;
+    if (/주문/.test(t) && !/보여|알려|정보|조회|내역|현황|몇|건|어디|얼마|상태|목록|리스트|검색|취소|화면|열어|불러|폼|입력창|수정|고쳐|고칠|고치|바꿔|바꾸|변경|편집|삭제|빼|묶음|박스|통계|매출|정산|합계|들어왔|들어온|확인|발송됐|발송했|발송됐나|보냈|배송됐|배송중|왔나|왔어|됐나|됐어/.test(t)) return true;
     if (/저번처럼|지난번처럼|늘하던|평소처럼|하던대로/.test(t) && findKnownNameIn(text, customers, vendors, products)) return true;
     return false;
   }
