@@ -35,7 +35,7 @@
 /* v108: 사전 컴파일됨 (esbuild). 브라우저 Babel 불필요. */
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 119;
+const APP_VERSION = 120;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 const STATUS = {
@@ -1736,7 +1736,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "✅ 주문서에 적용" : `⏳ ${pendingCount}개 확인 필요`
   ))));
 }
-const APP_BUILD = "v119 (07-18 등록데이터 관대 매칭·뭉갠발음 업체상품 추정+확인)";
+const APP_BUILD = "v120 (07-18 업체고객 이름도 자동학습·등록시 발음기억)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -7697,6 +7697,11 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         };
         const vGuess = findContain(vNames) || matchName(draft.name, vNames, 0.45);
         const cGuess = vGuess ? null : findContain(cNames) || matchName(draft.name, cNames, 0.45);
+        const g = vGuess || cGuess;
+        if (g) {
+          const gto = g.replace(/\s/g, "");
+          if (spoken && gto && spoken !== gto) draft._pendingLearns = [...draft._pendingLearns || [], { from: spoken, to: gto }];
+        }
         if (vGuess) {
           vHit = vGuess;
           draft._nameGuessed = draft.name;
