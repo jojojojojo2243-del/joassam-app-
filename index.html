@@ -20,6 +20,8 @@
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.0.4/dist/tesseract.min.js"></script>
+<script src="https://js.puter.com/v2/"></script><!-- v114: 무료 대화 AI(키·서버 불필요). 실패 시 Gemini→Mock 자동 폴백 -->
+
 <style>
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
   html, body { margin: 0; padding: 0; background: #EDEEE8; }
@@ -33,7 +35,7 @@
 /* v108: 사전 컴파일됨 (esbuild). 브라우저 Babel 불필요. */
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 112;
+const APP_VERSION = 114;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 const STATUS = {
@@ -1734,7 +1736,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "✅ 주문서에 적용" : `⏳ ${pendingCount}개 확인 필요`
   ))));
 }
-const APP_BUILD = "v112 (07-18 키 라운드로빈·여러 프로젝트 한도 합산)";
+const APP_BUILD = "v114 (07-18 Puter 무료대화 접목·Puter→Gemini→Mock 체인)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -3148,6 +3150,72 @@ function aiTestModeSet(on) {
   } catch (e) {
   }
   return !!on;
+}
+const AI_GEMINI_GUARD = { day: "", count: 0, consecFail: 0, pausedUntil: 0, lastCallAt: 0 };
+const AI_GEMINI_CAP_LS = "joassam_ai_daily_cap_v1";
+const AI_GEMINI_CONSEC_FAIL_MAX = 3;
+const AI_GEMINI_PAUSE_MS = 5 * 60 * 1e3;
+const AI_GEMINI_MIN_GAP_MS = 1500;
+function aiGeminiDailyCap() {
+  try {
+    const v = parseInt(typeof localStorage !== "undefined" ? localStorage.getItem(AI_GEMINI_CAP_LS) : "");
+    return v >= 0 && !isNaN(v) ? v : 80;
+  } catch (e) {
+    return 80;
+  }
+}
+function aiGeminiSetDailyCap(n) {
+  try {
+    if (typeof localStorage !== "undefined") localStorage.setItem(AI_GEMINI_CAP_LS, String(Math.max(0, n | 0)));
+  } catch (e) {
+  }
+  return aiGeminiDailyCap();
+}
+function _aiGuardDay() {
+  try {
+    return (/* @__PURE__ */ new Date()).toISOString().slice(0, 10);
+  } catch (e) {
+    return "day";
+  }
+}
+function aiGeminiGuardRoll() {
+  const d = _aiGuardDay();
+  if (AI_GEMINI_GUARD.day !== d) {
+    AI_GEMINI_GUARD.day = d;
+    AI_GEMINI_GUARD.count = 0;
+    AI_GEMINI_GUARD.consecFail = 0;
+    AI_GEMINI_GUARD.pausedUntil = 0;
+  }
+}
+function aiGeminiGuardCheck() {
+  aiGeminiGuardRoll();
+  const now = Date.now();
+  const cap = aiGeminiDailyCap();
+  if (cap > 0 && AI_GEMINI_GUARD.count >= cap) return { ok: false, reason: "DAILY_CAP", text: `오늘 AI 사용 한도(${cap}회)에 도달했어요. 남은 대화는 무료 기본답변으로 도와드려요(요금·한도 초과 방지). 한도는 내일 초기화돼요.` };
+  if (AI_GEMINI_GUARD.pausedUntil > now) return { ok: false, reason: "COOLDOWN", text: "AI가 오류가 반복돼 잠깐 쉬는 중이에요(요청 폭주 방지). 잠시 뒤 자동으로 다시 이어져요." };
+  if (now - AI_GEMINI_GUARD.lastCallAt < AI_GEMINI_MIN_GAP_MS) return { ok: false, reason: "THROTTLE", text: "" };
+  return { ok: true };
+}
+function aiGeminiGuardRecordCall() {
+  aiGeminiGuardRoll();
+  AI_GEMINI_GUARD.count += 1;
+  AI_GEMINI_GUARD.lastCallAt = Date.now();
+}
+function aiGeminiGuardRecordResult(success) {
+  if (success) {
+    AI_GEMINI_GUARD.consecFail = 0;
+  } else {
+    AI_GEMINI_GUARD.consecFail += 1;
+    if (AI_GEMINI_GUARD.consecFail >= AI_GEMINI_CONSEC_FAIL_MAX) {
+      AI_GEMINI_GUARD.pausedUntil = Date.now() + AI_GEMINI_PAUSE_MS;
+      AI_GEMINI_GUARD.consecFail = 0;
+    }
+  }
+}
+function aiGeminiGuardSnapshot() {
+  aiGeminiGuardRoll();
+  const now = Date.now();
+  return { count: AI_GEMINI_GUARD.count, cap: aiGeminiDailyCap(), paused: AI_GEMINI_GUARD.pausedUntil > now, pauseRemainSec: Math.max(0, Math.ceil((AI_GEMINI_GUARD.pausedUntil - now) / 1e3)) };
 }
 function aiProviderSelfTest(providerId) {
   const p = typeof AI_LLM_REGISTRY !== "undefined" ? AI_LLM_REGISTRY.get(providerId) : null;
@@ -6670,14 +6738,59 @@ JSON으로만:
     throw new Error("파싱 실패");
   }
 }
+function puterAvailable() {
+  try {
+    return typeof puter !== "undefined" && puter && puter.ai && typeof puter.ai.chat === "function";
+  } catch (e) {
+    return false;
+  }
+}
+function puterExtractText(r) {
+  try {
+    if (r == null) return "";
+    if (typeof r === "string") return r.trim();
+    if (r.message && r.message.content != null) {
+      const c = r.message.content;
+      if (typeof c === "string") return c.trim();
+      if (Array.isArray(c)) return c.map((x) => x && (x.text || x.content) || "").join(" ").trim();
+    }
+    if (typeof r.text === "string") return r.text.trim();
+    if (typeof r.content === "string") return r.content.trim();
+    if (r.result && typeof r.result === "string") return r.result.trim();
+    const s = typeof r.toString === "function" ? r.toString() : "";
+    if (s && s !== "[object Object]") return s.trim();
+  } catch (e) {
+  }
+  return "";
+}
+async function callPuterJarvis(history, ctx) {
+  if (!puterAvailable()) throw new Error("PUTER_UNAVAILABLE");
+  const sys = (typeof FARM_TERM_RULES !== "undefined" ? FARM_TERM_RULES + "\n" : "") + '당신은 "조비서"입니다. 조아저씨쌈 농산물 직거래 주문관리 앱의 전담 AI 비서입니다. 반드시 한국어로, 짧고 자연스럽게 1~2문장으로 답하세요. 특수기호·마크다운·이모지는 쓰지 마세요.';
+  const msgs = [{ role: "system", content: sys }];
+  (history || []).slice(-10).forEach((h) => {
+    const role = h.role === "model" ? "assistant" : "user";
+    const txt = h.parts && h.parts[0] && h.parts[0].text || "";
+    if (txt) msgs.push({ role, content: txt });
+  });
+  const chatP = puter.ai.chat(msgs);
+  const r = await Promise.race([chatP, new Promise((_, rej) => setTimeout(() => rej(new Error("PUTER_TIMEOUT")), 15e3))]);
+  const text = puterExtractText(r);
+  if (!text) throw new Error("PUTER_EMPTY");
+  return { text, provider: "puter" };
+}
 async function callGeminiJarvis(history, ctx, apiKey) {
+  const _g = aiGeminiGuardCheck();
+  if (!_g.ok) throw new Error("AI_GUARD:" + _g.reason + (_g.text ? "|" + _g.text : ""));
   const pool = buildGeminiKeyPool(apiKey);
   if (!pool.length) throw new Error("Gemini API 키가 없습니다.");
+  aiGeminiGuardRecordCall();
   const order = geminiRotateOrder(pool);
   let lastErr = null;
   for (const key of order) {
     try {
-      return await callGeminiJarvisOnce(history, ctx, key);
+      const r = await callGeminiJarvisOnce(history, ctx, key);
+      aiGeminiGuardRecordResult(true);
+      return r;
     } catch (e) {
       if (e && e.message && e.message.startsWith("QUOTA_EXCEEDED:")) {
         const secs = parseInt(e.message.split(":")[1]) || 60;
@@ -6685,20 +6798,27 @@ async function callGeminiJarvis(history, ctx, apiKey) {
         lastErr = e;
         continue;
       }
+      aiGeminiGuardRecordResult(false);
       throw e;
     }
   }
+  aiGeminiGuardRecordResult(false);
   const rems = pool.map(geminiCooldownRemaining).filter((x) => x > 0);
   const minRem = rems.length ? Math.min(...rems) : 60;
   throw new Error(`QUOTA_EXCEEDED:${minRem}`);
 }
 async function callGeminiOrderParse(utterance, draft, lists, apiKey) {
+  const _g = aiGeminiGuardCheck();
+  if (!_g.ok) throw new Error("AI_GUARD:" + _g.reason + (_g.text ? "|" + _g.text : ""));
   const pool = buildGeminiKeyPool(apiKey);
   if (!pool.length) throw new Error("Gemini API 키가 없습니다.");
+  aiGeminiGuardRecordCall();
   const order = geminiRotateOrder(pool);
   for (const key of order) {
     try {
-      return await callGeminiOrderParseOnce(utterance, draft, lists, key);
+      const r = await callGeminiOrderParseOnce(utterance, draft, lists, key);
+      aiGeminiGuardRecordResult(true);
+      return r;
     } catch (e) {
       if (e && e.message && e.message.startsWith("QUOTA_EXCEEDED:")) {
         const secs = parseInt(e.message.split(":")[1]) || 60;
@@ -8016,77 +8136,47 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       }
       const _isChat = _intent === "일반대화" || _intent === "help" || _intent === "unknown";
       if (_isChat) {
-        if (_gkey) {
-          setPhaseSync("thinking");
-          const nh = [...historyRef.current, { role: "user", parts: [{ text }] }];
-          let r;
+        setPhaseSync("thinking");
+        const nh = [...historyRef.current, { role: "user", parts: [{ text }] }];
+        let r = null;
+        if (typeof puterAvailable === "function" && puterAvailable()) {
+          try {
+            r = await callPuterJarvis(nh, getCtx());
+          } catch (e) {
+            r = null;
+          }
+        }
+        if (!r && _gkey) {
           try {
             r = await callGeminiJarvis(nh, getCtx(), _gkey);
           } catch (err) {
             const msg = err && err.message || "오류";
-            if (msg.startsWith("QUOTA_EXCEEDED:")) {
-              const wait = Math.min(parseInt(msg.split(":")[1]) || 20, 25);
-              const waitMsg = "잠깐요, 무료 사용량이 몰려서 " + wait + "초만 기다렸다 다시 답할게요…";
-              setLastAI(waitMsg);
-              setPhaseSync("thinking");
-              await new Promise((res) => setTimeout(res, (wait + 1) * 1e3));
-              try {
-                r = await callGeminiJarvis(nh, getCtx(), _gkey);
-              } catch (err2) {
-                const isQuota2 = (err2 && err2.message || "").startsWith("QUOTA_EXCEEDED:");
-                const base = typeof _mockCasualText === "function" ? _mockCasualText(text) : "네, 말씀하세요.";
-                let m2;
-                if (isQuota2) {
-                  geminiBackoffUntilRef.current = Date.now() + 6e4;
-                  m2 = base + " (지금은 무료 AI 사용량이 가득 차서 기본 답변으로 도와드려요. 자동대화를 끄고 잠시 뒤면 더 자연스럽게 답해요.)";
-                } else {
-                  m2 = base + " (AI 연결이 잠깐 불안정해서 기본 답변으로 도와드려요.)";
-                }
-                setLastAI(m2);
-                pushExchange(text, m2);
-                processingRef.current = false;
-                speakThenListen(m2);
-                return;
-              }
-            } else {
-              const base = typeof _mockCasualText === "function" ? _mockCasualText(text) : "네, 말씀하세요.";
-              const isKey = /API key|API_KEY|invalid|PERMISSION|401|403|400/i.test(msg);
-              const em = isKey ? base + " (Gemini 키에 문제가 있을 수 있어요. ⚙️ AI 두뇌 설정에서 키를 다시 확인해 주세요.)" : base + " (AI 연결이 잠깐 불안정해서 기본 답변으로 도와드려요.)";
-              setLastAI(em);
-              pushExchange(text, em);
-              processingRef.current = false;
-              speakThenListen(em);
-              return;
-            }
+            if (msg.startsWith("QUOTA_EXCEEDED:")) geminiBackoffUntilRef.current = Date.now() + 6e4;
+            r = null;
           }
-          const aiText = r && r.text || "네, 말씀하세요.";
-          setLastAI(aiText);
-          pushExchange(text, aiText);
-          historyRef.current = [...nh, { role: "model", parts: [{ text: aiText }] }].slice(-20);
-          setHistory(historyRef.current);
-          const nav = r && r.action && JARVIS_TAB_MAP[r.action] ? r.action : detectNavIntent(aiText) || null;
-          if (nav && JARVIS_TAB_MAP[nav]) setTimeout(() => {
-            setTab(JARVIS_TAB_MAP[nav]);
-            setMinimized(true);
-          }, 400);
-          processingRef.current = false;
-          speakThenListen(aiText);
-          return;
-        } else if (_intent === "일반대화" && typeof _mockCasualText === "function") {
-          const m = _mockCasualText(text);
-          setLastAI(m);
-          pushExchange(text, m);
-          processingRef.current = false;
-          speakThenListen(m);
-          return;
-        } else {
-          const m = '자유로운 대화는 Gemini 키가 필요해요. ⚙️ AI 두뇌 설정에서 키를 넣고 "저장하기"를 눌렀는지 확인해 주세요. (주문·재고 같은 업무 명령은 키 없이도 됩니다)';
+        }
+        if (!r || !r.text) {
+          const base = typeof _mockCasualText === "function" ? _mockCasualText(text) : "네, 말씀하세요.";
+          const m = base;
           setLastAI(m);
           pushExchange(text, m);
           processingRef.current = false;
           speakThenListen(m);
           return;
         }
+        const aiText = r.text || "네, 말씀하세요.";
+        setLastAI(aiText);
+        pushExchange(text, aiText);
+        historyRef.current = [...nh, { role: "model", parts: [{ text: aiText }] }].slice(-20);
+        setHistory(historyRef.current);
+        const nav = r && r.action && JARVIS_TAB_MAP[r.action] ? r.action : detectNavIntent(aiText) || null;
+        if (nav && JARVIS_TAB_MAP[nav]) setTimeout(() => {
+          setTab(JARVIS_TAB_MAP[nav]);
+          setMinimized(true);
+        }, 400);
+        processingRef.current = false;
+        speakThenListen(aiText);
+        return;
       }
     } catch (e) {
     }
@@ -15400,11 +15490,26 @@ function AiDashboardModal({ fireToast, onClose }) {
       return [];
     }
   })();
+  const guard = (function() {
+    try {
+      return aiGeminiGuardSnapshot();
+    } catch (e) {
+      return { count: 0, cap: 80, paused: false };
+    }
+  })();
+  const setCap = (n) => {
+    try {
+      aiGeminiSetDailyCap(n);
+    } catch (e) {
+    }
+    toast(n === 0 ? "하루 AI 한도: 무제한" : "하루 AI 한도: " + n + "회");
+    refresh();
+  };
   const nameOf = { mock: "Mock(무료)", gemini: "Gemini(무료)", openai: "OpenAI(유료)", claude: "Claude(유료)" };
   const s = snap || {};
   const box = { background: "#fff", border: "1px solid #E3EEE6", borderRadius: 10, padding: 12, marginBottom: 10 };
   const stat = (label, val, sub) => /* @__PURE__ */ React.createElement("div", { style: { flex: "1 1 30%", minWidth: 92, background: "#F4F7F4", border: "1px solid #E3EEE6", borderRadius: 10, padding: "10px 8px", textAlign: "center" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 18, fontWeight: 800, color: "#1F5130" } }, val), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#5B7A63", marginTop: 2 } }, label), sub ? /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10, color: "#8A968D" } }, sub) : null);
-  return /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 4100, display: "flex", alignItems: "flex-end", justifyContent: "center" }, onClick: onClose }, /* @__PURE__ */ React.createElement("div", { onClick: (e) => e.stopPropagation(), style: { width: "100%", maxWidth: 520, maxHeight: "92vh", overflowY: "auto", background: "#F4F7F4", borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { flex: 1, fontSize: 16, fontWeight: 800, color: "#1F5130" } }, "🧠 AI 두뇌 대시보드"), /* @__PURE__ */ React.createElement("button", { onClick: refresh, style: { border: "1px solid #CDE0D3", background: "#fff", borderRadius: 8, padding: "4px 10px", fontSize: 12, marginRight: 6, cursor: "pointer" } }, "새로고침"), /* @__PURE__ */ React.createElement("button", { onClick: onClose, style: { border: "none", background: "none", fontSize: 20, color: "#7B8A80", cursor: "pointer" } }, "✕")), /* @__PURE__ */ React.createElement("div", { style: box }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 6 } }, "현재 두뇌"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13.5, color: "#31473a", marginBottom: 4 } }, "활성: ", /* @__PURE__ */ React.createElement("b", null, nameOf[s.activeProvider] || s.activeProvider || "-"), " · 자동 전환 순서: ", /* @__PURE__ */ React.createElement("b", null, (s.chain || []).map((c) => nameOf[c] || c).join(" → "))), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } }, (s.providers || []).map((h, i) => /* @__PURE__ */ React.createElement("span", { key: i, style: { fontSize: 11, fontWeight: 600, color: h.hasKey || h.isMock ? "#1F5130" : "#9A9A9A", background: h.hasKey || h.isMock ? "#EAF4EC" : "#F0F0F0", border: "1px solid #DCE7DF", borderRadius: 20, padding: "3px 9px" } }, nameOf[h.provider] || h.provider, " ", h.isMock ? "✓무료" : h.hasKey ? "🔑연결" : "—키없음")))), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 } }, stat("오늘 호출", s.todayCalls || 0), stat("API 호출", s.apiCalls || 0, "무료 소모"), stat("캐시 적중", (s.cacheHitRate || 0) + "%", (s.cacheHits || 0) + "회"), stat("평균 응답", (s.avgMs || 0) + "ms"), stat("Smart Cache", (s.smartCacheSize || 0) + "/1000"), stat("Voice Cache", (s.voiceCacheSize || 0) + "/1000")), /* @__PURE__ */ React.createElement("div", { style: box }, /* @__PURE__ */ React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 10, cursor: "pointer" } }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: testMode, onChange: toggleTest, style: { width: 18, height: 18 } }), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("span", { style: { display: "block", fontSize: 13.5, fontWeight: 700, color: "#243b2e" } }, "🧪 개발자 모드 (AI TEST MODE)"), /* @__PURE__ */ React.createElement("span", { style: { display: "block", fontSize: 11.5, color: "#8A968D", marginTop: 1 } }, "켜면 Mock AI를 최우선으로 써서 무료 한도(Gemini)를 아껴요. 테스트가 끊기지 않습니다.")))), /* @__PURE__ */ React.createElement("div", { style: box }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { flex: 1, fontSize: 12, fontWeight: 700, color: "#2C5A3B" } }, "Provider 테스트"), /* @__PURE__ */ React.createElement("button", { onClick: runTests, disabled: testing, style: { border: "none", background: testing ? "#9DB6A6" : "#2F6F4E", color: "#fff", borderRadius: 8, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: testing ? "default" : "pointer" } }, testing ? "테스트 중…" : "4개 두뇌 테스트")), (tests || []).map((t, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { fontSize: 12, color: t.ok ? "#1F5130" : "#A9683F", marginBottom: 3 } }, t.ok ? "✅" : "⚠️", " ", nameOf[t.provider] || t.provider, " ", t.ok ? `(${t.ms}ms) ${t.text || ""}` : `— ${t.detail || "실패"}`)), !tests && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "#8A968D" } }, "버튼을 누르면 Mock·Gemini·OpenAI·Claude를 각각 호출해 상태를 확인해요(키 없는 두뇌는 '키 없음'으로 표시).")), /* @__PURE__ */ React.createElement("div", { style: box }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { flex: 1, fontSize: 12, fontWeight: 700, color: "#2C5A3B" } }, "📊 AI Score ", score ? /* @__PURE__ */ React.createElement("span", { style: { color: "#1F5130" } }, "· 종합 ", score.overall, "점") : ""), /* @__PURE__ */ React.createElement("button", { onClick: measure, style: { border: "none", background: "#2F6F4E", color: "#fff", borderRadius: 8, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, "점수 측정")), score ? /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } }, [["Voice 정확도", score.scores.voice], ["대화 정확도", score.scores.conversation], ["기억 정확도", score.scores.memory], ["Tool 정확도", score.scores.tool], ["업무 이해도", score.scores.work], ["추천 정확도", score.scores.suggestion]].map((p, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { flex: "1 1 30%", minWidth: 90, background: "#F4F7F4", border: "1px solid #E3EEE6", borderRadius: 8, padding: "8px 6px", textAlign: "center" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 16, fontWeight: 800, color: p[1] >= 90 ? "#1F5130" : p[1] >= 70 ? "#A9683F" : "#B4553F" } }, p[1]), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#5B7A63" } }, p[0])))) : /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "#8A968D" } }, "버튼을 누르면 Voice·대화·기억·Tool·업무이해·추천 정확도를 내장 표본으로 실측해요.")), /* @__PURE__ */ React.createElement("div", { style: box }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 6 } }, "🎓 학습 현황 (승인된 것만)"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#31473a", lineHeight: 1.7 } }, "사용자 사전 ", /* @__PURE__ */ React.createElement("b", null, learn.voiceDict || 0), "개 · 학습 별칭 ", /* @__PURE__ */ React.createElement("b", null, learn.aliases || 0), "개 · 업무용어 ", /* @__PURE__ */ React.createElement("b", null, learn.terms || 0), "개", /* @__PURE__ */ React.createElement("br", null), "재사용 답변 ", /* @__PURE__ */ React.createElement("b", null, learn.learnedQA || 0), "개 · 업무패턴 ", /* @__PURE__ */ React.createElement("b", null, learn.workPatternCount || 0), "회 · Farm 기본용어 ", /* @__PURE__ */ React.createElement("b", null, learn.farmTerms || 0), "개", learn.pendingApprovals ? /* @__PURE__ */ React.createElement("span", { style: { color: "#A9683F", fontWeight: 700 } }, " · 승인 대기 ", learn.pendingApprovals, "건") : null)), suggestions && suggestions.length ? /* @__PURE__ */ React.createElement("div", { style: box }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 6 } }, "💡 AI 제안 (실행은 사장님 확인 후)"), suggestions.map((sg, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { fontSize: 12, color: "#31473a", marginBottom: 4, paddingLeft: 4 } }, "• ", sg.text))) : null, /* @__PURE__ */ React.createElement("div", { style: box }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 6 } }, "최근 오류 ", (s.recentErrors || []).length ? "" : "(없음 ✓)"), (s.recentErrors || []).map((e, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { fontSize: 11, color: "#A9683F", marginBottom: 2 } }, "• ", e.msg)))));
+  return /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.35)", zIndex: 4100, display: "flex", alignItems: "flex-end", justifyContent: "center" }, onClick: onClose }, /* @__PURE__ */ React.createElement("div", { onClick: (e) => e.stopPropagation(), style: { width: "100%", maxWidth: 520, maxHeight: "92vh", overflowY: "auto", background: "#F4F7F4", borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { flex: 1, fontSize: 16, fontWeight: 800, color: "#1F5130" } }, "🧠 AI 두뇌 대시보드"), /* @__PURE__ */ React.createElement("button", { onClick: refresh, style: { border: "1px solid #CDE0D3", background: "#fff", borderRadius: 8, padding: "4px 10px", fontSize: 12, marginRight: 6, cursor: "pointer" } }, "새로고침"), /* @__PURE__ */ React.createElement("button", { onClick: onClose, style: { border: "none", background: "none", fontSize: 20, color: "#7B8A80", cursor: "pointer" } }, "✕")), /* @__PURE__ */ React.createElement("div", { style: box }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 6 } }, "현재 두뇌"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13.5, color: "#31473a", marginBottom: 4 } }, "활성: ", /* @__PURE__ */ React.createElement("b", null, nameOf[s.activeProvider] || s.activeProvider || "-"), " · 자동 전환 순서: ", /* @__PURE__ */ React.createElement("b", null, (s.chain || []).map((c) => nameOf[c] || c).join(" → "))), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } }, (s.providers || []).map((h, i) => /* @__PURE__ */ React.createElement("span", { key: i, style: { fontSize: 11, fontWeight: 600, color: h.hasKey || h.isMock ? "#1F5130" : "#9A9A9A", background: h.hasKey || h.isMock ? "#EAF4EC" : "#F0F0F0", border: "1px solid #DCE7DF", borderRadius: 20, padding: "3px 9px" } }, nameOf[h.provider] || h.provider, " ", h.isMock ? "✓무료" : h.hasKey ? "🔑연결" : "—키없음")))), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 10 } }, stat("오늘 호출", s.todayCalls || 0), stat("API 호출", s.apiCalls || 0, "무료 소모"), stat("캐시 적중", (s.cacheHitRate || 0) + "%", (s.cacheHits || 0) + "회"), stat("평균 응답", (s.avgMs || 0) + "ms"), stat("Smart Cache", (s.smartCacheSize || 0) + "/1000"), stat("Voice Cache", (s.voiceCacheSize || 0) + "/1000")), /* @__PURE__ */ React.createElement("div", { style: { ...box, border: "1px solid #E0B77A", background: "#FFF9EF" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, fontWeight: 800, color: "#9A6A1F", marginBottom: 4 } }, "🛡️ AI 사용 안전장치 (요금·요청 폭주 방지)"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, color: "#31473a", marginBottom: 8 } }, "오늘 AI 사용: ", /* @__PURE__ */ React.createElement("b", { style: { color: guard.cap && guard.count >= guard.cap ? "#B4553F" : "#1F5130" } }, guard.count), " / ", guard.cap === 0 ? "무제한" : guard.cap + "회", guard.paused ? /* @__PURE__ */ React.createElement("span", { style: { color: "#B4553F", fontWeight: 700 } }, " · 오류로 잠시 휴식 중(", guard.pauseRemainSec, "초)") : null), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "#8A968D", marginBottom: 8 } }, "정한 횟수를 넘으면 ", /* @__PURE__ */ React.createElement("b", null, "자동으로 무료 Mock으로 전환"), "해서, 무료 한도나 유료 요금이 몰래 초과되는 걸 막아요. 사람이 버튼을 신경 쓸 필요가 없어요."), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, flexWrap: "wrap" } }, [["30회", 30], ["50회", 50], ["80회", 80], ["150회", 150], ["무제한", 0]].map((p, i) => /* @__PURE__ */ React.createElement("button", { key: i, onClick: () => setCap(p[1]), style: { flex: "1 1 18%", minWidth: 56, border: guard.cap === p[1] ? "2px solid #2F6F4E" : "1px solid #CDE0D3", background: guard.cap === p[1] ? "#EAF4EC" : "#fff", color: "#1F5130", borderRadius: 8, padding: "6px 4px", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, p[0])))), /* @__PURE__ */ React.createElement("div", { style: box }, /* @__PURE__ */ React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 10, cursor: "pointer" } }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: testMode, onChange: toggleTest, style: { width: 18, height: 18 } }), /* @__PURE__ */ React.createElement("span", null, /* @__PURE__ */ React.createElement("span", { style: { display: "block", fontSize: 13.5, fontWeight: 700, color: "#243b2e" } }, "🧪 개발자 모드 (AI TEST MODE)"), /* @__PURE__ */ React.createElement("span", { style: { display: "block", fontSize: 11.5, color: "#8A968D", marginTop: 1 } }, "켜면 Mock AI를 최우선으로 써서 무료 한도(Gemini)를 아껴요. 테스트가 끊기지 않습니다.")))), /* @__PURE__ */ React.createElement("div", { style: box }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { flex: 1, fontSize: 12, fontWeight: 700, color: "#2C5A3B" } }, "Provider 테스트"), /* @__PURE__ */ React.createElement("button", { onClick: runTests, disabled: testing, style: { border: "none", background: testing ? "#9DB6A6" : "#2F6F4E", color: "#fff", borderRadius: 8, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: testing ? "default" : "pointer" } }, testing ? "테스트 중…" : "4개 두뇌 테스트")), (tests || []).map((t, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { fontSize: 12, color: t.ok ? "#1F5130" : "#A9683F", marginBottom: 3 } }, t.ok ? "✅" : "⚠️", " ", nameOf[t.provider] || t.provider, " ", t.ok ? `(${t.ms}ms) ${t.text || ""}` : `— ${t.detail || "실패"}`)), !tests && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "#8A968D" } }, "버튼을 누르면 Mock·Gemini·OpenAI·Claude를 각각 호출해 상태를 확인해요(키 없는 두뇌는 '키 없음'으로 표시).")), /* @__PURE__ */ React.createElement("div", { style: box }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { flex: 1, fontSize: 12, fontWeight: 700, color: "#2C5A3B" } }, "📊 AI Score ", score ? /* @__PURE__ */ React.createElement("span", { style: { color: "#1F5130" } }, "· 종합 ", score.overall, "점") : ""), /* @__PURE__ */ React.createElement("button", { onClick: measure, style: { border: "none", background: "#2F6F4E", color: "#fff", borderRadius: 8, padding: "5px 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, "점수 측정")), score ? /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } }, [["Voice 정확도", score.scores.voice], ["대화 정확도", score.scores.conversation], ["기억 정확도", score.scores.memory], ["Tool 정확도", score.scores.tool], ["업무 이해도", score.scores.work], ["추천 정확도", score.scores.suggestion]].map((p, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { flex: "1 1 30%", minWidth: 90, background: "#F4F7F4", border: "1px solid #E3EEE6", borderRadius: 8, padding: "8px 6px", textAlign: "center" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 16, fontWeight: 800, color: p[1] >= 90 ? "#1F5130" : p[1] >= 70 ? "#A9683F" : "#B4553F" } }, p[1]), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#5B7A63" } }, p[0])))) : /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "#8A968D" } }, "버튼을 누르면 Voice·대화·기억·Tool·업무이해·추천 정확도를 내장 표본으로 실측해요.")), /* @__PURE__ */ React.createElement("div", { style: box }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 6 } }, "🎓 학습 현황 (승인된 것만)"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#31473a", lineHeight: 1.7 } }, "사용자 사전 ", /* @__PURE__ */ React.createElement("b", null, learn.voiceDict || 0), "개 · 학습 별칭 ", /* @__PURE__ */ React.createElement("b", null, learn.aliases || 0), "개 · 업무용어 ", /* @__PURE__ */ React.createElement("b", null, learn.terms || 0), "개", /* @__PURE__ */ React.createElement("br", null), "재사용 답변 ", /* @__PURE__ */ React.createElement("b", null, learn.learnedQA || 0), "개 · 업무패턴 ", /* @__PURE__ */ React.createElement("b", null, learn.workPatternCount || 0), "회 · Farm 기본용어 ", /* @__PURE__ */ React.createElement("b", null, learn.farmTerms || 0), "개", learn.pendingApprovals ? /* @__PURE__ */ React.createElement("span", { style: { color: "#A9683F", fontWeight: 700 } }, " · 승인 대기 ", learn.pendingApprovals, "건") : null)), suggestions && suggestions.length ? /* @__PURE__ */ React.createElement("div", { style: box }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 6 } }, "💡 AI 제안 (실행은 사장님 확인 후)"), suggestions.map((sg, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { fontSize: 12, color: "#31473a", marginBottom: 4, paddingLeft: 4 } }, "• ", sg.text))) : null, /* @__PURE__ */ React.createElement("div", { style: box }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 6 } }, "최근 오류 ", (s.recentErrors || []).length ? "" : "(없음 ✓)"), (s.recentErrors || []).map((e, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { fontSize: 11, color: "#A9683F", marginBottom: 2 } }, "• ", e.msg)))));
 }
 function AiBrainSettingsModal({ fireToast, onClose }) {
   const toast = (m) => {
