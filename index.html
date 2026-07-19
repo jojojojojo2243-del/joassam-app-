@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 128;
+const APP_VERSION = 130;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 const STATUS = {
@@ -525,6 +525,21 @@ function stripCommands(text) {
   let s = text || "";
   for (const w of CMD_WORDS) s = s.split(w).join(" ");
   return s.replace(/\s+/g, " ").trim();
+}
+function nameMatchScore(name, query) {
+  const nm = String(name || "").toLowerCase();
+  const nmNS = nm.replace(/\s/g, "");
+  const q = String(query || "").toLowerCase().trim();
+  const qNS = q.replace(/\s/g, "");
+  if (!qNS) return 0;
+  if (nm === q || nmNS === qNS) return 1e3;
+  if (nm.startsWith(q) || nmNS.startsWith(qNS)) return 850;
+  if (nm.includes(q) || nmNS.includes(qNS)) return 700;
+  if (qNS.length >= 2 && typeof simJamo === "function") {
+    const s = simJamo(nmNS, qNS);
+    if (s >= 0.5) return 400 + Math.round(s * 200);
+  }
+  return 0;
 }
 function matchName(text, names, threshold) {
   threshold = threshold || 0.66;
@@ -1761,7 +1776,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v128 (07-18 \uAC00\uB974\uCE5C \uB9D0 \uC804\uC5ED \uC801\uC6A9 \u2014 \uC8FC\uBB38\xB7\uC870\uD68C\xB7\uC7A1\uB2F4 \uBAA8\uB450 \uBB34\uB8CC \uC778\uC2DD \uAC15\uD654)";
+const APP_BUILD = "v130 (07-18 \uAC80\uC0C9\uC2DC \uBCF4\uB0B4\uB294\uBD84\xB7\uBC1B\uB294\uBD84 \uD568\uAED8 \uD45C\uC2DC + \uBCF4\uB0B4\uB294\uBD84 \uC774\uB984 \uAC80\uC0C9)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11739,15 +11754,39 @@ function App() {
     const shippedDateStr = (o.shippedAt || o.createdAt || "").slice(0, 10);
     return !shippedDateStr || shippedDateStr >= threeDaysAgoStr;
   }).filter((o) => {
-    var _a, _b;
+    var _a, _b, _c, _d;
     if (!searchQuery.trim()) return true;
     const q = searchQuery.trim().toLowerCase();
     const c = customerMap[o.customerId];
     const name = ((_a = o.recipient) == null ? void 0 : _a.name) || (c ? c.name : "") || "";
-    const phone = ((_b = o.recipient) == null ? void 0 : _b.phone) || (c ? c.phone : "") || "";
+    const senderName = ((_b = o.sender) == null ? void 0 : _b.name) || "";
+    const phone = ((_c = o.recipient) == null ? void 0 : _c.phone) || (c ? c.phone : "") || "";
+    const senderPhone = ((_d = o.sender) == null ? void 0 : _d.phone) || "";
     const productNames = orderItemsText2(o);
-    return [name, phone, productNames].some((v) => v.toLowerCase().includes(q));
-  }).sort((a, b) => a.createdAt < b.createdAt ? 1 : -1);
+    return [name, senderName, phone, senderPhone, productNames].some((v) => v.toLowerCase().includes(q));
+  }).sort((a, b) => {
+    if (isOrderSearching) {
+      const scoreOf = (o) => {
+        var _a, _b, _c, _d;
+        const c = customerMap[o.customerId];
+        const name = ((_a = o.recipient) == null ? void 0 : _a.name) || (c ? c.name : "") || o.name || "";
+        let s = Math.max(nameMatchScore(name, searchQuery), nameMatchScore(((_b = o.sender) == null ? void 0 : _b.name) || "", searchQuery));
+        if (!s) {
+          const q = searchQuery.trim().toLowerCase();
+          const qNum = q.replace(/-/g, "");
+          const phone = (((_c = o.recipient) == null ? void 0 : _c.phone) || (c ? c.phone : "") || "").replace(/-/g, "");
+          const sphone = (((_d = o.sender) == null ? void 0 : _d.phone) || "").replace(/-/g, "");
+          if (qNum.length >= 3 && (phone.includes(qNum) || sphone.includes(qNum))) s = 300;
+          else if (orderItemsText2(o).toLowerCase().includes(q)) s = 200;
+          else s = 100;
+        }
+        return s;
+      };
+      const d = scoreOf(b) - scoreOf(a);
+      if (d) return d;
+    }
+    return a.createdAt < b.createdAt ? 1 : -1;
+  });
   const counts = (() => {
     const reg = orders;
     return {
@@ -15903,11 +15942,23 @@ function VendorsTab({ vendors, orders, addVendor, addVendorsMulti, updateVendor,
     reader.readAsDataURL(file);
     e.target.value = "";
   }
-  const list = vendors.filter((v) => {
+  const list = (() => {
     const s = q.trim().toLowerCase();
-    if (!s) return true;
-    return (v.name || "").toLowerCase().includes(s) || (v.phone || "").includes(s) || (v.address || "").toLowerCase().includes(s);
-  });
+    if (!s) return vendors;
+    const sNS = s.replace(/\s/g, "");
+    const filtered = vendors.filter(
+      (v) => (v.name || "").toLowerCase().includes(s) || sNS.length >= 2 && typeof simJamo === "function" && simJamo((v.name || "").replace(/\s/g, ""), sNS) >= 0.5 || (v.phone || "").includes(s) || (v.address || "").toLowerCase().includes(s)
+    );
+    const vscore = (v) => {
+      let sc = nameMatchScore(v.name, s);
+      if (!sc) {
+        if ((v.phone || "").includes(s)) sc = 300;
+        else if ((v.address || "").toLowerCase().includes(s)) sc = 150;
+      }
+      return sc;
+    };
+    return [...filtered].sort((a, b) => vscore(b) - vscore(a) || String(a.name || "").localeCompare(String(b.name || "")));
+  })();
   return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("button", { onClick: onBack, style: { background: "none", border: "none", color: "#5F5E5A", fontSize: 13, cursor: "pointer", padding: 0, marginBottom: 12 } }, "\u2190 \uD648\uC73C\uB85C"), /* @__PURE__ */ React.createElement("h1", { style: { fontSize: 19, fontWeight: 700, margin: "2px 0 14px", letterSpacing: "-0.02em" } }, "\uC5C5\uCCB4(\uAC70\uB798\uCC98) \uAD00\uB9AC"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 12 } }, /* @__PURE__ */ React.createElement("button", { onClick: exportVendorsExcel, style: toolBtnStyle("#2F6F4E") }, "\uC804\uCCB4 \uB2E4\uC6B4\uB85C\uB4DC"), /* @__PURE__ */ React.createElement("button", { onClick: () => {
     var _a;
     return (_a = vendorInputRef.current) == null ? void 0 : _a.click();
@@ -16166,11 +16217,27 @@ function OrdersTab({
   const contactMatches = (() => {
     const q = (searchQuery || "").trim().toLowerCase();
     if (!q) return [];
+    const qNS = q.replace(/\s/g, "");
     const qNum = q.replace(/-/g, "");
-    const hit = (x) => (x.name || "").toLowerCase().includes(q) || (x.phone || "").replace(/-/g, "").includes(qNum) || (x.address || "").toLowerCase().includes(q) || (x.memo || "").toLowerCase().includes(q);
+    const hit = (x) => {
+      const nameNS = (x.name || "").toLowerCase().replace(/\s/g, "");
+      return (x.name || "").toLowerCase().includes(q) || qNS.length >= 2 && typeof simJamo === "function" && simJamo(nameNS, qNS) >= 0.5 || // ★ v129: 비슷한 이름도 후보로
+      (x.phone || "").replace(/-/g, "").includes(qNum) || (x.address || "").toLowerCase().includes(q) || (x.memo || "").toLowerCase().includes(q);
+    };
+    const score = (x) => {
+      const name = (x.name || "").toLowerCase();
+      const nameNS = name.replace(/\s/g, "");
+      const phoneNS = (x.phone || "").replace(/-/g, "");
+      if (name === q || nameNS === qNS) return 1e3;
+      if (name.startsWith(q) || nameNS.startsWith(qNS)) return 850;
+      if (name.includes(q) || nameNS.includes(qNS)) return 700;
+      if (typeof simJamo === "function" && qNS.length >= 2 && simJamo(nameNS, qNS) >= 0.5) return 500 + Math.round(simJamo(nameNS, qNS) * 100);
+      if (qNum.length >= 3 && phoneNS.includes(qNum)) return 300;
+      return 100;
+    };
     const cs = (customers || []).filter(hit).map((c) => __spreadProps(__spreadValues({}, c), { _kind: "customer" }));
     const vs = (vendors || []).filter(hit).map((v) => __spreadProps(__spreadValues({}, v), { _kind: "vendor" }));
-    return [...vs, ...cs].slice(0, 8);
+    return [...vs, ...cs].map((x) => ({ x, s: score(x) })).sort((a, b) => b.s - a.s || (a.x._kind === b.x._kind ? 0 : a.x._kind === "vendor" ? -1 : 1) || String(a.x.name || "").localeCompare(String(b.x.name || ""))).map((e) => e.x).slice(0, 8);
   })();
   return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement(
     "button",
@@ -16263,11 +16330,13 @@ function OrdersTab({
       });
     }
     return groups.map((g) => {
-      var _a, _b, _c;
+      var _a, _b, _c, _d, _e;
       const list = g.list;
       const first = list[0];
       const c = customerMap[first.customerId];
       const displayName = ((_a = first.recipient) == null ? void 0 : _a.name) || (c ? c.name : "") || "\uD604\uC7A5 \uC8FC\uBB38";
+      const senderName = ((_b = first.sender) == null ? void 0 : _b.name) || "";
+      const isGiftOrder = senderName && displayName && senderName.replace(/\s/g, "") !== displayName.replace(/\s/g, "");
       const groupTotal = list.reduce((s, o) => s + orderTotal(o), 0);
       const multi = list.length > 1;
       return /* @__PURE__ */ React.createElement("div", { key: g.key, style: { marginBottom: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 2px 4px" } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: "#888780" } }, orderGroupLabel(first))), /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid #E2E4DD", borderLeft: `4px solid ${(STATUS[first.status] || STATUS.pending).color}`, borderRadius: 10, padding: "10px 12px" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, alignItems: "flex-start" } }, /* @__PURE__ */ React.createElement(
@@ -16278,7 +16347,7 @@ function OrdersTab({
           onChange: () => toggleGroup(list),
           style: { marginTop: 2 }
         }
-      ), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, cursor: "pointer", minWidth: 0 }, onClick: () => onSelect(first.id) }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 2, gap: 6 } }, /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 700, fontSize: 13, whiteSpace: "nowrap" } }, first.isBusiness ? /* @__PURE__ */ React.createElement("span", { style: { fontSize: 9.5, fontWeight: 700, color: "#854F0B", background: "#FAEEDA", padding: "1px 5px", borderRadius: 6, marginRight: 5 } }, "\u{1F3E2}\uC5C5\uCCB4") : /* @__PURE__ */ React.createElement("span", { style: { fontSize: 9.5, fontWeight: 700, color: "#27500A", background: "#EAF3DE", padding: "1px 5px", borderRadius: 6, marginRight: 5 } }, "\uC77C\uBC18"), displayName), first.subscriptionId && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 9.5, fontWeight: 700, color: "#185FA5", background: "#E6F1FB", padding: "1px 6px", borderRadius: 10, whiteSpace: "nowrap" } }, "\uC815\uAE30\uAD6C\uB3C5 ", first.subscriptionOccurrence, "\uD68C\uCC28"), /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 400, color: "#888780", fontSize: 10.5, whiteSpace: "nowrap" } }, ((_b = first.recipient) == null ? void 0 : _b.phone) || ""), /* @__PURE__ */ React.createElement("span", { style: { flex: 1, textAlign: "right", fontSize: 12, fontWeight: 700, color: "#1B2430" } }, won(groupTotal))), ((_c = first.recipient) == null ? void 0 : _c.address) && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#888780", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, "[", first.recipient.postalCode || estimatePostalCode(first.recipient.address), "] ", first.recipient.address)), /* @__PURE__ */ React.createElement("button", { onClick: (e) => {
+      ), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, cursor: "pointer", minWidth: 0 }, onClick: () => onSelect(first.id) }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 2, gap: 6 } }, /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 700, fontSize: 13, whiteSpace: "nowrap" } }, first.isBusiness ? /* @__PURE__ */ React.createElement("span", { style: { fontSize: 9.5, fontWeight: 700, color: "#854F0B", background: "#FAEEDA", padding: "1px 5px", borderRadius: 6, marginRight: 5 } }, "\u{1F3E2}\uC5C5\uCCB4") : /* @__PURE__ */ React.createElement("span", { style: { fontSize: 9.5, fontWeight: 700, color: "#27500A", background: "#EAF3DE", padding: "1px 5px", borderRadius: 6, marginRight: 5 } }, "\uC77C\uBC18"), displayName), first.subscriptionId && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 9.5, fontWeight: 700, color: "#185FA5", background: "#E6F1FB", padding: "1px 6px", borderRadius: 10, whiteSpace: "nowrap" } }, "\uC815\uAE30\uAD6C\uB3C5 ", first.subscriptionOccurrence, "\uD68C\uCC28"), /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 400, color: "#888780", fontSize: 10.5, whiteSpace: "nowrap" } }, ((_c = first.recipient) == null ? void 0 : _c.phone) || ""), /* @__PURE__ */ React.createElement("span", { style: { flex: 1, textAlign: "right", fontSize: 12, fontWeight: 700, color: "#1B2430" } }, won(groupTotal))), isGiftOrder && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#8A6D2F", background: "#FBF6EC", border: "1px solid #EADFC4", borderRadius: 6, padding: "2px 7px", marginTop: 3, display: "inline-block" } }, "\u{1F4E4} \uBCF4\uB0B4\uB294\uBD84 ", senderName, ((_d = first.sender) == null ? void 0 : _d.phone) ? ` ${first.sender.phone}` : "", " \u2192 \u{1F4E5} \uBC1B\uB294\uBD84 ", displayName), ((_e = first.recipient) == null ? void 0 : _e.address) && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#888780", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, "[", first.recipient.postalCode || estimatePostalCode(first.recipient.address), "] ", first.recipient.address)), /* @__PURE__ */ React.createElement("button", { onClick: (e) => {
         e.stopPropagation();
         onOpenActions(first.id);
       }, style: { background: "none", border: "none", color: "#888780", fontSize: 16, cursor: "pointer", padding: 0, flexShrink: 0 } }, "\u22EF")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", marginTop: 8 } }, list.map((o, i) => {
@@ -17658,8 +17727,9 @@ function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, ch
   const [vendorQuery, setVendorQuery] = useState("");
   const vendorResults = vendorQuery.trim() ? vendors.filter((v) => {
     const q = vendorQuery.trim().toLowerCase();
-    return (v.name || "").toLowerCase().includes(q) || (v.phone || "").replace(/-/g, "").includes(q.replace(/-/g, "")) || (v.bizNo || "").replace(/-/g, "").includes(q.replace(/-/g, ""));
-  }).slice(0, 8) : [];
+    const qn = q.replace(/-/g, "");
+    return (v.name || "").toLowerCase().includes(q) || qn.length >= 2 && typeof simJamo === "function" && simJamo((v.name || "").replace(/\s/g, ""), q.replace(/\s/g, "")) >= 0.5 || (v.phone || "").replace(/-/g, "").includes(qn) || (v.bizNo || "").replace(/-/g, "").includes(qn);
+  }).sort((a, b) => nameMatchScore(b.name, vendorQuery) - nameMatchScore(a.name, vendorQuery) || String(a.name || "").localeCompare(String(b.name || ""))).slice(0, 8) : [];
   function pickVendor(v) {
     setDraft((prev) => {
       const deliveries = prev.deliveries.length ? [...prev.deliveries] : [{ id: uid("d"), name: "", phone: "", address: "", cart: {} }];
@@ -18170,9 +18240,20 @@ function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, rem
     const q = searchQuery.trim().toLowerCase();
     let list = customers;
     if (q) {
+      const qNum = q.replace(/-/g, "");
+      const cscore = (c) => {
+        let s = nameMatchScore(c.name, q);
+        if (!s) {
+          if (qNum.length >= 3 && (c.phone || "").replace(/-/g, "").includes(qNum)) s = 300;
+          else if ((c.address || "").toLowerCase().includes(q)) s = 150;
+          else if ((c.memo || "").toLowerCase().includes(q)) s = 100;
+        }
+        return s;
+      };
       list = list.filter(
-        (c) => (c.name || "").toLowerCase().includes(q) || (c.phone || "").replace(/-/g, "").includes(q.replace(/-/g, "")) || (c.address || "").toLowerCase().includes(q) || (c.memo || "").toLowerCase().includes(q)
+        (c) => (c.name || "").toLowerCase().includes(q) || qNum.length >= 2 && typeof simJamo === "function" && simJamo((c.name || "").replace(/\s/g, ""), q.replace(/\s/g, "")) >= 0.5 || (c.phone || "").replace(/-/g, "").includes(qNum) || (c.address || "").toLowerCase().includes(q) || (c.memo || "").toLowerCase().includes(q)
       );
+      list = [...list].sort((a, b) => cscore(b) - cscore(a) || String(a.name || "").localeCompare(String(b.name || "")));
     }
     if (regularOnly) list = list.filter((c) => isRegularCustomer(c, orders));
     return list;
