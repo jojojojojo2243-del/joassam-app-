@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 130;
+const APP_VERSION = 131;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 const STATUS = {
@@ -1776,7 +1776,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v130 (07-18 \uAC80\uC0C9\uC2DC \uBCF4\uB0B4\uB294\uBD84\xB7\uBC1B\uB294\uBD84 \uD568\uAED8 \uD45C\uC2DC + \uBCF4\uB0B4\uB294\uBD84 \uC774\uB984 \uAC80\uC0C9)";
+const APP_BUILD = "v131 (07-18 \uB9C8\uC774\uD06C \uC0C1\uD0DC\uB9C9\uB300\xB74\uC0C1\uD0DC \uD45C\uC2DC \u2014 \uC5B8\uC81C \uB9D0\uD560\uC9C0\xB7\uB07C\uC5B4\uB4E4\uAE30 \uAC00\uB2A5 \uD45C\uC2DC)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -9441,7 +9441,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   }
   const orbColor = phase === "listening" ? "#4CAF50" : phase === "thinking" ? "#FF9800" : phase === "speaking" ? "#2196F3" : retryCountdown > 0 ? "#FF9800" : "#3d7a54";
   const orbAnim = phase === "listening" ? "jsOrbListen 0.9s ease-in-out infinite" : phase === "thinking" ? "jsOrbSpin 1.0s linear infinite" : phase === "speaking" ? "jsOrbSpeak 0.4s ease-in-out infinite" : "jsOrbIdle 2s ease-in-out infinite";
-  const statusText = phase === "listening" ? "\u{1F3A4} \uC9C0\uAE08 \uB9D0\uC500\uD558\uC138\uC694" : phase === "thinking" ? "\uC0DD\uAC01 \uC911\u2026 (\uC7A0\uC2DC\uB9CC\uC694)" : phase === "speaking" ? "\uB2F5\uBCC0 \uC911\u2026 (\uB05D\uB098\uBA74 \uB9D0\uC500\uD558\uC138\uC694)" : retryCountdown > 0 ? "\uC7A0\uC2DC \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD569\uB2C8\uB2E4" : autoListen ? "\uB300\uAE30 \uC911 \u2014 \uB9D0\uC500\uD574 \uBCF4\uC138\uC694" : "\uB20C\uB7EC \uB9D0\uD558\uAE30 \u2014 \uB9C8\uC774\uD06C \uBC84\uD2BC\uC744 \uB204\uB974\uC138\uC694";
+  const statusText = phase === "listening" ? interim ? "\u{1F3A4} \uB4E3\uACE0 \uC788\uC5B4\uC694\u2026" : "\u{1F3A4} \uC9C0\uAE08 \uB9D0\uC500\uD558\uC138\uC694" : phase === "thinking" ? "\u{1F4AD} \uC0DD\uAC01 \uC911\u2026 (\uC7A0\uC2DC\uB9CC\uC694)" : phase === "speaking" ? autoListen ? "\u{1F50A} \uB2F5\uBCC0 \uC911 \u2014 \uB07C\uC5B4\uB4E4\uC5B4 \uB9D0\uC500\uD558\uC154\uB3C4 \uB3FC\uC694" : "\u{1F50A} \uB2F5\uBCC0 \uC911\u2026 (\uB05D\uB098\uBA74 \uB9D0\uC500\uD558\uC138\uC694)" : retryCountdown > 0 ? "\uC7A0\uC2DC \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD569\uB2C8\uB2E4" : autoListen ? "\uB300\uAE30 \uC911 \u2014 \uB9D0\uC500\uD574 \uBCF4\uC138\uC694" : "\uB20C\uB7EC \uB9D0\uD558\uAE30 \u2014 \uB9C8\uC774\uD06C \uBC84\uD2BC\uC744 \uB204\uB974\uC138\uC694";
   return /* @__PURE__ */ React.createElement("div", { style: {
     position: "fixed",
     left: 0,
@@ -9606,7 +9606,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       boxShadow: `0 0 12px ${orbColor}cc, 0 0 24px ${orbColor}55, inset 0 0 10px rgba(255,255,255,0.15)`,
       animation: orbAnim,
       transition: "background 0.4s, box-shadow 0.4s"
-    } })), /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "#ddd", fontSize: 13, marginBottom: 2, fontWeight: 500 } }, statusText, retryCountdown > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: "#FF9800", marginLeft: 8 } }, retryCountdown, "\uCD08 \uD6C4 \uC7AC\uC2DC\uB3C4")), interim ? /* @__PURE__ */ React.createElement("div", { style: {
+    } })), /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "#ddd", fontSize: 13, marginBottom: 2, fontWeight: 500 } }, statusText, retryCountdown > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: "#FF9800", marginLeft: 8 } }, retryCountdown, "\uCD08 \uD6C4 \uC7AC\uC2DC\uB3C4")), /* @__PURE__ */ React.createElement(MicLevelBar, { phase, active: !!interim, autoListen }), interim ? /* @__PURE__ */ React.createElement("div", { style: {
       margin: "4px 16px",
       padding: "8px 12px",
       background: "rgba(255,255,255,0.06)",
@@ -9723,7 +9723,21 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         @keyframes jsOrbSpeak  { 0%{transform:scale(1.0)} 30%{transform:scale(1.18)} 60%{transform:scale(1.05)} 100%{transform:scale(1.0)} }
         @keyframes jsOrbSpin   { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
         @keyframes jsOrbIdle   { 0%{opacity:0.7} 50%{opacity:1} 100%{opacity:0.7} }
+        /* \u2605 v131: \uB9C8\uC774\uD06C \uC0C1\uD0DC \uB9C9\uB300(\uC774\uD004\uB77C\uC774\uC800) \u2014 \uB4E3\uB294 \uC911\uC5D4 \uD06C\uAC8C, \uB300\uAE30 \uC911\uC5D4 \uC794\uC794\uD558\uAC8C \uC6C0\uC9C1\uC5EC '\uC9C0\uAE08 \uB9D0\uD560 \uCC28\uB840'\uB97C \uB208\uC73C\uB85C \uC54C\uB9BC */
+        @keyframes jsEqActive { 0%{height:18%} 25%{height:95%} 50%{height:40%} 75%{height:80%} 100%{height:18%} }
+        @keyframes jsEqCalm   { 0%{height:22%} 50%{height:48%} 100%{height:22%} }
       `));
+}
+function MicLevelBar({ phase, active, autoListen }) {
+  const listening = phase === "listening";
+  const speaking = phase === "speaking";
+  if (!listening && !speaking) return null;
+  const color = listening ? active ? "#4CAF50" : "#7fd1a0" : "#2196F3";
+  const anim = listening ? active ? "jsEqActive" : "jsEqCalm" : "jsEqCalm";
+  const dur = listening ? active ? 0.5 : 1.1 : 1.4;
+  const opacity = speaking ? 0.5 : 1;
+  const bars = [0, 0.12, 0.24, 0.36, 0.48, 0.36, 0.24, 0.12, 0];
+  return /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: 3, height: 26, margin: "2px 0 4px", opacity } }, bars.map((delay, i) => /* @__PURE__ */ React.createElement("span", { key: i, style: { width: 4, height: "100%", display: "flex", alignItems: "center" } }, /* @__PURE__ */ React.createElement("span", { style: { width: "100%", height: "40%", borderRadius: 3, background: color, animation: `${anim} ${dur}s ease-in-out ${delay}s infinite` } }))));
 }
 function JarvisButton({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onAppCommand, subscriptions, openBundlePlanner, openPersonPicker, openBulkModeChoice, closeOrderPickers, onSetOrderMemo }) {
   const [sheetOpen, setSheetOpen] = React.useState(false);
