@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 131;
+const APP_VERSION = 132;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 const STATUS = {
@@ -1776,7 +1776,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v131 (07-18 \uB9C8\uC774\uD06C \uC0C1\uD0DC\uB9C9\uB300\xB74\uC0C1\uD0DC \uD45C\uC2DC \u2014 \uC5B8\uC81C \uB9D0\uD560\uC9C0\xB7\uB07C\uC5B4\uB4E4\uAE30 \uAC00\uB2A5 \uD45C\uC2DC)";
+const APP_BUILD = "v132 (07-18 \u2460 \uC644\uACB0\uB41C \uC8FC\uBB38\uC740 \uC989\uC2DC \uBC18\uC751 \u2014 \uB300\uD654 \uD140 \uB2E8\uCD95)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -7510,6 +7510,27 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     if (/^(응|네|예|그래|맞아|맞아요|맞습니다|좋아|오케이|오케|아니|아니요|아니야)$/.test(t)) return true;
     return false;
   }
+  function orderUtteranceLooksComplete(buf) {
+    const t = (buf || "").replace(/\s/g, "");
+    if (t.length < 3) return false;
+    const hasQty = /(\d+|한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\s*(개|박스|봉|팩|근|망|줄|판|kg|킬로|키로|그램|g)/.test(buf) || /(한개|두개|세개|네개|다섯개|하나|둘|셋|넷)/.test(t);
+    let hasProd = false;
+    try {
+      hasProd = (products || []).some((p) => {
+        if (!p || !p.name) return false;
+        const full = p.name.replace(/\s/g, "");
+        const core = full.replace(/\d+(kg|킬로|키로|g|그램)?/gi, "");
+        return t.includes(full) || core.length >= 2 && t.includes(core);
+      }) || typeof canonicalizeSpoken === "function" && !!canonicalizeSpoken(t);
+    } catch (e) {
+    }
+    let hasName = false;
+    try {
+      hasName = typeof findKnownNameIn === "function" && !!findKnownNameIn(buf, customers, vendors, products) || typeof detectBranchTermForOrder === "function" && !!detectBranchTermForOrder(buf, vendors, customers);
+    } catch (e) {
+    }
+    return hasProd && hasQty || hasName && hasProd;
+  }
   function collectSpeech(text) {
     accumBufRef.current = (accumBufRef.current ? accumBufRef.current + " " : "") + text;
     const buf = accumBufRef.current.trim();
@@ -7518,10 +7539,11 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       flushCollected();
       return;
     }
+    const wait = orderUtteranceLooksComplete(buf) ? 700 : ACCUM_MS;
     clearTimeout(accumTimerRef.current);
     accumTimerRef.current = setTimeout(() => {
       flushCollected();
-    }, ACCUM_MS);
+    }, wait);
     setPhaseSync("listening");
     setTimeout(() => {
       if (activeRef.current && phaseRef.current === "listening") beginListening();
