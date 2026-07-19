@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 133;
+const APP_VERSION = 137;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 const STATUS = {
@@ -1776,7 +1776,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v133 (07-18 \uC870\uD68C \uC624\uC778\uC2DD \uC218\uC815 \u2014 \uC8FC\uBB38 \uC788\uC5B4/\uC5C6\uB098/\uCC3E\uC544\uC918\uB97C \uC870\uD68C\uB85C \uCC98\uB9AC)";
+const APP_BUILD = "v137 (07-18 \uB300\uD654\uCC3D \uBC00\uC5B4\uC62C\uB824 \uD06C\uAC8C\xB7\uD55C\uBC88 \uB354 \uC804\uCCB4\uD654\uBA74 \u2014 \uB4DC\uB798\uADF8 \uC2A4\uB0C5)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -7355,6 +7355,8 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   var _a, _b;
   const [phase, setPhase] = React.useState("idle");
   const [interim, setInterim] = React.useState("");
+  const [thinkHint, setThinkHint] = React.useState("");
+  const [dragging, setDragging] = React.useState(false);
   const [lastUser, setLastUser] = React.useState("");
   const [lastAI, setLastAI] = React.useState("\uC548\uB155\uD558\uC138\uC694! \uC800\uB294 \uC870\uBE44\uC11C\uC608\uC694. \uAD81\uAE08\uD55C \uAC83\uC744 \uB9D0\uC500\uD574 \uBCF4\uC138\uC694.");
   const [history, setHistory] = React.useState([]);
@@ -7386,13 +7388,56 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   const silenceCountRef = React.useRef(0);
   const wantListenCueRef = React.useRef(false);
   const pendingBulkChoiceRef = React.useRef(null);
+  const thinkFillerTimerRef = React.useRef(null);
+  const thinkReasonRef = React.useRef("think");
+  const fillerIdxRef = React.useRef(0);
   const accumBufRef = React.useRef("");
   const accumTimerRef = React.useRef(null);
   const speakTextRef = React.useRef("");
   const bargeRecRef = React.useRef(null);
-  function setPhaseSync(p) {
+  function speakFillerNow(reason) {
+    const banks = {
+      data: ["\uC7A0\uAE50, \uB370\uC774\uD130 \uC880 \uCC3E\uC544\uBCFC\uAC8C\uC694.", "\uC7A0\uC2DC\uB9CC\uC694, \uD655\uC778\uD574 \uBCFC\uAC8C\uC694.", "\uB124, \uCC3E\uC544\uBCF4\uACE0 \uC788\uC5B4\uC694."],
+      order: ["\uC7A0\uAE50\uB9CC\uC694, \uC8FC\uBB38 \uC815\uB9AC\uD574 \uBCFC\uAC8C\uC694.", "\uB124, \uD655\uC778\uD558\uACE0 \uC788\uC5B4\uC694.", "\uC7A0\uC2DC\uB9CC\uC694, \uC815\uB9AC \uC911\uC774\uC5D0\uC694."],
+      think: ["\uC74C, \uC7A0\uC2DC\uB9CC\uC694.", "\uC7A0\uAE50 \uC0DD\uAC01 \uC880 \uD574 \uBCFC\uAC8C\uC694.", "\uB124, \uC7A0\uC2DC\uB9CC\uC694."]
+    };
+    const arr = banks[reason] || banks.think;
+    const msg = arr[fillerIdxRef.current % arr.length];
+    fillerIdxRef.current++;
+    try {
+      setThinkHint(msg);
+    } catch (e) {
+    }
+    try {
+      if (window.speechSynthesis) {
+        const u = new SpeechSynthesisUtterance(msg);
+        u.lang = "ko-KR";
+        u.rate = 1.06;
+        u.volume = 0.9;
+        window.speechSynthesis.speak(u);
+      }
+    } catch (e) {
+    }
+  }
+  function armThinkingFiller(reason) {
+    clearTimeout(thinkFillerTimerRef.current);
+    thinkFillerTimerRef.current = setTimeout(() => {
+      if (phaseRef.current === "thinking") speakFillerNow(reason);
+    }, 800);
+  }
+  function setPhaseSync(p, reason) {
     phaseRef.current = p;
     setPhase(p);
+    if (p === "thinking") {
+      thinkReasonRef.current = reason || "think";
+      armThinkingFiller(thinkReasonRef.current);
+    } else {
+      clearTimeout(thinkFillerTimerRef.current);
+      try {
+        setThinkHint("");
+      } catch (e) {
+      }
+    }
   }
   React.useEffect(() => {
     autoListenRef.current = autoListen;
@@ -7935,10 +7980,34 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     }
     return null;
   }
+  function looksLikeQueryUtterance(text) {
+    const t = (text || "").replace(/\s/g, "");
+    return /(있어|있나|있냐|있니|있는지|있을까|있을까요|있나요|있는가|없어|없나|없냐|없니|없는지|없을까|없나요|찾아|찾자|찾아줘|찾아봐|찾아주|알려|보여|조회|얼마|몇개|몇건|몇명|몇박스|목록|리스트|현황|내역|정보|어디|상태|언제|왔나|왔어|됐나|됐어|들어왔|들어온|발송|배송|미발송|안보냈|안왔)/.test(t);
+  }
+  function hasOrderActionVerb(text) {
+    const t = (text || "").replace(/\s/g, "");
+    return /주문(을|를)?(등록|접수|받아|받을|받자|작성|넣어|만들|하려|할게|하자|해줘|하겠|넣을)|음성주문|음성으로주문|주문받아줘|주문접수|새주문|주문등록|주문추가|주문넣|주문작성/.test(t) || /(등록해|접수해|넣어줘|작성해|추가해|주문할게|주문하자|주문해줘)/.test(t);
+  }
+  function utteranceHasProductOrQty(text) {
+    const t = (text || "").replace(/\s/g, "");
+    const hasQty = /(\d+|한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\s*(개|박스|봉|팩|근|망|줄|판|kg|킬로|키로|그램|g)/.test(text) || /(한개|두개|세개|네개|다섯개|하나|둘|셋|넷)/.test(t);
+    let hasProd = false;
+    try {
+      hasProd = (products || []).some((p) => {
+        if (!p || !p.name) return false;
+        const full = p.name.replace(/\s/g, "");
+        const core = full.replace(/\d+(kg|킬로|키로|g|그램)?/gi, "");
+        return t.includes(full) || core.length >= 2 && t.includes(core);
+      }) || typeof canonicalizeSpoken === "function" && !!canonicalizeSpoken(t);
+    } catch (e) {
+    }
+    return hasQty || hasProd;
+  }
   function detectVoiceOrderIntent(text) {
     const t = (text || "").replace(/\s/g, "");
-    if (/주문(을|를)?(등록|접수|받아|받을|받자|작성|넣어|만들|하려|할게|하자|해줘|하겠|넣을)|음성주문|음성으로주문|주문받아줘|주문접수/.test(t)) return true;
-    if (/주문/.test(t) && !/보여|알려|정보|조회|내역|현황|몇|건|어디|얼마|상태|목록|리스트|검색|취소|화면|열어|불러|폼|입력창|수정|고쳐|고칠|고치|바꿔|바꾸|변경|편집|삭제|빼|묶음|박스|통계|매출|정산|합계|들어왔|들어온|확인|발송됐|발송했|발송됐나|보냈|배송됐|배송중|왔나|왔어|됐나|됐어|있어|있나|있는|있냐|있니|없어|없나|없는|없냐|없니|찾아|찾자|찾아줘|찾아봐|찾아주|알려줘/.test(t)) return true;
+    if (looksLikeQueryUtterance(text) && !hasOrderActionVerb(text)) return false;
+    if (hasOrderActionVerb(text)) return true;
+    if (/주문/.test(t)) return utteranceHasProductOrQty(text);
     if (/저번처럼|지난번처럼|늘하던|평소처럼|하던대로/.test(t) && findKnownNameIn(text, customers, vendors, products)) return true;
     return false;
   }
@@ -8378,7 +8447,9 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         say("\uC815\uBCF4\uAC00 \uBD80\uC871\uD574 \uB4F1\uB85D\uC744 \uBABB \uD588\uC5B4\uC694. \uACE0\uAC1D\uACFC \uC0C1\uD488\uC744 \uB2E4\uC2DC \uB9D0\uC500\uD574 \uC8FC\uC138\uC694.");
       }
     };
-    if (/그만|관둬|중단|하지마|안할래|주문취소|취소할|다취소|취소해/.test(t) || /취소/.test(t) && !hasProd) {
+    const _hasQtyWordC = /(\d+|한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\s*(개|박스|봉|팩|근|망|줄|판|kg|킬로|키로|그램|g)/.test(text) || /(한개|두개|세개|네개|다섯개|여섯개|일곱개|여덟개|아홉개|열개|하나|둘|셋|넷)/.test(t);
+    const _clearFullCancel = /(그만|관둬|관두|중단|하지마|안할래|전체취소|전부취소|모두취소|다취소|주문취소|주문전체|취소할래|취소해줘|취소해$|취소$)/.test(t);
+    if (_clearFullCancel && !_hasQtyWordC || /취소/.test(t) && !hasProd && !_hasQtyWordC) {
       orderModeRef.current = false;
       orderDraftRef.current = null;
       pendingBulkChoiceRef.current = null;
@@ -8683,9 +8754,9 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         }
       }
     }
-    if (/(빼|삭제|제외|없애|지워|빼고|빼줘|빼주)/.test(t) && (cur.items || []).length) {
-      const clearAll = /(전부|전체|모두|모조리|싹다|다빼|다삭제|전부삭제|모두삭제|전부빼|모두빼|다지워|전체삭제|전체빼)/.test(t);
-      const stripRm = (s) => s.replace(/(빼주세요|빼줘|빼주|빼고|빼기|빼|삭제해줘|삭제해|삭제|제외해줘|제외해|제외|없애줘|없애|지워줘|지워)/g, "").replace(/(모든|모두|전부|전체|모조리|싹|좀|주문|상품|그거|이거|저거|그것|이것|저것|것|거)/g, "").replace(new RegExp("(\\d+|\uD55C|\uB450|\uC138|\uB124|\uB2E4\uC12F|\uC5EC\uC12F|\uC77C\uACF1|\uC5EC\uB35F|\uC544\uD649|\uC5F4)\\s*(?:" + COUNT_UNIT + ")", "g"), "").replace(/\d+개/g, "");
+    if (/(빼|삭제|제외|없애|지워|빼고|빼줘|빼주|취소)/.test(t) && (cur.items || []).length) {
+      const clearAll = /(전부|전체|모두|모조리|싹다|다빼|다삭제|전부삭제|모두삭제|전부빼|모두빼|다지워|전체삭제|전체빼|전부취소|전체취소|모두취소)/.test(t);
+      const stripRm = (s) => s.replace(/(빼주세요|빼줘|빼주|빼고|빼기|빼|삭제해줘|삭제해|삭제|제외해줘|제외해|제외|없애줘|없애|지워줘|지워|취소해줘|취소해|취소)/g, "").replace(/(모든|모두|전부|전체|모조리|싹|좀|주문|상품|그거|이거|저거|그것|이것|저것|것|거)/g, "").replace(new RegExp("(\\d+|\uD55C|\uB450|\uC138|\uB124|\uB2E4\uC12F|\uC5EC\uC12F|\uC77C\uACF1|\uC5EC\uB35F|\uC544\uD649|\uC5F4)\\s*(?:" + COUNT_UNIT + ")", "g"), "").replace(/\d+개/g, "");
       const coreOf = (s) => String(s || "").replace(new RegExp(WEIGHT_RE, "g"), "").replace(/[\s\d]/g, "").trim();
       const spokenCore = coreOf(stripRm(t));
       let kept, removed = [];
@@ -8695,10 +8766,17 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       } else if (spokenCore) {
         kept = cur.items.filter((it) => {
           const c = coreOf(it.name);
-          const hit = !!c && (c.includes(spokenCore) || spokenCore.includes(c));
+          const hit = !!c && (c.includes(spokenCore) || spokenCore.includes(c) || typeof simJamo === "function" && spokenCore.length >= 2 && c.length >= 2 && simJamo(c, spokenCore) >= 0.6);
           if (hit) removed.push(it);
           return !hit;
         });
+        if (!removed.length && cur.items.length === 1) {
+          removed = cur.items.slice();
+          kept = [];
+        }
+      } else if (/취소/.test(t) && cur.items.length === 1) {
+        removed = cur.items.slice();
+        kept = [];
       } else {
         say(`\uBB34\uC5C7\uC744 \uBE84\uAE4C\uC694? \uD604\uC7AC ${cur.items.map((i) => i.name).join(", ")} \uC788\uC5B4\uC694. \uC608: "\uCC44\uC18C \uBE7C\uC918" \uB610\uB294 "\uC804\uBD80 \uBE7C\uC918".`);
         return;
@@ -8856,7 +8934,27 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       say(`\uC5B4\uB5BB\uAC8C \uBB36\uC744\uAE4C\uC694? "\uC790\uB3D9\uC73C\uB85C \uB098\uB220\uC918"(\uADDC\uCE59\uB300\uB85C ${autoBoxes.length}\uBC15\uC2A4), "\uC804\uBD80 \uD55C \uBC15\uC2A4", "\uB530\uB85C\uB530\uB85C"(\uB0B1\uAC1C 1\uAC1C\uC529), \uB610\uB294 "\u25CB\u25CB\uB791 \u25CB\u25CB \uD55C \uBC15\uC2A4"\uCC98\uB7FC \uB9D0\uC500\uD558\uC138\uC694.`);
       return;
     }
-    setPhaseSync("thinking");
+    if ((cur.items || []).length) {
+      const raw = String(text || "").trim();
+      const nQty = parseCount(raw.replace(/\s/g, ""));
+      if (nQty != null) {
+        const rest = raw.replace(new RegExp("(\\d+|\uD55C|\uB450|\uC138|\uB124|\uB2E4\uC12F|\uC5EC\uC12F|\uC77C\uACF1|\uC5EC\uB35F|\uC544\uD649|\uC5F4|\uC2A4\uBB34|\uC2A4\uBB3C)\\s*(?:" + COUNT_UNIT + ")", "g"), "").replace(new RegExp(WEIGHT_RE, "g"), "").replace(/[0-9]+/g, "").replace(/(개|으로|로|씩|해줘|줘|주세요|해주세요|해|하자|맞아|그걸로|그거로|그거|이거|이걸로|바꿔|바꿔줘|변경|수정|만|는|은|이|가|를|을|요)/g, "").replace(/\s/g, "");
+        if (rest.length === 0) {
+          let idx = cur.lastItemKey ? cur.items.findIndex((it) => (it.productId || it.name) === cur.lastItemKey) : -1;
+          if (idx < 0) idx = cur.items.length - 1;
+          cur.items[idx].qty = nQty;
+          cur.lastItemKey = cur.items[idx].productId || cur.items[idx].name;
+          cur.boxPlan = null;
+          cur.boxMode = null;
+          cur.awaitingBundle = false;
+          cur.bundleAsked = false;
+          orderDraftRef.current = cur;
+          say(`${cur.items[idx].name} ${nQty}\uAC1C\uB85C \uBC14\uAFE8\uC5B4\uC694. ${orderNextPrompt(cur)}`);
+          return;
+        }
+      }
+    }
+    setPhaseSync("thinking", "order");
     let draft = null;
     try {
       const aiIn = { name: cur.name || "", items: (cur.items || []).map((i) => ({ name: i.name, qty: i.qty })), reserveDate: cur.reserveDate || "", deliveryMessage: cur.deliveryMessage || "" };
@@ -9062,7 +9160,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     };
     {
       const _qt = String(text || "").replace(/\s/g, "");
-      const _strongQuery = /(들어왔|들어온|들온|발송됐|발송했나|발송했어|발송됐나|배송됐|배송중|보냈나|보냈어|주문있나|주문없|주문이없|조회|현황|어떻게됐|있어|있나|있는|없어|없나|없는|목록|리스트|찾아|찾아줘|찾아봐|얼마|몇건|몇개|몇명)/.test(_qt);
+      const _strongQuery = /(들어왔|들어온|들온|발송됐|발송했나|발송했어|발송됐나|배송됐|배송중|보냈나|보냈어|주문있나|주문없|주문이없|조회|현황|어떻게됐|있어|있나|있냐|있는|있는지|있을까|있나요|없어|없나|없는|없는지|없을까|없나요|목록|리스트|찾아|찾아줘|찾아봐|찾아주|얼마|몇건|몇개|몇명)/.test(_qt);
       let _qName = typeof findKnownName === "function" ? findKnownName(text) : "";
       if (!_qName && typeof detectBranchTermForOrder === "function") {
         try {
@@ -9193,7 +9291,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       }
       const _isChat = _intent === "\uC77C\uBC18\uB300\uD654" || _intent === "help" || _intent === "unknown";
       if (_isChat) {
-        setPhaseSync("thinking");
+        setPhaseSync("thinking", "think");
         const nh = [...historyRef.current, { role: "user", parts: [{ text }] }];
         let r = null;
         if (typeof puterAvailable === "function" && puterAvailable()) {
@@ -9245,7 +9343,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       speakThenListen(msg);
       return;
     }
-    setPhaseSync("thinking");
+    setPhaseSync("thinking", "think");
     const _gk = geminiKey || (typeof localStorage !== "undefined" && localStorage.getItem("joassam_gemini_key_v1") || "");
     if (!_gk) {
       processingRef.current = false;
@@ -9451,21 +9549,36 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       subsCount: (subscriptions || []).length
     };
   }
+  const SHEET_MID = 52, SHEET_FULL = 94;
   function onDragStart(e) {
     dragStartY.current = e.touches ? e.touches[0].clientY : e.clientY;
-    const cur = parseFloat(sheetH) || 55;
-    dragStartH.current = cur;
+    dragStartH.current = minimized ? 9 : parseFloat(sheetH) || SHEET_MID;
+    setDragging(true);
   }
   function onDragMove(e) {
     if (dragStartY.current === null) return;
     const y = e.touches ? e.touches[0].clientY : e.clientY;
     const dy = dragStartY.current - y;
     const vh = window.innerHeight / 100;
-    const newH = Math.min(70, Math.max(28, dragStartH.current + dy / vh));
-    setSheetH(newH + "vh");
+    const newH = Math.min(SHEET_FULL, Math.max(9, dragStartH.current + dy / vh));
+    if (minimized && newH > 16) setMinimized(false);
+    if (!minimized || newH > 16) setSheetH(newH + "vh");
   }
   function onDragEnd() {
+    setDragging(false);
+    if (dragStartY.current === null) return;
     dragStartY.current = null;
+    const cur = parseFloat(sheetH) || SHEET_MID;
+    if (cur < 24) {
+      setMinimized(true);
+      setSheetH(SHEET_MID + "vh");
+    } else if (cur < (SHEET_MID + SHEET_FULL) / 2) {
+      setMinimized(false);
+      setSheetH(SHEET_MID + "vh");
+    } else {
+      setMinimized(false);
+      setSheetH(SHEET_FULL + "vh");
+    }
   }
   const orbColor = phase === "listening" ? "#4CAF50" : phase === "thinking" ? "#FF9800" : phase === "speaking" ? "#2196F3" : retryCountdown > 0 ? "#FF9800" : "#3d7a54";
   const orbAnim = phase === "listening" ? "jsOrbListen 0.9s ease-in-out infinite" : phase === "thinking" ? "jsOrbSpin 1.0s linear infinite" : phase === "speaking" ? "jsOrbSpeak 0.4s ease-in-out infinite" : "jsOrbIdle 2s ease-in-out infinite";
@@ -9496,17 +9609,20 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         flexDirection: "column",
         pointerEvents: "auto",
         overflow: "hidden",
-        transition: "height 0.28s cubic-bezier(.4,0,.2,1)"
+        transition: dragging ? "none" : "height 0.28s cubic-bezier(.4,0,.2,1)"
       },
       onMouseMove: onDragMove,
       onMouseUp: onDragEnd,
+      onMouseLeave: onDragEnd,
       onTouchMove: onDragMove,
       onTouchEnd: onDragEnd
     },
     minimized ? /* @__PURE__ */ React.createElement(
       "div",
       {
-        style: { display: "flex", alignItems: "center", height: "100%", padding: "0 16px", gap: 10, cursor: "pointer" },
+        style: { display: "flex", alignItems: "center", height: "100%", padding: "0 16px", gap: 10, cursor: "grab", touchAction: "none" },
+        onMouseDown: onDragStart,
+        onTouchStart: onDragStart,
         onClick: () => {
           setMinimized(false);
           autoListenRef.current = true;
@@ -9548,12 +9664,23 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     ) : /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement(
       "div",
       {
-        style: { display: "flex", justifyContent: "center", padding: "10px 0 4px", cursor: "grab", touchAction: "none" },
+        style: { display: "flex", flexDirection: "column", alignItems: "center", padding: "12px 0 6px", cursor: "grab", touchAction: "none" },
         onMouseDown: onDragStart,
-        onTouchStart: onDragStart
+        onTouchStart: onDragStart,
+        title: "\uC704\uB85C \uBC00\uC5B4 \uD06C\uAC8C \xB7 \uD55C \uBC88 \uB354 \uBC00\uBA74 \uC804\uCCB4\uD654\uBA74"
       },
-      /* @__PURE__ */ React.createElement("div", { style: { width: 40, height: 4, borderRadius: 2, background: "rgba(255,255,255,0.4)" } })
-    ), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", padding: "2px 14px 4px", gap: 8 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 18, fontWeight: 700, color: "#fff", flex: 1 } }, "\u{1F916} \uC870\uBE44\uC11C AI ", /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10, fontWeight: 600, color: "#7fd1a0", verticalAlign: "middle" } }, APP_BUILD)), /* @__PURE__ */ React.createElement(
+      /* @__PURE__ */ React.createElement("div", { style: { width: 56, height: 5, borderRadius: 3, background: "rgba(255,255,255,0.5)" } }),
+      /* @__PURE__ */ React.createElement("div", { style: { fontSize: 9.5, color: "rgba(255,255,255,0.35)", marginTop: 3 } }, parseFloat(sheetH) >= SHEET_FULL - 2 ? "\u2193 \uB0B4\uB824\uC11C \uC904\uC774\uAE30" : "\u2191 \uBC00\uC5B4\uC11C \uD06C\uAC8C")
+    ), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", padding: "2px 14px 4px", gap: 8 } }, /* @__PURE__ */ React.createElement(
+      "span",
+      {
+        onMouseDown: onDragStart,
+        onTouchStart: onDragStart,
+        style: { fontSize: 18, fontWeight: 700, color: "#fff", flex: 1, cursor: "grab", touchAction: "none" }
+      },
+      "\u{1F916} \uC870\uBE44\uC11C AI ",
+      /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10, fontWeight: 600, color: "#7fd1a0", verticalAlign: "middle" } }, APP_BUILD)
+    ), /* @__PURE__ */ React.createElement(
       "button",
       {
         onClick: () => setMinimized(true),
@@ -9634,7 +9761,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       boxShadow: `0 0 12px ${orbColor}cc, 0 0 24px ${orbColor}55, inset 0 0 10px rgba(255,255,255,0.15)`,
       animation: orbAnim,
       transition: "background 0.4s, box-shadow 0.4s"
-    } })), /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "#ddd", fontSize: 13, marginBottom: 2, fontWeight: 500 } }, statusText, retryCountdown > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: "#FF9800", marginLeft: 8 } }, retryCountdown, "\uCD08 \uD6C4 \uC7AC\uC2DC\uB3C4")), /* @__PURE__ */ React.createElement(MicLevelBar, { phase, active: !!interim, autoListen }), interim ? /* @__PURE__ */ React.createElement("div", { style: {
+    } })), /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "#ddd", fontSize: 13, marginBottom: 2, fontWeight: 500 } }, statusText, retryCountdown > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: "#FF9800", marginLeft: 8 } }, retryCountdown, "\uCD08 \uD6C4 \uC7AC\uC2DC\uB3C4")), thinkHint && phase === "thinking" ? /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "#7fd1a0", fontSize: 12.5, marginBottom: 2, fontStyle: "italic" } }, "\u{1F4AC} ", thinkHint) : null, /* @__PURE__ */ React.createElement(MicLevelBar, { phase, active: !!interim, autoListen }), interim ? /* @__PURE__ */ React.createElement("div", { style: {
       margin: "4px 16px",
       padding: "8px 12px",
       background: "rgba(255,255,255,0.06)",
