@@ -35,7 +35,7 @@
 </head>
 <body>
   <h1>🎤 한국어 음성인식 테스트</h1>
-  <div class="sub">Moonshine(기기 내 무료 AI) 와 지금 방식(브라우저 구글) 을 같은 말로 비교합니다.</div>
+  <div class="sub">Moonshine(기기 내 무료 AI) 와 지금 방식(브라우저 구글) 을 같은 말로 비교합니다. <b style="color:#7fd1a0">테스트 v2</b></div>
 
   <div class="card">
     <div class="row" style="justify-content:space-between">
@@ -106,9 +106,8 @@
           }
         }
       };
-      // WebGPU 있으면 빠르게, 없으면 기본(WASM)
-      try { pipe = await pipeline('automatic-speech-recognition', id, { ...opts, device: navigator.gpu ? 'webgpu' : 'wasm' }); }
-      catch (e) { pipe = await pipeline('automatic-speech-recognition', id, opts); }  // 폴백
+      // ★ 휴대폰에서는 WASM이 가장 안정적 — WebGPU는 기기마다 인식 단계에서 실패할 수 있어 기본 WASM 사용
+      pipe = await pipeline('automatic-speech-recognition', id, { ...opts, device: 'wasm' });
       loadedModel = id;
       statusEl.textContent = '준비됨. 녹음 버튼을 누르고 말해보세요.';
       return pipe;
@@ -118,17 +117,20 @@
     } finally { loading = false; recBtn.disabled = false; barwrap.style.display = 'none'; }
   }
 
-  // 오디오 → 16kHz 모노 Float32 (Moonshine 입력용)
-  async function blobTo16kMono(blob) {
-    const arr = await blob.arrayBuffer();
-    const ac = new (window.AudioContext || window.webkitAudioContext)();
-    const decoded = await ac.decodeAudioData(arr);
-    const off = new OfflineAudioContext(1, Math.max(1, Math.ceil(decoded.duration * 16000)), 16000);
-    const src = off.createBufferSource(); src.buffer = decoded; src.connect(off.destination); src.start(0);
-    const rendered = await off.startRendering();
-    try { ac.close(); } catch (e) {}
-    return rendered.getChannelData(0);
+  // ★ 원본 마이크 샘플을 직접 모아 16kHz로 변환 (MediaRecorder/디코딩 없이 — 휴대폰에서 가장 안정적)
+  function resampleTo16k(float32, srcRate) {
+    if (srcRate === 16000) return float32;
+    const ratio = srcRate / 16000;
+    const outLen = Math.floor(float32.length / ratio);
+    const out = new Float32Array(outLen);
+    for (let i = 0; i < outLen; i++) {
+      const idx = i * ratio; const i0 = Math.floor(idx); const i1 = Math.min(i0 + 1, float32.length - 1);
+      const frac = idx - i0;
+      out[i] = float32[i0] * (1 - frac) + float32[i1] * frac;   // 선형 보간
+    }
+    return out;
   }
+  function rms(a) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * a[i]; return Math.sqrt(s / (a.length || 1)); }
 
   // 지금 방식(브라우저 구글) — 녹음과 동시에 병행 인식
   let nowRec = null, nowText = '';
@@ -152,46 +154,62 @@
     setTimeout(() => { outNow.textContent = nowText || '(못 알아들음)'; }, 300);
   }
 
-  // 녹음 (Moonshine용)
-  let mediaRec = null, chunks = [], stream = null, recording = false, t0 = 0;
+  // 녹음 (Moonshine용) — 원본 샘플 직접 수집
+  let stream = null, audioCtx = null, procNode = null, srcNode = null, buffers = [], srcRate = 48000, recording = false;
   async function startRec() {
     const p = await ensureModel(); if (!p) return;
-    try { stream = await navigator.mediaDevices.getUserMedia({ audio: { noiseSuppression:true, echoCancellation:true, autoGainControl:true } }); }
-    catch (e) { statusEl.textContent = '마이크를 못 열었어요(권한/보안 확인): ' + (e && e.message || e); return; }
-    chunks = [];
-    mediaRec = new MediaRecorder(stream);
-    mediaRec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
-    mediaRec.onstop = onStopRec;
-    mediaRec.start();
-    recording = true; t0 = Date.now();
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: { noiseSuppression:true, echoCancellation:true, autoGainControl:true, channelCount:1 } }); }
+    catch (e) { statusEl.textContent = '⚠ 마이크를 못 열었어요(권한/보안 확인): ' + (e && e.message || e); return; }
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') { try { await audioCtx.resume(); } catch (e) {} }
+      srcRate = audioCtx.sampleRate || 48000;
+      srcNode = audioCtx.createMediaStreamSource(stream);
+      procNode = audioCtx.createScriptProcessor(4096, 1, 1);
+      buffers = [];
+      procNode.onaudioprocess = (ev) => { const ch = ev.inputBuffer.getChannelData(0); buffers.push(new Float32Array(ch)); };
+      srcNode.connect(procNode); procNode.connect(audioCtx.destination);
+    } catch (e) { statusEl.textContent = '⚠ 오디오 시작 실패: ' + (e && e.message || e); return; }
+    recording = true;
     recBtn.classList.add('recording'); recBtn.textContent = '■ 정지 (다시 누르기)';
     statusEl.textContent = '🎤 녹음 중… 말씀하시고, 끝나면 정지를 누르세요.';
     outMoon.textContent = '…'; metaMoon.textContent = '';
     startNow();
   }
-  async function onStopRec() {
-    try { stream && stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+  async function processRecorded() {
     stopNow();
-    const blob = new Blob(chunks, { type: mediaRec.mimeType || 'audio/webm' });
+    // 수집한 조각들을 하나로 합치기
+    let total = 0; buffers.forEach(b => total += b.length);
+    const merged = new Float32Array(total); let off = 0;
+    buffers.forEach(b => { merged.set(b, off); off += b.length; });
+    const seconds = (merged.length / srcRate);
+    const level = rms(merged);
+    // 마이크가 소리를 못 잡았는지 먼저 확인 (진단)
+    if (merged.length < srcRate * 0.3) { outMoon.textContent = '(녹음이 너무 짧아요)'; metaMoon.textContent = `길이 ${seconds.toFixed(1)}초`; statusEl.textContent = '조금 더 길게 말해보세요.'; return; }
+    if (level < 0.003) { outMoon.textContent = '(마이크 소리가 거의 안 잡혔어요)'; metaMoon.textContent = `소리크기 ${level.toFixed(4)} · ${seconds.toFixed(1)}초 — 마이크 권한/음소거 확인`; statusEl.textContent = '마이크가 소리를 못 잡았어요.'; return; }
+    const audio16k = resampleTo16k(merged, srcRate);
     statusEl.textContent = 'Moonshine 인식 중…';
     try {
-      const audio = await blobTo16kMono(blob);
       const s = Date.now();
-      const out = await pipe(audio);
+      const out = await pipe(audio16k);
       const ms = Date.now() - s;
       const text = (out && (out.text || (Array.isArray(out) && out[0] && out[0].text))) || '';
       outMoon.textContent = text.trim() || '(못 알아들음)';
-      metaMoon.textContent = `처리 ${ms}ms · 모델 ${loadedModel.split('/')[1]}`;
+      metaMoon.textContent = `처리 ${ms}ms · ${seconds.toFixed(1)}초 · 소리 ${level.toFixed(3)} · ${loadedModel.split('/')[1]}`;
       statusEl.textContent = '완료. 다시 녹음해서 여러 번 비교해보세요.';
     } catch (e) {
       outMoon.textContent = '인식 실패';
-      metaMoon.textContent = String(e && e.message || e);
-      statusEl.textContent = '오류가 났어요. 다시 시도해보세요.';
+      metaMoon.textContent = '오류: ' + String(e && e.message || e);
+      statusEl.textContent = '인식 단계에서 오류가 났어요. 아래 회색 글씨(오류 내용)를 캡처해 보내주세요.';
     }
   }
   function stopRec() {
     recording = false; recBtn.classList.remove('recording'); recBtn.textContent = '● 녹음 시작 (누르고 말하기)';
-    try { mediaRec && mediaRec.state !== 'inactive' && mediaRec.stop(); } catch (e) {}
+    try { procNode && (procNode.onaudioprocess = null); } catch (e) {}
+    try { srcNode && srcNode.disconnect(); procNode && procNode.disconnect(); } catch (e) {}
+    try { stream && stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+    const doneCtx = () => { try { audioCtx && audioCtx.close(); } catch (e) {} audioCtx = null; };
+    processRecorded().finally(doneCtx);
   }
   recBtn.addEventListener('click', () => { if (recording) stopRec(); else startRec(); });
   modelSel.addEventListener('change', () => { pipe = null; loadedModel = null; statusEl.textContent = '모델을 바꿨어요. 녹음하면 새로 준비합니다.'; });
