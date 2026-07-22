@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 137;
+const APP_VERSION = 140;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 const STATUS = {
@@ -1776,7 +1776,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v137 (07-18 \uB300\uD654\uCC3D \uBC00\uC5B4\uC62C\uB824 \uD06C\uAC8C\xB7\uD55C\uBC88 \uB354 \uC804\uCCB4\uD654\uBA74 \u2014 \uB4DC\uB798\uADF8 \uC2A4\uB0C5)";
+const APP_BUILD = "v140 (07-22 \uC791\uC740 \uC544\uC774\uCF58\uC73C\uB85C \uC811\uAE30\xB7\uCE74\uD1A1 \uAC14\uB2E4 \uC640\uB3C4 \uB300\uD654 \uC774\uC5B4\uAC00\uAE30)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -7366,6 +7366,8 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   const [inp, setInp] = React.useState("");
   const [noteSaved, setNoteSaved] = React.useState(false);
   const [minimized, setMinimized] = React.useState(true);
+  const [iconOnly, setIconOnly] = React.useState(false);
+  const [awayReturn, setAwayReturn] = React.useState(false);
   const [autoListen, setAutoListen] = React.useState(false);
   const phaseRef = React.useRef("idle");
   const recRef = React.useRef(null);
@@ -7391,10 +7393,14 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   const thinkFillerTimerRef = React.useRef(null);
   const thinkReasonRef = React.useRef("think");
   const fillerIdxRef = React.useRef(0);
+  const chatScrollRef = React.useRef(null);
+  const stickBottomRef = React.useRef(true);
   const accumBufRef = React.useRef("");
   const accumTimerRef = React.useRef(null);
   const speakTextRef = React.useRef("");
   const bargeRecRef = React.useRef(null);
+  const wasAwayRef = React.useRef(false);
+  const prevSheetHRef = React.useRef("52vh");
   function speakFillerNow(reason) {
     const banks = {
       data: ["\uC7A0\uAE50, \uB370\uC774\uD130 \uC880 \uCC3E\uC544\uBCFC\uAC8C\uC694.", "\uC7A0\uC2DC\uB9CC\uC694, \uD655\uC778\uD574 \uBCFC\uAC8C\uC694.", "\uB124, \uCC3E\uC544\uBCF4\uACE0 \uC788\uC5B4\uC694."],
@@ -7496,6 +7502,66 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       clearInterval(countdownRef.current);
     };
   }, []);
+  function pauseVoiceKeepChat() {
+    try {
+      stopRec();
+    } catch (e) {
+    }
+    try {
+      window.speechSynthesis && window.speechSynthesis.cancel();
+    } catch (e) {
+    }
+    clearTimeout(ttsTimerRef.current);
+    clearTimeout(silenceTimerRef.current);
+    clearInterval(countdownRef.current);
+    if (phaseRef.current !== "idle") setPhaseSync("idle");
+  }
+  function collapseToIcon() {
+    if (!minimized) prevSheetHRef.current = sheetH;
+    pauseVoiceKeepChat();
+    setAwayReturn(false);
+    setIconOnly(true);
+  }
+  function restoreFromIcon() {
+    setIconOnly(false);
+    setAwayReturn(false);
+    setMinimized(false);
+    setSheetH(prevSheetHRef.current || "52vh");
+    if (!textMode) {
+      autoListenRef.current = true;
+      setAutoListen(true);
+      wantListenCueRef.current = true;
+      if (phaseRef.current === "idle") setTimeout(() => {
+        if (activeRef.current) beginListening();
+      }, 320);
+    }
+  }
+  function resumeAfterAway() {
+    setAwayReturn(false);
+    if (!textMode) {
+      autoListenRef.current = true;
+      setAutoListen(true);
+      wantListenCueRef.current = true;
+      if (phaseRef.current === "idle") setTimeout(() => {
+        if (activeRef.current) beginListening();
+      }, 300);
+    }
+  }
+  React.useEffect(() => {
+    function onVis() {
+      if (document.hidden) {
+        if (activeRef.current) {
+          pauseVoiceKeepChat();
+          wasAwayRef.current = true;
+        }
+      } else if (wasAwayRef.current) {
+        wasAwayRef.current = false;
+        if (activeRef.current && !textMode) setAwayReturn(true);
+      }
+    }
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [textMode]);
   function dedupCascade(s) {
     if (!s) return "";
     let t = s.replace(/\s+/g, " ").trim();
@@ -9590,7 +9656,52 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     bottom: 0,
     zIndex: 2999,
     pointerEvents: "none"
-  } }, /* @__PURE__ */ React.createElement(
+  } }, iconOnly && /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      onClick: restoreFromIcon,
+      title: "\uD0ED\uD558\uBA74 \uC870\uBE44\uC11C \uB300\uD654\uAC00 \uC774\uC5B4\uC9D1\uB2C8\uB2E4",
+      style: {
+        position: "absolute",
+        right: 16,
+        bottom: 96,
+        zIndex: 3001,
+        width: 62,
+        height: 62,
+        borderRadius: "50%",
+        border: "none",
+        cursor: "pointer",
+        background: "linear-gradient(160deg,#1a1a2e,#16213e)",
+        boxShadow: `0 4px 18px rgba(0,0,0,0.45), 0 0 0 2px rgba(47,111,78,0.6)`,
+        pointerEvents: "auto",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 0
+      }
+    },
+    /* @__PURE__ */ React.createElement("span", { style: {
+      width: 26,
+      height: 26,
+      borderRadius: "50%",
+      background: orbColor,
+      boxShadow: `0 0 14px ${orbColor}`,
+      display: "block",
+      animation: awayReturn ? "jsOrbListen 0.9s ease-in-out infinite" : orbAnim
+    } }),
+    awayReturn && /* @__PURE__ */ React.createElement("span", { style: {
+      position: "absolute",
+      top: 6,
+      right: 6,
+      width: 12,
+      height: 12,
+      borderRadius: "50%",
+      background: "#ff5252",
+      boxShadow: "0 0 8px #ff5252",
+      border: "2px solid #16213e"
+    } }),
+    /* @__PURE__ */ React.createElement("span", { style: { position: "absolute", bottom: -2, fontSize: 8.5, color: "#7fd1a0", fontWeight: 700 } }, "\uC870\uBE44\uC11C")
+  ), /* @__PURE__ */ React.createElement(
     "div",
     {
       style: {
@@ -9605,7 +9716,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         boxShadow: "0 -4px 30px rgba(0,0,0,0.5)",
         borderTop: "2px solid rgba(47,111,78,0.6)",
         /* ★ UI6: 앱 초록 포인트 */
-        display: "flex",
+        display: iconOnly ? "none" : "flex",
         flexDirection: "column",
         pointerEvents: "auto",
         overflow: "hidden",
@@ -9620,11 +9731,21 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     minimized ? /* @__PURE__ */ React.createElement(
       "div",
       {
-        style: { display: "flex", alignItems: "center", height: "100%", padding: "0 16px", gap: 10, cursor: "grab", touchAction: "none" },
+        style: {
+          display: "flex",
+          alignItems: "center",
+          height: "100%",
+          padding: "0 12px",
+          gap: 8,
+          cursor: "grab",
+          touchAction: "none",
+          background: awayReturn ? "rgba(255,82,82,0.10)" : "transparent"
+        },
         onMouseDown: onDragStart,
         onTouchStart: onDragStart,
         onClick: () => {
           setMinimized(false);
+          setAwayReturn(false);
           autoListenRef.current = true;
           setAutoListen(true);
           wantListenCueRef.current = true;
@@ -9642,7 +9763,19 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         boxShadow: `0 0 14px ${orbColor}`,
         animation: orbAnim
       } }),
-      /* @__PURE__ */ React.createElement("div", { style: { flex: 1, minWidth: 0 } }, /* @__PURE__ */ React.createElement("div", { style: { color: "#fff", fontSize: 14, fontWeight: 700, lineHeight: 1.2 } }, "\u{1F916} \uC870\uBE44\uC11C AI"), /* @__PURE__ */ React.createElement("div", { style: { color: "#aaa", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 1 } }, statusText, interim ? '\xA0"' + interim.slice(0, 20) + (interim.length > 20 ? "\u2026" : "") + '"' : "")),
+      /* @__PURE__ */ React.createElement("div", { style: { flex: 1, minWidth: 0 } }, /* @__PURE__ */ React.createElement("div", { style: { color: "#fff", fontSize: 14, fontWeight: 700, lineHeight: 1.2 } }, "\u{1F916} \uC870\uBE44\uC11C AI"), /* @__PURE__ */ React.createElement("div", { style: { color: awayReturn ? "#ffb3b3" : "#aaa", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginTop: 1 } }, awayReturn ? "\u{1F514} \uB3CC\uC544\uC624\uC168\uB124\uC694 \u2014 \uD0ED\uD558\uBA74 \uC774\uC5B4\uC11C \uB300\uD654\uD574\uC694" : statusText, !awayReturn && interim ? ' "' + interim.slice(0, 20) + (interim.length > 20 ? "\u2026" : "") + '"' : "")),
+      /* @__PURE__ */ React.createElement(
+        "button",
+        {
+          onClick: (e) => {
+            e.stopPropagation();
+            collapseToIcon();
+          },
+          title: "\uC544\uC774\uCF58\uC73C\uB85C \uC811\uAE30 \u2014 \uCE74\uD1A1\xB7\uBB38\uC790 \uD655\uC778 \uD6C4 \uC544\uC774\uCF58\uC744 \uD0ED\uD558\uBA74 \uB300\uD654\uAC00 \uC774\uC5B4\uC9D1\uB2C8\uB2E4",
+          style: { background: "rgba(255,255,255,0.08)", border: "none", borderRadius: 8, color: "#88cc88", padding: "4px 9px", cursor: "pointer", fontSize: 13, flexShrink: 0 }
+        },
+        "\u2299"
+      ),
       /* @__PURE__ */ React.createElement("span", { style: { color: "#88cc88", fontSize: 18, flexShrink: 0 } }, "\u25B2"),
       /* @__PURE__ */ React.createElement(
         "button",
@@ -9693,9 +9826,25 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
           cursor: "pointer",
           fontSize: 13
         },
-        title: "\uC811\uAE30"
+        title: "\uBBF8\uB2C8\uBC14\uB85C \uC811\uAE30"
       },
       "\u25BC"
+    ), /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        onClick: collapseToIcon,
+        style: {
+          background: "rgba(255,255,255,0.08)",
+          border: "none",
+          borderRadius: 8,
+          color: "#88cc88",
+          padding: "4px 10px",
+          cursor: "pointer",
+          fontSize: 13
+        },
+        title: "\uC544\uC774\uCF58\uC73C\uB85C \uC811\uAE30 \u2014 \uCE74\uD1A1\xB7\uBB38\uC790 \uD655\uC778 \uD6C4 \uC544\uC774\uCF58\uC744 \uD0ED\uD558\uBA74 \uB300\uD654\uAC00 \uC774\uC5B4\uC9D1\uB2C8\uB2E4"
+      },
+      "\u2299"
     ), /* @__PURE__ */ React.createElement("button", { onClick: () => {
       const goingText = !textMode;
       if (goingText) {
@@ -9761,7 +9910,25 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       boxShadow: `0 0 12px ${orbColor}cc, 0 0 24px ${orbColor}55, inset 0 0 10px rgba(255,255,255,0.15)`,
       animation: orbAnim,
       transition: "background 0.4s, box-shadow 0.4s"
-    } })), /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "#ddd", fontSize: 13, marginBottom: 2, fontWeight: 500 } }, statusText, retryCountdown > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: "#FF9800", marginLeft: 8 } }, retryCountdown, "\uCD08 \uD6C4 \uC7AC\uC2DC\uB3C4")), thinkHint && phase === "thinking" ? /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "#7fd1a0", fontSize: 12.5, marginBottom: 2, fontStyle: "italic" } }, "\u{1F4AC} ", thinkHint) : null, /* @__PURE__ */ React.createElement(MicLevelBar, { phase, active: !!interim, autoListen }), interim ? /* @__PURE__ */ React.createElement("div", { style: {
+    } })), /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "#ddd", fontSize: 13, marginBottom: 2, fontWeight: 500 } }, statusText, retryCountdown > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: "#FF9800", marginLeft: 8 } }, retryCountdown, "\uCD08 \uD6C4 \uC7AC\uC2DC\uB3C4")), thinkHint && phase === "thinking" ? /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "#7fd1a0", fontSize: 12.5, marginBottom: 2, fontStyle: "italic" } }, "\u{1F4AC} ", thinkHint) : null, awayReturn ? /* @__PURE__ */ React.createElement(
+      "div",
+      {
+        onClick: resumeAfterAway,
+        style: {
+          margin: "4px 14px 6px",
+          padding: "9px 12px",
+          borderRadius: 10,
+          cursor: "pointer",
+          background: "rgba(255,82,82,0.15)",
+          border: "1px solid rgba(255,82,82,0.5)",
+          color: "#ffb3b3",
+          fontSize: 13,
+          fontWeight: 700,
+          textAlign: "center"
+        }
+      },
+      "\u{1F514} \uB3CC\uC544\uC624\uC168\uB124\uC694 \u2014 \uC5EC\uAE30\uB97C \uB20C\uB7EC \uC774\uC5B4\uC11C \uB300\uD654\uD558\uAE30"
+    ) : null, /* @__PURE__ */ React.createElement(MicLevelBar, { phase, active: !!interim, autoListen }), interim ? /* @__PURE__ */ React.createElement("div", { style: {
       margin: "4px 16px",
       padding: "8px 12px",
       background: "rgba(255,255,255,0.06)",
@@ -9770,23 +9937,49 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       fontSize: 14,
       fontStyle: "italic",
       minHeight: 32
-    } }, interim) : null, /* @__PURE__ */ React.createElement("div", { style: { flex: 1, overflowY: "auto", padding: "8px 16px", display: "flex", flexDirection: "column", gap: 8 } }, history.length === 0 && !lastAI ? /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "rgba(255,255,255,0.3)", fontSize: 13, marginTop: 16 } }, "\uB300\uD654\uB97C \uC2DC\uC791\uD574\uBCF4\uC138\uC694 \u{1F3A4}") : null, history.slice(-10).map((msg, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: {
-      alignSelf: msg.role === "user" ? "flex-end" : "flex-start",
-      background: msg.role === "user" ? "rgba(33,150,243,0.25)" : "rgba(76,175,80,0.18)",
-      borderRadius: msg.role === "user" ? "14px 14px 4px 14px" : "14px 14px 14px 4px",
-      padding: "8px 12px",
-      color: msg.role === "user" ? "#e0f2fe" : "#e8f5e9",
-      fontSize: 14,
-      maxWidth: "85%"
-    } }, msg.role === "user" ? "\u{1F464} " : "\u{1F916} ", msg.parts[0].text)), lastUser && (history.length === 0 || ((_b = (_a = history[history.length - 1]) == null ? void 0 : _a.parts[0]) == null ? void 0 : _b.text) !== lastUser) ? /* @__PURE__ */ React.createElement("div", { style: {
-      alignSelf: "flex-end",
-      background: "rgba(33,150,243,0.25)",
-      borderRadius: "14px 14px 4px 14px",
-      padding: "8px 12px",
-      color: "#e0f2fe",
-      fontSize: 14,
-      maxWidth: "80%"
-    } }, "\u{1F464} ", lastUser) : null, phase === "thinking" ? /* @__PURE__ */ React.createElement("div", { style: { alignSelf: "flex-start", color: "rgba(255,255,255,0.4)", fontSize: 13, padding: "4px 8px" } }, "\u{1F916} \u23F3 \uC0DD\uAC01 \uC911...") : null, /* @__PURE__ */ React.createElement("div", { ref: (el) => el && el.scrollIntoView({ behavior: "smooth", block: "nearest" }), style: { height: 1 } })), textMode && /* @__PURE__ */ React.createElement("div", { style: {
+    } }, interim) : null, /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", minHeight: 0 } }, /* @__PURE__ */ React.createElement(
+      "div",
+      {
+        onMouseDown: onDragStart,
+        onTouchStart: onDragStart,
+        title: "\uC704\uC544\uB798\uB85C \uBC00\uC5B4 \uCC3D \uD06C\uAE30 \uC870\uC808",
+        style: { width: 26, flexShrink: 0, cursor: "grab", touchAction: "none", display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(255,255,255,0.03)" }
+      },
+      /* @__PURE__ */ React.createElement("div", { style: { width: 4, height: 46, borderRadius: 3, background: "rgba(255,255,255,0.28)" } })
+    ), /* @__PURE__ */ React.createElement(
+      "div",
+      {
+        ref: chatScrollRef,
+        onScroll: (e) => {
+          const el = e.currentTarget;
+          stickBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 70;
+        },
+        style: { flex: 1, overflowY: "auto", padding: "8px 14px 8px 8px", display: "flex", flexDirection: "column", gap: 8 }
+      },
+      history.length === 0 && !lastAI ? /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "rgba(255,255,255,0.3)", fontSize: 13, marginTop: 16 } }, "\uB300\uD654\uB97C \uC2DC\uC791\uD574\uBCF4\uC138\uC694 \u{1F3A4}") : null,
+      history.map((msg, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: {
+        alignSelf: msg.role === "user" ? "flex-end" : "flex-start",
+        background: msg.role === "user" ? "rgba(33,150,243,0.25)" : "rgba(76,175,80,0.18)",
+        borderRadius: msg.role === "user" ? "14px 14px 4px 14px" : "14px 14px 14px 4px",
+        padding: "8px 12px",
+        color: msg.role === "user" ? "#e0f2fe" : "#e8f5e9",
+        fontSize: 14,
+        maxWidth: "85%"
+      } }, msg.role === "user" ? "\u{1F464} " : "\u{1F916} ", msg.parts[0].text)),
+      lastUser && (history.length === 0 || ((_b = (_a = history[history.length - 1]) == null ? void 0 : _a.parts[0]) == null ? void 0 : _b.text) !== lastUser) ? /* @__PURE__ */ React.createElement("div", { style: {
+        alignSelf: "flex-end",
+        background: "rgba(33,150,243,0.25)",
+        borderRadius: "14px 14px 4px 14px",
+        padding: "8px 12px",
+        color: "#e0f2fe",
+        fontSize: 14,
+        maxWidth: "80%"
+      } }, "\u{1F464} ", lastUser) : null,
+      phase === "thinking" ? /* @__PURE__ */ React.createElement("div", { style: { alignSelf: "flex-start", color: "rgba(255,255,255,0.4)", fontSize: 13, padding: "4px 8px" } }, "\u{1F916} \u23F3 \uC0DD\uAC01 \uC911...") : null,
+      /* @__PURE__ */ React.createElement("div", { ref: (el) => {
+        if (el && stickBottomRef.current) el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }, style: { height: 1 } })
+    )), textMode && /* @__PURE__ */ React.createElement("div", { style: {
       padding: "8px 16px",
       display: "flex",
       gap: 8,
@@ -13083,8 +13276,9 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       }
     }).catch(() => fireToast("\uC0AC\uC9C4 \uC778\uC2DD \uC911 \uBB38\uC81C\uAC00 \uBC1C\uC0DD\uD588\uC5B4\uC694. \uB2E4\uC2DC \uC2DC\uB3C4\uD574\uC8FC\uC138\uC694")).finally(() => setOcrLoading(false));
   }
-  function analyzeMessage() {
-    const parsed = applyParsedMessage(draft.message);
+  function analyzeMessage(overrideText) {
+    const src = typeof overrideText === "string" && overrideText.trim() ? overrideText : draft.message;
+    const parsed = applyParsedMessage(src);
     if (!parsed.senderPhone && !parsed.senderName && parsed.items.length === 0) {
       fireToast("\uBA54\uC2DC\uC9C0\uC5D0\uC11C \uC778\uC2DD\uB41C \uC815\uBCF4\uAC00 \uC5C6\uC2B5\uB2C8\uB2E4");
     } else if (parsed.items.length === 0) {
@@ -13092,6 +13286,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     } else {
       fireToast("\uC8FC\uBB38 \uC815\uBCF4\uB97C \uC790\uB3D9\uC73C\uB85C \uCC44\uC6E0\uC5B4\uC694. \uD655\uC778 \uD6C4 \uB4F1\uB85D\uD574\uC8FC\uC138\uC694");
     }
+    return parsed;
   }
   function registerNewCustomersFromOrders(ordersToScan) {
     setCustomers((prevCustomers) => {
@@ -17833,6 +18028,28 @@ function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, ch
       clearPhotoAiResult && clearPhotoAiResult();
     }
   }, [photoAiResult]);
+  async function pasteFromClipboardAndAnalyze() {
+    let text = "";
+    try {
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        text = await navigator.clipboard.readText();
+      }
+    } catch (e) {
+      text = "";
+    }
+    if (text && text.trim()) {
+      analyzeMessage(text);
+    } else {
+      try {
+        const ta = document.getElementById("orderMsgTextarea");
+        if (ta) {
+          ta.focus();
+          ta.scrollIntoView({ block: "center" });
+        }
+      } catch (e) {
+      }
+    }
+  }
   async function handleAiAnalyze() {
     const text = draft.message || "";
     if (!text.trim()) {
@@ -17979,8 +18196,28 @@ function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, ch
     /* @__PURE__ */ React.createElement("div", { style: { fontWeight: 700, color: "#1B2430" } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 9.5, fontWeight: 700, color: item.kind === "vendor" ? "#854F0B" : "#2F6F4E", background: item.kind === "vendor" ? "#FAEEDA" : "#EAF3DE", padding: "1px 5px", borderRadius: 6, marginRight: 5 } }, item.kind === "vendor" ? "\uC5C5\uCCB4" : item.kind === "customer" ? "\uACE0\uAC1D" : "\uC774\uC804\uC8FC\uBB38"), item.name),
     /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#5F5E5A" } }, item.phone || "", item.address ? ` \xB7 ${item.address}` : "")
   )))), isBiz && /* @__PURE__ */ React.createElement("div", { style: { background: "#FAEEDA", border: "1px solid #EAD8B0", borderRadius: 10, padding: "10px 12px", marginBottom: 14, fontSize: 12, color: "#854F0B", fontWeight: 700 } }, '\u{1F3E2} \uB4F1\uB85D\uB41C \uC5C5\uCCB4 "', matchedVendor.name, '"\uC640 \uC77C\uCE58 \u2014 \uC5C5\uCCB4 \uC8FC\uBB38\uC73C\uB85C \uB4F1\uB85D\uB418\uACE0 \uAC70\uB798\uBA85\uC138\uC11C\uAC00 \uC790\uB3D9 \uC0DD\uC131\uB429\uB2C8\uB2E4.'), /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid #E2E4DD", borderRadius: 10, padding: 12, marginBottom: 18 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } }, /* @__PURE__ */ React.createElement("label", { style: { fontSize: 12, color: "#5F5E5A", fontWeight: 500 } }, "\uC8FC\uBB38\uBA54\uC2DC\uC9C0 \uBD99\uC5EC\uB123\uAE30 (\uBB38\uC790\xB7\uCE74\uD1A1\xB7\uC778\uC2A4\uD0C0 DM \uB4F1)"), /* @__PURE__ */ React.createElement(VoiceInputButton, { onResult: (text) => setDraft((prev) => __spreadProps(__spreadValues({}, prev), { message: (prev.message ? prev.message + " " : "") + text })) })), /* @__PURE__ */ React.createElement(
+    "button",
+    {
+      onClick: pasteFromClipboardAndAnalyze,
+      style: {
+        marginTop: 8,
+        width: "100%",
+        padding: "12px 0",
+        borderRadius: 10,
+        border: "none",
+        background: "#F7B500",
+        color: "#3A2E00",
+        fontWeight: 800,
+        fontSize: 14,
+        cursor: "pointer",
+        boxShadow: "0 1px 3px rgba(0,0,0,0.12)"
+      }
+    },
+    "\u{1F4CB} \uCE74\uD1A1\xB7\uBB38\uC790 \uBCF5\uC0AC\uD55C \uAC83 \uD55C \uBC88\uC5D0 \uBD99\uC5EC\uB123\uAE30"
+  ), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 10.5, color: "#888780", margin: "5px 2px 0" } }, "\uCE74\uD1A1\xB7\uBB38\uC790\uC5D0\uC11C \uC8FC\uBB38 \uB0B4\uC6A9\uC744 \uAE38\uAC8C \uB20C\uB7EC ", /* @__PURE__ */ React.createElement("b", null, "\uBCF5\uC0AC"), "\uD55C \uB4A4, \uC774 \uBC84\uD2BC\uC744 \uB204\uB974\uBA74 \uBCF4\uB0B4\uB294\uBD84\xB7\uBC1B\uB294\uBD84\xB7\uC8FC\uC18C\xB7\uC0C1\uD488\uC744 \uC790\uB3D9\uC73C\uB85C \uCC44\uC6CC\uB4DC\uB824\uC694."), /* @__PURE__ */ React.createElement(
     "textarea",
     {
+      id: "orderMsgTextarea",
       value: draft.message,
       onChange: (e) => setDraft(__spreadProps(__spreadValues({}, draft), { message: e.target.value })),
       placeholder: "\uC608) \uBCF4\uB0B4\uB294\uBD84: \uD64D\uAE38\uB3D9 / \uC8FC\uBB38\uC790 \uC5F0\uB77D\uCC98: 010-1234-5678\n\uBC1B\uB294\uBD84: \uD64D\uC5B4\uBA38\uB2C8 / \uBC1B\uB294\uBD84 \uC5F0\uB77D\uCC98: 010-9876-5432\n\uC8FC\uC18C: \uC11C\uC6B8\uC2DC \uAC15\uB0A8\uAD6C \uC5ED\uC0BC\uB3D9 123\n\uC544\uBA54\uB9AC\uCE74\uB178 2\uAC1C, \uD06C\uB8E8\uC544\uC0C1 1\uAC1C \uBCF4\uB0B4\uC8FC\uC138\uC694",
