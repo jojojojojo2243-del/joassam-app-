@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 142;
+const APP_VERSION = 143;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 const STATUS = {
@@ -485,6 +485,56 @@ function nowStamp() {
 }
 function uid(prefix) {
   return prefix + Math.random().toString(36).slice(2, 8);
+}
+var ARCHIVE_CHUNK_SIZE = 300;
+function archiveChunkDocId(i) {
+  return (IS_TEST ? "test_oarch_" : "oarch_") + i;
+}
+function isShippedOrder(o) {
+  return !!(o && o.status === "shipped");
+}
+function splitOrdersForArchive(orders) {
+  const active = [];
+  const shipped = [];
+  const list = orders || [];
+  for (const o of list) {
+    if (isShippedOrder(o)) shipped.push(o);
+    else active.push(o);
+  }
+  return { active, shipped };
+}
+function computeArchiveSig(shipped) {
+  const list = shipped || [];
+  let h = 0;
+  for (const o of list) {
+    const s = String(o && o.id || "") + "|" + String(o && o.status || "") + "|" + (o && o.deliveryConfirmed ? "1" : "0") + "|" + String(o && o.invoiceNo || "") + "|" + String(o && o.courier || "");
+    for (let i = 0; i < s.length; i++) {
+      h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    }
+  }
+  return list.length + ":" + (h >>> 0).toString(36);
+}
+function chunkArray(arr, size) {
+  const a = arr || [];
+  const out = [];
+  for (let i = 0; i < a.length; i += size) out.push(a.slice(i, i + size));
+  if (out.length === 0) out.push([]);
+  return out;
+}
+function mergeOrdersWithArchive(mainOrders, archivedOrders) {
+  const seen = /* @__PURE__ */ new Set();
+  const out = [];
+  const push = (o) => {
+    const id = o && o.id;
+    if (id != null) {
+      if (seen.has(id)) return;
+      seen.add(id);
+    }
+    out.push(o);
+  };
+  for (const o of mainOrders || []) push(o);
+  for (const o of archivedOrders || []) push(o);
+  return out;
 }
 const CHO = "\u3131\u3132\u3134\u3137\u3138\u3139\u3141\u3142\u3143\u3145\u3146\u3147\u3148\u3149\u314A\u314B\u314C\u314D\u314E";
 const JUNG = "\u314F\u3150\u3151\u3152\u3153\u3154\u3155\u3156\u3157\u3158\u3159\u315A\u315B\u315C\u315D\u315E\u315F\u3160\u3161\u3162\u3163";
@@ -1776,7 +1826,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v142 (Firebase \uC0AC\uC6A9\uB7C9 \uC808\uAC10)";
+const APP_BUILD = "v143 (Firebase \uC808\uAC10 + \uBC1C\uC1A1\uC644\uB8CC \uBCF4\uAD00\uD568 \uBD84\uB9AC)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11064,8 +11114,10 @@ function App() {
             if (data.vendors) setVendors(data.vendors);
             if (data.invoices) setInvoices(data.invoices);
             if (data.supplier) setSupplier(data.supplier);
+            let fullOrdersSnapshot = data.orders || [];
             if (data.orders) {
-              const newCount = data.orders.length;
+              const activeOrders = data.orders;
+              const newCount = activeOrders.length;
               const prevCount = prevOrderCountRef.current;
               if (prevCount !== null && newCount > prevCount && !justSubmittedRef.current) {
                 const added = newCount - prevCount;
@@ -11074,7 +11126,28 @@ function App() {
               }
               prevOrderCountRef.current = newCount;
               justSubmittedRef.current = false;
-              setOrders(data.orders);
+              const chunkCount = data.archiveChunkCount || 0;
+              const archSig = data.archiveSig || null;
+              archiveMetaRef.current = { chunkCount, sig: archSig };
+              if (chunkCount > 0 && archSig !== loadedArchiveSigRef.current) {
+                loadArchiveChunks(chunkCount).then((arch) => {
+                  archivedOrdersRef.current = arch;
+                  loadedArchiveSigRef.current = archSig;
+                  const full = mergeOrdersWithArchive(activeOrders, arch);
+                  setOrders(full);
+                  try {
+                    const raw = localStorage.getItem("joassam_last_counts_" + DATA_DOC);
+                    const c = raw ? JSON.parse(raw) : {};
+                    c.orders = full.length;
+                    localStorage.setItem("joassam_last_counts_" + DATA_DOC, JSON.stringify(c));
+                  } catch (e) {
+                  }
+                }).catch(() => {
+                  setOrders(mergeOrdersWithArchive(activeOrders, archivedOrdersRef.current));
+                });
+              }
+              fullOrdersSnapshot = mergeOrdersWithArchive(activeOrders, archivedOrdersRef.current);
+              setOrders(fullOrdersSnapshot);
             }
             if (data.subscriptions) setSubscriptions(data.subscriptions);
             if (data.integrations) setIntegrations(data.integrations);
@@ -11089,14 +11162,14 @@ function App() {
             const prevGood = lastGoodDataRef.current || {};
             lastGoodDataRef.current = {
               customers: data.customers || prevGood.customers,
-              orders: data.orders || prevGood.orders,
+              orders: fullOrdersSnapshot.length ? fullOrdersSnapshot : data.orders || prevGood.orders,
               products: data.products || prevGood.products,
               vendors: data.vendors || prevGood.vendors
             };
             try {
               const counts2 = {
                 customers: (data.customers || []).length,
-                orders: (data.orders || []).length,
+                orders: fullOrdersSnapshot.length,
                 products: (data.products || []).length,
                 vendors: (data.vendors || []).length
               };
@@ -11177,6 +11250,21 @@ function App() {
   }, [dataLoaded]);
   const saveTimerRef = useRef(null);
   const pendingSaveDataRef = useRef(null);
+  const archivedOrdersRef = useRef([]);
+  const loadedArchiveSigRef = useRef(null);
+  const archiveWrittenSigRef = useRef(null);
+  const archiveMetaRef = useRef({ chunkCount: 0, sig: null });
+  function loadArchiveChunks(chunkCount) {
+    const n = chunkCount || 0;
+    if (!n) return Promise.resolve([]);
+    const gets = [];
+    for (let i = 0; i < n; i++) {
+      gets.push(
+        fbDb.collection("stores").doc(archiveChunkDocId(i)).get().then((s) => s.exists && s.data() && s.data().orders ? s.data().orders : []).catch(() => [])
+      );
+    }
+    return Promise.all(gets).then((parts) => parts.reduce((a, b) => a.concat(b), []));
+  }
   function flushSaveNow() {
     if (saveTimerRef.current) {
       clearTimeout(saveTimerRef.current);
@@ -11200,8 +11288,14 @@ function App() {
       });
       return;
     }
-    fbDb.collection("stores").doc(DATA_DOC).set(data, { merge: true }).then(() => {
-      lastGoodDataRef.current = data;
+    const split = splitOrdersForArchive(data.orders);
+    const active = split.active;
+    const shipped = split.shipped;
+    const sig = computeArchiveSig(shipped);
+    const chunks = chunkArray(shipped, ARCHIVE_CHUNK_SIZE);
+    const chunkCount = shipped.length === 0 ? 0 : chunks.length;
+    const onSaved = () => {
+      lastGoodDataRef.current = { customers: data.customers, orders: data.orders, products: data.products, vendors: data.vendors };
       try {
         const d = /* @__PURE__ */ new Date();
         const pad = (n) => String(n).padStart(2, "0");
@@ -11223,7 +11317,8 @@ function App() {
         }
       } catch (e) {
       }
-    }).catch((err) => {
+    };
+    const onErr = (err) => {
       try {
         logDiag("save_failed", { msg: String(err && err.message || err).slice(0, 140) });
       } catch (e) {
@@ -11232,6 +11327,33 @@ function App() {
         fireToast("\u26A0\uFE0F \uC800\uC7A5 \uC2E4\uD328 \u2014 \uC778\uD130\uB137 \uC5F0\uACB0\uC774\uB098 \uC800\uC7A5 \uC6A9\uB7C9\uC744 \uD655\uC778\uD558\uC138\uC694. \uD654\uBA74\uC744 \uB2EB\uC9C0 \uB9D0\uACE0 \uC7A0\uC2DC \uD6C4 \uC790\uB3D9 \uC7AC\uC2DC\uB3C4\uB429\uB2C8\uB2E4.");
       } catch (e) {
       }
+    };
+    const writeMainSlim = () => fbDb.collection("stores").doc(DATA_DOC).set(__spreadProps(__spreadValues({}, data), { orders: active, archiveChunkCount: chunkCount, archiveSig: sig }), { merge: true });
+    const writeMainFull = () => fbDb.collection("stores").doc(DATA_DOC).set(data, { merge: true });
+    if (sig === archiveWrittenSigRef.current) {
+      writeMainSlim().then(onSaved).catch(onErr);
+      return;
+    }
+    const chunkWrites = [];
+    for (let i = 0; i < chunkCount; i++) {
+      chunkWrites.push(fbDb.collection("stores").doc(archiveChunkDocId(i)).set({ orders: chunks[i], sig, part: i, updatedAt: nowStamp() }));
+    }
+    Promise.all(chunkWrites).then(() => {
+      const prevCount = archiveMetaRef.current && archiveMetaRef.current.chunkCount || 0;
+      const dels = [];
+      for (let i = chunkCount; i < prevCount; i++) {
+        dels.push(fbDb.collection("stores").doc(archiveChunkDocId(i)).delete().catch(() => {
+        }));
+      }
+      return Promise.all(dels);
+    }).then(() => {
+      archiveWrittenSigRef.current = sig;
+      archivedOrdersRef.current = shipped;
+      loadedArchiveSigRef.current = sig;
+      archiveMetaRef.current = { chunkCount, sig };
+      return writeMainSlim();
+    }).then(onSaved).catch(() => {
+      writeMainFull().then(onSaved).catch(onErr);
     });
   }
   useEffect(() => {
