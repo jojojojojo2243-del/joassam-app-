@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 141;
+const APP_VERSION = 142;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 const STATUS = {
@@ -1776,7 +1776,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v141 (07-25 \uB300\uD654\uC800\uC7A5 \uBC84\uD2BC \uD56D\uC0C1 \uD45C\uC2DC)";
+const APP_BUILD = "v142 (Firebase \uC0AC\uC6A9\uB7C9 \uC808\uAC10)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11175,60 +11175,97 @@ function App() {
     } catch (e) {
     }
   }, [dataLoaded]);
+  const saveTimerRef = useRef(null);
+  const pendingSaveDataRef = useRef(null);
+  function flushSaveNow() {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    const data = pendingSaveDataRef.current;
+    if (!data) return;
+    pendingSaveDataRef.current = null;
+    let storedFloor = null;
+    try {
+      const raw = localStorage.getItem("joassam_last_counts_" + DATA_DOC);
+      if (raw) storedFloor = JSON.parse(raw);
+    } catch (e) {
+    }
+    const guard = evaluateSaveGuard({ current: { customers: data.customers, orders: data.orders, products: data.products, vendors: data.vendors }, prev: lastGoodDataRef.current, storedFloor });
+    if (guard.blocked) {
+      fireToast("\u26A0 \uB370\uC774\uD130\uAC00 \uBE44\uC5B4\uC788\uB294 \uC0C1\uD0DC\uB85C \uAC10\uC9C0\uB418\uC5B4 \uC800\uC7A5\uC744 \uB9C9\uC558\uC5B4\uC694. \uC0C8\uB85C\uACE0\uCE68 \uD6C4 \uB2E4\uC2DC \uD655\uC778\uD574\uC8FC\uC138\uC694");
+      logDiag("blocked_" + guard.reason, {
+        prevCounts: lastGoodDataRef.current ? { customers: (lastGoodDataRef.current.customers || []).length, orders: (lastGoodDataRef.current.orders || []).length, products: (lastGoodDataRef.current.products || []).length, vendors: (lastGoodDataRef.current.vendors || []).length } : null,
+        storedCounts: storedFloor
+      });
+      return;
+    }
+    fbDb.collection("stores").doc(DATA_DOC).set(data, { merge: true }).then(() => {
+      lastGoodDataRef.current = data;
+      try {
+        const d = /* @__PURE__ */ new Date();
+        const pad = (n) => String(n).padStart(2, "0");
+        const hourKey = `${todayStr()}_${pad(d.getHours())}`;
+        const bkKey = "joassam_last_backup_hour_" + DATA_DOC;
+        let lastBk = null;
+        try {
+          lastBk = localStorage.getItem(bkKey);
+        } catch (e) {
+        }
+        if (lastBk !== hourKey) {
+          try {
+            localStorage.setItem(bkKey, hourKey);
+          } catch (e) {
+          }
+          const backupRef = fbDb.collection("stores").doc((IS_TEST ? "test_backup_" : "backup_") + hourKey);
+          backupRef.set(__spreadProps(__spreadValues({}, data), { backedUpAt: nowStamp() })).catch(() => {
+          });
+        }
+      } catch (e) {
+      }
+    }).catch((err) => {
+      try {
+        logDiag("save_failed", { msg: String(err && err.message || err).slice(0, 140) });
+      } catch (e) {
+      }
+      try {
+        fireToast("\u26A0\uFE0F \uC800\uC7A5 \uC2E4\uD328 \u2014 \uC778\uD130\uB137 \uC5F0\uACB0\uC774\uB098 \uC800\uC7A5 \uC6A9\uB7C9\uC744 \uD655\uC778\uD558\uC138\uC694. \uD654\uBA74\uC744 \uB2EB\uC9C0 \uB9D0\uACE0 \uC7A0\uC2DC \uD6C4 \uC790\uB3D9 \uC7AC\uC2DC\uB3C4\uB429\uB2C8\uB2E4.");
+      } catch (e) {
+      }
+    });
+  }
   useEffect(() => {
     if (!dataLoaded) return;
     const data = { appName, appLogo, customers, products, orders, vendors, supplier, invoices, subscriptions, integrations, customMarketplaces, couriers, smsTemplate, orderTemplate, customerTemplate, productTemplate, courierTemplates };
     if (firebaseReady) {
       if (!fbFirstLoadRef.current) return;
       if (isStaleVersion) return;
-      let storedFloor = null;
-      try {
-        const raw = localStorage.getItem("joassam_last_counts_" + DATA_DOC);
-        if (raw) storedFloor = JSON.parse(raw);
-      } catch (e) {
-      }
-      const guard = evaluateSaveGuard({ current: { customers, orders, products, vendors }, prev: lastGoodDataRef.current, storedFloor });
-      if (guard.blocked) {
-        fireToast("\u26A0 \uB370\uC774\uD130\uAC00 \uBE44\uC5B4\uC788\uB294 \uC0C1\uD0DC\uB85C \uAC10\uC9C0\uB418\uC5B4 \uC800\uC7A5\uC744 \uB9C9\uC558\uC5B4\uC694. \uC0C8\uB85C\uACE0\uCE68 \uD6C4 \uB2E4\uC2DC \uD655\uC778\uD574\uC8FC\uC138\uC694");
-        logDiag("blocked_" + guard.reason, {
-          prevCounts: lastGoodDataRef.current ? { customers: (lastGoodDataRef.current.customers || []).length, orders: (lastGoodDataRef.current.orders || []).length, products: (lastGoodDataRef.current.products || []).length, vendors: (lastGoodDataRef.current.vendors || []).length } : null,
-          storedCounts: storedFloor
-        });
-        return;
-      }
-      logDiag("saved");
-      fbDb.collection("stores").doc(DATA_DOC).set(data, { merge: true }).then(() => {
-        lastGoodDataRef.current = data;
-        try {
-          const d = /* @__PURE__ */ new Date();
-          const pad = (n) => String(n).padStart(2, "0");
-          const hourKey = `${todayStr()}_${pad(d.getHours())}`;
-          const backupRef = fbDb.collection("stores").doc((IS_TEST ? "test_backup_" : "backup_") + hourKey);
-          backupRef.get().then((backupSnap) => {
-            if (!backupSnap.exists) {
-              backupRef.set(__spreadProps(__spreadValues({}, data), { backedUpAt: nowStamp() })).catch(() => {
-              });
-            }
-          }).catch(() => {
-          });
-        } catch (e) {
-        }
-      }).catch((err) => {
-        try {
-          logDiag("save_failed", { msg: String(err && err.message || err).slice(0, 140) });
-        } catch (e) {
-        }
-        try {
-          fireToast("\u26A0\uFE0F \uC800\uC7A5 \uC2E4\uD328 \u2014 \uC778\uD130\uB137 \uC5F0\uACB0\uC774\uB098 \uC800\uC7A5 \uC6A9\uB7C9\uC744 \uD655\uC778\uD558\uC138\uC694. \uD654\uBA74\uC744 \uB2EB\uC9C0 \uB9D0\uACE0 \uC7A0\uC2DC \uD6C4 \uC790\uB3D9 \uC7AC\uC2DC\uB3C4\uB429\uB2C8\uB2E4.");
-        } catch (e) {
-        }
-      });
+      pendingSaveDataRef.current = data;
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = setTimeout(flushSaveNow, 2500);
     } else if (hasSharedStorage) {
       sharedSet("store-data", data);
     } else {
       saveStoredData(__spreadProps(__spreadValues({}, data), { members }));
     }
   }, [dataLoaded, appName, appLogo, customers, products, orders, vendors, supplier, invoices, subscriptions, integrations, customMarketplaces, couriers, smsTemplate, orderTemplate, customerTemplate, productTemplate, courierTemplates, isStaleVersion]);
+  useEffect(() => {
+    function flushOnLeave() {
+      try {
+        if (pendingSaveDataRef.current) flushSaveNow();
+      } catch (e) {
+      }
+    }
+    function onVis() {
+      if (document.visibilityState === "hidden") flushOnLeave();
+    }
+    window.addEventListener("beforeunload", flushOnLeave);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.removeEventListener("beforeunload", flushOnLeave);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, []);
   function updateIntegration(marketplaceId, fieldUpdates) {
     setIntegrations((prev) => __spreadProps(__spreadValues({}, prev), {
       [marketplaceId]: __spreadValues(__spreadValues({}, prev[marketplaceId] || {}), fieldUpdates)
