@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 145;
+const APP_VERSION = 146;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 const STATUS = {
@@ -1852,7 +1852,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v145 (\uC548\uC815\uD654 + \uC804\uCCB4\uC810\uAC80 \uBC84\uADF8\uC218\uC815: \uACC4\uC815\uC7A0\uAE40\u00B7\uBC31\uC5C5\uBCF5\uAD6C\u00B7\uBB38\uC790\u00B7AI \uB4F1)";
+const APP_BUILD = "v146 (\uC8FC\uBB38\uD1B5\uD569 \uC548\uC815\uD654 + \uAC00\uC9DC\uC54C\uB9BC\u00B7\uC800\uC7A5\uC2E4\uD328 \uD574\uACB0 + \uC804\uCCB4\uBC84\uADF8\uC218\uC815)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11151,14 +11151,7 @@ function App() {
             let fullOrdersSnapshot = data.orders || [];
             if (data.orders) {
               const activeOrders = data.orders;
-              const newCount = activeOrders.length;
-              const prevCount = prevOrderCountRef.current;
-              if (prevCount !== null && newCount > prevCount && !justSubmittedRef.current) {
-                const added = newCount - prevCount;
-                setNewOrderAlert((n) => n + added);
-                playAlertSound();
-              }
-              prevOrderCountRef.current = newCount;
+              const wasJustSubmitted = justSubmittedRef.current;
               justSubmittedRef.current = false;
               const chunkCount = data.archiveChunkCount || 0;
               const archSig = data.archiveSig || null;
@@ -11169,6 +11162,7 @@ function App() {
                   loadedArchiveSigRef.current = archSig;
                   const full = mergeOrdersWithArchive(activeOrders, arch);
                   setOrders(full);
+                  prevOrderCountRef.current = full.length;
                   try {
                     const raw = localStorage.getItem("joassam_last_counts_" + DATA_DOC);
                     const c = raw ? JSON.parse(raw) : {};
@@ -11182,6 +11176,13 @@ function App() {
               }
               fullOrdersSnapshot = mergeOrdersWithArchive(activeOrders, archivedOrdersRef.current);
               setOrders(fullOrdersSnapshot);
+              const newCount = fullOrdersSnapshot.length;
+              const prevCount = prevOrderCountRef.current;
+              if (prevCount !== null && newCount > prevCount && newCount - prevCount <= 50 && !wasJustSubmitted) {
+                setNewOrderAlert((n) => n + (newCount - prevCount));
+                playAlertSound();
+              }
+              prevOrderCountRef.current = newCount;
             }
             if (data.subscriptions) setSubscriptions(data.subscriptions);
             if (data.integrations) setIntegrations(data.integrations);
