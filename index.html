@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 143;
+const APP_VERSION = 145;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 const STATUS = {
@@ -245,6 +245,7 @@ function isRegularCustomer(customer, orders, threshold) {
 function findNewMonthlyRegularCandidates(customers, orders) {
   return customers.filter((c) => {
     if (c.regularOverride === false) return false;
+    if (c.regularOverride === true) return false;
     return countOrdersInLastNDays(c.id, orders, 30) >= 4;
   });
 }
@@ -1590,17 +1591,22 @@ ${productStr}
   "items": [{ "name": "\uC0C1\uD488\uBA85", "qty": 1, "confidence": "high", "note": "" }],
   "overallNote": ""
 }`;
-  const doFetch = (mdl) => fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${mdl}:generateContent?key=${apiKey}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: { temperature: 0.1 }
-      })
-    }
-  );
+  const doFetch = (mdl) => {
+    const _c = new AbortController();
+    const _t = setTimeout(() => _c.abort(), 15e3);
+    return fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${mdl}:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0.1 }
+        }),
+        signal: _c.signal
+      }
+    ).finally(() => clearTimeout(_t));
+  };
   let res = await doFetch(model);
   let tries = 0;
   while (!res.ok && tries < 6) {
@@ -1634,7 +1640,11 @@ ${productStr}
   } catch (e) {
     const m = raw.match(/```(?:json)?\s*([\s\S]*?)```/) || raw.match(/(\{[\s\S]*\})/);
     if (!m) throw new Error("AI \uC751\uB2F5 \uD30C\uC2F1 \uC2E4\uD328");
-    return JSON.parse(m[1] || m[0]);
+    try {
+      return JSON.parse(m[1] || m[0]);
+    } catch (e2) {
+      throw new Error("AI \uC751\uB2F5 \uD30C\uC2F1 \uC2E4\uD328");
+    }
   }
 }
 const CONF_STYLE = {
@@ -1842,7 +1852,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v143 (Firebase \uC808\uAC10 + \uBCF4\uAD00\uD568\uBD84\uB9AC + AI\uBAA8\uB378\uC790\uB3D9\uC804\uD658 + \uC774\uB984\uC778\uC2DD)";
+const APP_BUILD = "v145 (\uC548\uC815\uD654 + \uC804\uCCB4\uC810\uAC80 \uBC84\uADF8\uC218\uC815: \uACC4\uC815\uC7A0\uAE40\u00B7\uBC31\uC5C5\uBCF5\uAD6C\u00B7\uBB38\uC790\u00B7AI \uB4F1)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -10930,6 +10940,10 @@ function App() {
     fireToast(`"${oldId}" \u2192 "${newId}"\uB85C \uC544\uC774\uB514\uB97C \uBCC0\uACBD\uD588\uC5B4\uC694`);
   }
   function deleteAccount(id) {
+    if (isAccountAdmin(accounts[id]) && Object.values(accounts).filter((a) => isAccountAdmin(a)).length <= 1) {
+      fireToast("\uCD5C\uC18C 1\uBA85\uC758 \uAD00\uB9AC\uC790\uB294 \uC788\uC5B4\uC57C \uD574\uC694. \uC774 \uAD00\uB9AC\uC790 \uACC4\uC815\uC740 \uC0AD\uC81C\uD560 \uC218 \uC5C6\uC5B4\uC694");
+      return;
+    }
     const next = __spreadValues({}, accounts);
     delete next[id];
     saveAccounts(next);
@@ -10937,6 +10951,10 @@ function App() {
     fireToast(`"${id}" \uACC4\uC815\uC744 \uC0AD\uC81C\uD588\uC5B4\uC694`);
   }
   function blockAccount(id) {
+    if (isAccountAdmin(accounts[id]) && Object.values(accounts).filter((a) => isAccountAdmin(a)).length <= 1) {
+      fireToast("\uCD5C\uC18C 1\uBA85\uC758 \uAD00\uB9AC\uC790\uB294 \uC788\uC5B4\uC57C \uD574\uC694. \uC774 \uAD00\uB9AC\uC790 \uACC4\uC815\uC740 \uCC28\uB2E8\uD560 \uC218 \uC5C6\uC5B4\uC694");
+      return;
+    }
     const existing = accounts[id] || { password: "" };
     saveAccounts(__spreadProps(__spreadValues({}, accounts), { [id]: __spreadProps(__spreadValues({}, existing), { blocked: true }) }));
     fireToast(`"${id}" \uACC4\uC815\uC744 \uCC28\uB2E8\uD588\uC5B4\uC694. \uC774 \uC544\uC774\uB514\uB85C\uB294 \uB354 \uC774\uC0C1 \uB85C\uADF8\uC778(\uC7AC\uAC00\uC785 \uD3EC\uD568)\uD560 \uC218 \uC5C6\uC5B4\uC694`);
@@ -11297,21 +11315,27 @@ function App() {
     }
     const guard = evaluateSaveGuard({ current: { customers: data.customers, orders: data.orders, products: data.products, vendors: data.vendors }, prev: lastGoodDataRef.current, storedFloor });
     if (guard.blocked) {
-      fireToast("\u26A0 \uB370\uC774\uD130\uAC00 \uBE44\uC5B4\uC788\uB294 \uC0C1\uD0DC\uB85C \uAC10\uC9C0\uB418\uC5B4 \uC800\uC7A5\uC744 \uB9C9\uC558\uC5B4\uC694. \uC0C8\uB85C\uACE0\uCE68 \uD6C4 \uB2E4\uC2DC \uD655\uC778\uD574\uC8FC\uC138\uC694");
+      fireToast("⚠ 데이터가 비어있는 상태로 감지되어 저장을 막았어요. 새로고침 후 다시 확인해주세요");
       logDiag("blocked_" + guard.reason, {
         prevCounts: lastGoodDataRef.current ? { customers: (lastGoodDataRef.current.customers || []).length, orders: (lastGoodDataRef.current.orders || []).length, products: (lastGoodDataRef.current.products || []).length, vendors: (lastGoodDataRef.current.vendors || []).length } : null,
         storedCounts: storedFloor
       });
       return;
     }
-    const split = splitOrdersForArchive(data.orders);
-    const active = split.active;
-    const shipped = split.shipped;
-    const sig = computeArchiveSig(shipped);
-    const chunks = chunkArray(shipped, ARCHIVE_CHUNK_SIZE);
-    const chunkCount = shipped.length === 0 ? 0 : chunks.length;
-    const onSaved = () => {
+    fbDb.collection("stores").doc(DATA_DOC).set(__spreadProps(__spreadValues({}, data), { archiveChunkCount: 0, archiveSig: null }), { merge: true }).then(() => {
       lastGoodDataRef.current = { customers: data.customers, orders: data.orders, products: data.products, vendors: data.vendors };
+      try {
+        const prevCount = archiveMetaRef.current && archiveMetaRef.current.chunkCount || 0;
+        for (let i = 0; i < prevCount; i++) {
+          fbDb.collection("stores").doc(archiveChunkDocId(i)).delete().catch(() => {
+          });
+        }
+      } catch (e) {
+      }
+      archiveMetaRef.current = { chunkCount: 0, sig: null };
+      archivedOrdersRef.current = [];
+      loadedArchiveSigRef.current = null;
+      archiveWrittenSigRef.current = null;
       try {
         const d = /* @__PURE__ */ new Date();
         const pad = (n) => String(n).padStart(2, "0");
@@ -11333,43 +11357,15 @@ function App() {
         }
       } catch (e) {
       }
-    };
-    const onErr = (err) => {
+    }).catch((err) => {
       try {
         logDiag("save_failed", { msg: String(err && err.message || err).slice(0, 140) });
       } catch (e) {
       }
       try {
-        fireToast("\u26A0\uFE0F \uC800\uC7A5 \uC2E4\uD328 \u2014 \uC778\uD130\uB137 \uC5F0\uACB0\uC774\uB098 \uC800\uC7A5 \uC6A9\uB7C9\uC744 \uD655\uC778\uD558\uC138\uC694. \uD654\uBA74\uC744 \uB2EB\uC9C0 \uB9D0\uACE0 \uC7A0\uC2DC \uD6C4 \uC790\uB3D9 \uC7AC\uC2DC\uB3C4\uB429\uB2C8\uB2E4.");
+        fireToast("⚠️ 저장 실패 — 인터넷 연결이나 저장 용량을 확인하세요. 화면을 닫지 말고 잠시 후 자동 재시도됩니다.");
       } catch (e) {
       }
-    };
-    const writeMainSlim = () => fbDb.collection("stores").doc(DATA_DOC).set(__spreadProps(__spreadValues({}, data), { orders: active, archiveChunkCount: chunkCount, archiveSig: sig }), { merge: true });
-    const writeMainFull = () => fbDb.collection("stores").doc(DATA_DOC).set(data, { merge: true });
-    if (sig === archiveWrittenSigRef.current) {
-      writeMainSlim().then(onSaved).catch(onErr);
-      return;
-    }
-    const chunkWrites = [];
-    for (let i = 0; i < chunkCount; i++) {
-      chunkWrites.push(fbDb.collection("stores").doc(archiveChunkDocId(i)).set({ orders: chunks[i], sig, part: i, updatedAt: nowStamp() }));
-    }
-    Promise.all(chunkWrites).then(() => {
-      const prevCount = archiveMetaRef.current && archiveMetaRef.current.chunkCount || 0;
-      const dels = [];
-      for (let i = chunkCount; i < prevCount; i++) {
-        dels.push(fbDb.collection("stores").doc(archiveChunkDocId(i)).delete().catch(() => {
-        }));
-      }
-      return Promise.all(dels);
-    }).then(() => {
-      archiveWrittenSigRef.current = sig;
-      archivedOrdersRef.current = shipped;
-      loadedArchiveSigRef.current = sig;
-      archiveMetaRef.current = { chunkCount, sig };
-      return writeMainSlim();
-    }).then(onSaved).catch(() => {
-      writeMainFull().then(onSaved).catch(onErr);
     });
   }
   useEffect(() => {
@@ -13055,7 +13051,15 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     readWorkbookFile(file, (rows) => {
       const items = [];
       let vendorName = "";
-      const date = todayStr();
+      let date = todayStr();
+      for (const r of rows) {
+        const dstr = String(r["날짜"] || r["거래일자"] || r["거래일"] || r["일자"] || "").trim();
+        const dm = dstr.match(/(\d{4})[-./](\d{1,2})[-./](\d{1,2})/);
+        if (dm) {
+          date = `${dm[1]}-${String(dm[2]).padStart(2, "0")}-${String(dm[3]).padStart(2, "0")}`;
+          break;
+        }
+      }
       rows.forEach((r) => {
         const nm = String(r["\uC0C1\uD488\uBA85"] || r["\uD488\uBAA9"] || r["\uD488          \uBAA9"] || r["D"] || "").trim();
         const qty = Number(String(r["\uC218\uB7C9"] || r["\uC218 \uB7C9"] || r["O"] || "").toString().replace(/[^0-9.]/g, "")) || 0;
@@ -14122,7 +14126,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
             name,
             phone,
             checked: true,
-            message: fillSmsTemplate(smsTemplate, { appName, name, courier, invoiceNo: match.invoiceNo })
+            message: fillSmsTemplate(smsTemplate || DEFAULT_SMS_TEMPLATE, { appName, name, courier, invoiceNo: match.invoiceNo })
           });
         }
         return __spreadProps(__spreadValues({}, o), {
@@ -14242,8 +14246,8 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         const bizP = Number(r["\uC5C5\uCCB4\uAC00\uACA9"] || r["\uC5C5\uCCB4\uB2E8\uAC00"] || 0);
         let price = 0, wholesalePrice = bizP;
         if (channel === "business") {
-          price = bizP || commonP;
-          wholesalePrice = bizP || commonP;
+          price = bizP || commonP || retailP;
+          wholesalePrice = bizP || commonP || retailP;
         } else if (channel === "retail") {
           price = retailP || commonP;
         } else {
@@ -14475,24 +14479,32 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
     reader.onload = (ev) => {
       try {
         const data = JSON.parse(ev.target.result);
-        if (data.customers) setCustomers(data.customers);
-        if (data.products) setProducts(data.products);
-        if (data.vendors) setVendors(data.vendors);
-        if (data.invoices) setInvoices(data.invoices);
-        if (data.supplier) setSupplier(data.supplier);
-        if (data.orders) setOrders(data.orders);
-        if (data.appName) setAppName(data.appName);
-        if (data.appLogo) setAppLogo(data.appLogo);
-        if (data.subscriptions) setSubscriptions(data.subscriptions);
-        if (data.integrations) setIntegrations(data.integrations);
-        if (data.customMarketplaces) setCustomMarketplaces(data.customMarketplaces);
-        if (data.couriers) setCouriers(data.couriers);
-        if (data.smsTemplate) setSmsTemplate(data.smsTemplate);
-        if (data.orderTemplate) setOrderTemplate(data.orderTemplate);
-        if (data.customerTemplate) setCustomerTemplate(data.customerTemplate);
-        if (data.productTemplate) setProductTemplate(data.productTemplate);
-        if (data.courierTemplates) setCourierTemplates(data.courierTemplates);
-        fireToast("\uBC31\uC5C5 \uB370\uC774\uD130\uB97C \uBAA8\uB450 \uBD88\uB7EC\uC654\uC2B5\uB2C8\uB2E4");
+        const nOrders = Array.isArray(data.orders) ? data.orders.length : 0;
+        const nCust = Array.isArray(data.customers) ? data.customers.length : 0;
+        const nProd = Array.isArray(data.products) ? data.products.length : 0;
+        const curOrders = (orders || []).length;
+        let warn = "";
+        if (curOrders > 0 && nOrders < curOrders) warn = `\n\u26A0 \uC9C0\uAE08 ${curOrders}\uAC74 \u2192 \uBC31\uC5C5 ${nOrders}\uAC74\uC73C\uB85C \uC904\uC5B4\uB4E4\uC5B4\uC694. \uCD5C\uADFC \uC8FC\uBB38\uC774 \uC0AC\uB77C\uC9C8 \uC218 \uC788\uC5B4\uC694!`;
+        askConfirm(`\uC774 \uBC31\uC5C5 \uB0B4\uC6A9\uC73C\uB85C \uAD50\uCCB4\uD560\uAE4C\uC694?\n(\uC8FC\uBB38 ${nOrders} \u00B7 \uACE0\uAC1D ${nCust} \u00B7 \uC0C1\uD488 ${nProd}\uAC74)\n\uD604\uC7AC \uD654\uBA74\uC758 \uB370\uC774\uD130\uB294 \uBC31\uC5C5 \uB0B4\uC6A9\uC73C\uB85C \uBC14\uB01D\uB2C8\uB2E4.${warn}`, () => {
+          if (Array.isArray(data.customers)) setCustomers(data.customers);
+          if (Array.isArray(data.products)) setProducts(data.products);
+          if (Array.isArray(data.vendors)) setVendors(data.vendors);
+          if (Array.isArray(data.invoices)) setInvoices(data.invoices);
+          if (data.supplier) setSupplier(data.supplier);
+          if (Array.isArray(data.orders)) setOrders(data.orders);
+          if (data.appName) setAppName(data.appName);
+          if (data.appLogo) setAppLogo(data.appLogo);
+          if (Array.isArray(data.subscriptions)) setSubscriptions(data.subscriptions);
+          if (data.integrations) setIntegrations(data.integrations);
+          if (Array.isArray(data.customMarketplaces)) setCustomMarketplaces(data.customMarketplaces);
+          if (Array.isArray(data.couriers)) setCouriers(data.couriers);
+          if (data.smsTemplate) setSmsTemplate(data.smsTemplate);
+          if (data.orderTemplate) setOrderTemplate(data.orderTemplate);
+          if (data.customerTemplate) setCustomerTemplate(data.customerTemplate);
+          if (data.productTemplate) setProductTemplate(data.productTemplate);
+          if (data.courierTemplates) setCourierTemplates(data.courierTemplates);
+          fireToast("\uBC31\uC5C5 \uB370\uC774\uD130\uB97C \uBAA8\uB450 \uBD88\uB7EC\uC654\uC2B5\uB2C8\uB2E4");
+        }, "\uAD50\uCCB4\uD558\uAE30");
       } catch (e2) {
         fireToast("\uBC31\uC5C5 \uD30C\uC77C\uC744 \uC77D\uC744 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4");
       }
@@ -15693,7 +15705,7 @@ function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal,
     /* @__PURE__ */ React.createElement("span", { style: { fontSize: 20 } }, "\u{1F69A}\u26A0\uFE0F"),
     /* @__PURE__ */ React.createElement("span", { style: { flex: 1 } }, /* @__PURE__ */ React.createElement("span", { style: { display: "block", fontSize: 13, fontWeight: 700, color: "#A32D2D" } }, "\uB3C4\uCC29 \uD655\uC778\uC774 \uD544\uC694\uD55C \uBC30\uC1A1\uC774 ", overdueCount, "\uAC74 \uC788\uC5B4\uC694"), /* @__PURE__ */ React.createElement("span", { style: { display: "block", fontSize: 11, color: "#888780", marginTop: 2 } }, "\uBC1C\uC1A1 \uD6C4 \uC815\uC0C1 \uB3C4\uCC29\uC77C\uC774 \uC9C0\uB0AC\uB294\uB370 \uC544\uC9C1 \uD655\uC778 \uC548 \uB410\uC5B4\uC694. \uB20C\uB7EC\uC11C \uD655\uC778\uD558\uC138\uC694")),
     /* @__PURE__ */ React.createElement("span", { style: { color: "#A32D2D", fontSize: 16 } }, "\u203A")
-  ), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#1B2430", marginBottom: 8 } }, "\uC624\uB298 \uC8FC\uBB38 \uD604\uD669"), /* @__PURE__ */ React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 18 } }, /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uC785\uAE08\uB300\uAE30", value: counts.waiting, color: "#993C1D", bg: "#FAECE7", onClick: () => setTab("orders") }), /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uACB0\uC81C\uC644\uB8CC", value: counts.pending, color: "#854F0B", bg: "#FAEEDA", onClick: () => setTab("orders") }), /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uBC1C\uC1A1\uC900\uBE44", value: counts.ready, color: "#185FA5", bg: "#E6F1FB", onClick: () => setTab("orders") }), /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uBC1C\uC1A1\uC644\uB8CC", value: counts.shipped, color: "#27500A", bg: "#EAF3DE", onClick: () => setTab("orders") }), /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uACE0\uAC1D\uC218", value: customerCount, color: "#6B4EA6", bg: "#EFE9F7", onClick: () => setTab("customers") }), /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uC5C5\uCCB4\uC218", value: vendorCount, color: "#0F7B7B", bg: "#E3F3F3", onClick: () => setTab("vendorhub") })), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 13, fontWeight: 700, color: "#1B2430" } }, "\uCD5C\uADFC \uC8FC\uBB38"), /* @__PURE__ */ React.createElement("button", { onClick: () => setTab("orders"), style: { border: "none", background: "none", color: "#185FA5", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, "\uB354\uBCF4\uAE30 \u203A")), recentOrders.length === 0 ? /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid #E2E4DD", borderRadius: 12, padding: "28px 0", textAlign: "center", color: "#888780", fontSize: 13, marginBottom: 18 } }, "\uC544\uC9C1 \uB4F1\uB85D\uB41C \uC8FC\uBB38\uC774 \uC5C6\uC5B4\uC694.") : /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8, marginBottom: 18 } }, recentOrders.map((o) => {
+  ), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#1B2430", marginBottom: 8 } }, "\uC8FC\uBB38 \uD604\uD669 (\uC804\uCCB4)"), /* @__PURE__ */ React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 18 } }, /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uC785\uAE08\uB300\uAE30", value: counts.waiting, color: "#993C1D", bg: "#FAECE7", onClick: () => setTab("orders") }), /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uACB0\uC81C\uC644\uB8CC", value: counts.pending, color: "#854F0B", bg: "#FAEEDA", onClick: () => setTab("orders") }), /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uBC1C\uC1A1\uC900\uBE44", value: counts.ready, color: "#185FA5", bg: "#E6F1FB", onClick: () => setTab("orders") }), /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uBC1C\uC1A1\uC644\uB8CC", value: counts.shipped, color: "#27500A", bg: "#EAF3DE", onClick: () => setTab("orders") }), /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uACE0\uAC1D\uC218", value: customerCount, color: "#6B4EA6", bg: "#EFE9F7", onClick: () => setTab("customers") }), /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uC5C5\uCCB4\uC218", value: vendorCount, color: "#0F7B7B", bg: "#E3F3F3", onClick: () => setTab("vendorhub") })), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 13, fontWeight: 700, color: "#1B2430" } }, "\uCD5C\uADFC \uC8FC\uBB38"), /* @__PURE__ */ React.createElement("button", { onClick: () => setTab("orders"), style: { border: "none", background: "none", color: "#185FA5", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, "\uB354\uBCF4\uAE30 \u203A")), recentOrders.length === 0 ? /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid #E2E4DD", borderRadius: 12, padding: "28px 0", textAlign: "center", color: "#888780", fontSize: 13, marginBottom: 18 } }, "\uC544\uC9C1 \uB4F1\uB85D\uB41C \uC8FC\uBB38\uC774 \uC5C6\uC5B4\uC694.") : /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8, marginBottom: 18 } }, recentOrders.map((o) => {
     var _a;
     const c = customerMap[o.customerId];
     const st = STATUS[o.status] || STATUS.pending;
@@ -17007,6 +17019,11 @@ ${r.body}`).join("\n\n----------\n\n");
     const valid = checkedRows.filter((r) => r.phone);
     if (valid.length === 0) {
       fireToast("\uC5F0\uB77D\uCC98\uAC00 \uC788\uB294 \uC120\uD0DD \uB300\uC0C1\uC774 \uC5C6\uC5B4\uC694");
+      return;
+    }
+    const bodies = new Set(valid.map((r) => r.body));
+    if (valid.length > 1 && bodies.size > 1) {
+      fireToast("\uBC1B\uB294 \uBD84\uB9C8\uB2E4 \uB0B4\uC6A9(\uC774\uB984\u00B7\uC1A1\uC7A5\uBC88\uD638)\uC774 \uB2EC\uB77C\uC694. \uD55C \uBC88\uC5D0 \uBCF4\uB0B4\uBA74 \uBAA8\uB450\uC5D0\uAC8C \uB611\uAC19\uC740 \uBB38\uC790\uAC00 \uAC00\uC694. '\uBCF5\uC0AC'\uB85C \uAC01\uC790 \uBCF4\uB0B4\uAC70\uB098, \uD55C \uBA85\uC529 \uC120\uD0DD\uD574 \uBCF4\uB0B4\uC8FC\uC138\uC694");
       return;
     }
     const phones = valid.map((r) => r.phone).join(",");
