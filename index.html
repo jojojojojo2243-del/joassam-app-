@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 151;
+const APP_VERSION = 152;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
 function ordChunkDocId(i) {
@@ -250,16 +250,64 @@ function orderBelongsToCustomer(o, customer) {
   const sp = ((o.sender && o.sender.phone) || "").replace(/[^0-9]/g, "");
   return cp === rp || cp === sp;
 }
-function countRecentOrdersForCustomer(customer, orders) {
-  const oneYearAgo = /* @__PURE__ */ new Date();
-  oneYearAgo.setDate(oneYearAgo.getDate() - 365);
-  return orders.filter((o) => {
-    if (!orderBelongsToCustomer(o, customer)) return false;
+let _ocIdxOrders = null;
+let _ocIdx = null;
+function getOrderCountIndex(orders) {
+  if (_ocIdxOrders === orders && _ocIdx) return _ocIdx;
+  const byId = /* @__PURE__ */ Object.create(null);
+  const byPhone = /* @__PURE__ */ Object.create(null);
+  const now = (/* @__PURE__ */ new Date()).getTime();
+  const c30 = now - 30 * 864e5;
+  const c365 = now - 365 * 864e5;
+  const list = orders || [];
+  for (let i = 0; i < list.length; i++) {
+    const o = list[i];
+    if (!o || o.isBusiness) continue;
     const d = parseOrderDate(o);
-    return d && d >= oneYearAgo;
-  }).length;
+    if (!d) continue;
+    const t = d.getTime();
+    if (t < c365) continue;
+    const in30 = t >= c30;
+    const addId = (key) => {
+      if (!key) return;
+      let e = byId[key];
+      if (!e) e = byId[key] = { d30: 0, d365: 0 };
+      e.d365++;
+      if (in30) e.d30++;
+    };
+    const addPhone = (key) => {
+      if (!key || key.length < 8) return;
+      let e = byPhone[key];
+      if (!e) e = byPhone[key] = { d30: 0, d365: 0 };
+      e.d365++;
+      if (in30) e.d30++;
+    };
+    if (o.customerId) addId(o.customerId);
+    const rp = ((o.recipient && o.recipient.phone) || "").replace(/[^0-9]/g, "");
+    const sp = ((o.sender && o.sender.phone) || "").replace(/[^0-9]/g, "");
+    addPhone(rp);
+    if (sp && sp !== rp) addPhone(sp);
+  }
+  _ocIdxOrders = orders;
+  _ocIdx = { byId, byPhone };
+  return _ocIdx;
+}
+function customerOrderCounts(customer, orders) {
+  const idx = getOrderCountIndex(orders);
+  const cp = ((customer && customer.phone) || "").replace(/[^0-9]/g, "");
+  const idE = customer && customer.id ? idx.byId[customer.id] : null;
+  const phE = cp && cp.length >= 8 ? idx.byPhone[cp] : null;
+  return {
+    d30: Math.max(idE ? idE.d30 : 0, phE ? phE.d30 : 0),
+    d365: Math.max(idE ? idE.d365 : 0, phE ? phE.d365 : 0)
+  };
+}
+function countRecentOrdersForCustomer(customer, orders) {
+  return customerOrderCounts(customer, orders).d365;
 }
 function countOrdersInLastNDays(customer, orders, days) {
+  if (days === 30) return customerOrderCounts(customer, orders).d30;
+  if (days === 365) return customerOrderCounts(customer, orders).d365;
   const cutoff = /* @__PURE__ */ new Date();
   cutoff.setDate(cutoff.getDate() - days);
   return orders.filter((o) => {
@@ -1885,7 +1933,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v151 (\uC790\uB3D9\uBD84\uD560 + \uBC1C\uC1A1\uC644\uB8CC \uC804\uCCB4\uBCF4\uAE30 + \uB2E8\uACE8 \uC0C1\uC704 30\uBA85)";
+const APP_BUILD = "v152 (\uC18D\uB3C4\uAC1C\uC120 + \uC911\uBCF5\uACE0\uAC1D \uC815\uB9AC + \uB2E8\uACE8 \uC0C1\uC704 30)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -13573,6 +13621,61 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     if (patchCount > 0) parts.push(`\uCD94\uAC00 \uC8FC\uC18C ${patchCount}\uAC74`);
     fireToast(`\uACFC\uAC70 \uC8FC\uBB38\uC5D0\uC11C ${parts.join(", ")}\uC744 \uCC3E\uC544\uC11C \uBC18\uC601\uD588\uC5B4\uC694`);
   }
+  function mergeDuplicateCustomers() {
+    const digitsOf = (p) => String(p || "").replace(/[^0-9]/g, "");
+    const keyOf = (c) => {
+      const nm = (c.name || "").replace(/\s/g, "");
+      const ph = digitsOf(c.phone);
+      if (nm && ph.length >= 4) return "K|" + nm + "|" + ph.slice(-4);
+      if (ph.length >= 9) return "P|" + ph;
+      return "U|" + c.id;
+    };
+    const groups = {};
+    customers.forEach((c) => {
+      const k = keyOf(c);
+      (groups[k] = groups[k] || []).push(c);
+    });
+    const allGroups = Object.keys(groups).map((k) => groups[k]);
+    const dupGroups = allGroups.filter((g) => g.length > 1);
+    if (dupGroups.length === 0) {
+      fireToast("\uC911\uBCF5\uB41C \uACE0\uAC1D\uC774 \uC5C6\uC5B4\uC694. \uC774\uBBF8 \uAE54\uB054\uD574\uC694");
+      return;
+    }
+    let removedCount = 0;
+    dupGroups.forEach((g) => {
+      removedCount += g.length - 1;
+    });
+    const afterCount = customers.length - removedCount;
+    askConfirm(`\uC911\uBCF5 \uACE0\uAC1D ${dupGroups.length}\uBB36\uC74C\uC744 \uC815\uB9AC\uD574\uC11C ${customers.length}\uBA85 \u2192 ${afterCount}\uBA85\uC73C\uB85C \uD569\uCE60\uAE4C\uC694?
+(\uAC19\uC740 \uC774\uB984+\uC804\uD654 \uB4B74\uC790\uB9AC, \uB610\uB294 \uAC19\uC740 \uBC88\uD638\uB07C\uB9AC \uD569\uCCD0\uC694. \uC8FC\uBB38\uC740 \uB300\uD45C \uACE0\uAC1D\uC73C\uB85C \uC790\uB3D9 \uC5F0\uACB0\uB3FC\uC694. \uBA3C\uC800 "\uC8FC\uBB38\uBC31\uC5C5 \uB2E4\uC6B4\uB85C\uB4DC"\uB85C \uBC31\uC5C5\uD574\uB450\uC2DC\uAE38 \uAD8C\uD574\uC694)`, () => {
+      const idRemap = {};
+      const keepList = [];
+      allGroups.forEach((g) => {
+        if (g.length === 1) {
+          keepList.push(g[0]);
+          return;
+        }
+        const scored = g.map((c) => ({ c, n: customerOrderCounts(c, orders).d365, hasAddr: (c.address || "").trim() ? 1 : 0 }));
+        scored.sort((a, b) => b.n - a.n || b.hasAddr - a.hasAddr || String(b.c.phone || "").length - String(a.c.phone || "").length);
+        const primary = __spreadValues({}, scored[0].c);
+        for (let i = 1; i < scored.length; i++) {
+          const dup = scored[i].c;
+          idRemap[dup.id] = primary.id;
+          if (!(primary.address || "").trim() && (dup.address || "").trim()) primary.address = dup.address;
+          if (!(primary.postalCode || "").trim() && (dup.postalCode || "").trim()) primary.postalCode = dup.postalCode;
+          if (!(primary.phone || "").trim() && (dup.phone || "").trim()) primary.phone = dup.phone;
+          const pm = (primary.memo || "").trim();
+          const dm = (dup.memo || "").trim();
+          if (dm && pm.indexOf(dm) === -1) primary.memo = pm ? pm + " / " + dm : dm;
+        }
+        keepList.push(primary);
+      });
+      const newOrders = orders.map((o) => o && o.customerId && idRemap[o.customerId] ? __spreadProps(__spreadValues({}, o), { customerId: idRemap[o.customerId] }) : o);
+      setCustomers(keepList);
+      setOrders(newOrders);
+      fireToast(`\uC911\uBCF5 \uC815\uB9AC \uC644\uB8CC \u2014 ${removedCount}\uBA85\uC744 \uD569\uCCE4\uC5B4\uC694 (${afterCount}\uBA85 \uB0A8\uC74C)`);
+    }, "\uD569\uCE58\uAE30");
+  }
   function createVoiceOrder(vo) {
     if (!vo || !vo.name || !vo.items || !vo.items.length) return null;
     recordUndo("\uBC29\uAE08 \uB4F1\uB85D\uD55C \uC8FC\uBB38");
@@ -14838,7 +14941,8 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         customerInputRef,
         handleCustomerUpload,
         askConfirm,
-        backfillMissingCustomers
+        backfillMissingCustomers,
+        mergeDuplicateCustomers
       }
     ), tab === "linkfarm" && /* @__PURE__ */ React.createElement(LinkFarmTab, { fireToast }), tab === "subscriptions" && /* @__PURE__ */ React.createElement(
       SubscriptionsTab,
@@ -18899,7 +19003,7 @@ function CustomerAvatar({ name }) {
   const idx = ((name == null ? void 0 : name.charCodeAt(0)) || 0) % AVATAR_COLORS.length;
   return /* @__PURE__ */ React.createElement("div", { style: { width: 38, height: 38, borderRadius: "50%", background: AVATAR_COLORS[idx], display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 14, fontWeight: 700, color: "#fff" } }, name ? name[0] : "?"));
 }
-function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, removeCustomer, removeCustomersMulti, updateCustomer, orders, subscriptions, exportCustomersExcel, customerInputRef, handleCustomerUpload, askConfirm, backfillMissingCustomers }) {
+function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, removeCustomer, removeCustomersMulti, updateCustomer, orders, subscriptions, exportCustomersExcel, customerInputRef, handleCustomerUpload, askConfirm, backfillMissingCustomers, mergeDuplicateCustomers }) {
   const [searchQuery, setSearchQuery] = useState("");
   const [checkedIds, setCheckedIds] = useState(/* @__PURE__ */ new Set());
   function toggleChecked(id) {
@@ -18950,10 +19054,13 @@ function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, rem
     const regs = customers.filter((c) => isRegularCustomer(c, orders));
     return [...regs].sort((a, b) => countRecentOrdersForCustomer(b, orders) - countRecentOrdersForCustomer(a, orders)).slice(0, 30);
   }, [customers, orders]);
+  const CUST_RENDER_CAP = 100;
+  const custListCapped = !searchQuery.trim() && !regularOnly && filteredCustomers.length > CUST_RENDER_CAP;
+  const displayCustomers = custListCapped ? filteredCustomers.slice(0, CUST_RENDER_CAP) : filteredCustomers;
   return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", { style: { fontSize: 19, fontWeight: 700, margin: "2px 0 14px", letterSpacing: "-0.02em" } }, "\uACE0\uAC1D"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, color: "#5F5E5A", fontWeight: 600, margin: "-8px 0 12px" } }, "\uC804\uCCB4 \uACE0\uAC1D ", customers.length, "\uBA85"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 10 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => exportCustomersExcel(), style: toolBtnStyle("#2F6F4E") }, "\uC804\uCCB4 \uB2E4\uC6B4\uB85C\uB4DC"), /* @__PURE__ */ React.createElement("button", { onClick: () => {
     var _a;
     return (_a = customerInputRef.current) == null ? void 0 : _a.click();
-  }, style: toolBtnStyle("#185FA5") }, "\uC5C5\uB85C\uB4DC"), /* @__PURE__ */ React.createElement("input", { ref: customerInputRef, type: "file", accept: ".xlsx,.xls,.csv", multiple: true, onChange: handleCustomerUpload, style: { display: "none" } })), /* @__PURE__ */ React.createElement("button", { onClick: backfillMissingCustomers, style: { width: "100%", padding: "10px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12.5, cursor: "pointer", marginBottom: 16 } }, "\uACFC\uAC70 \uC8FC\uBB38\uC5D0\uC11C \uBE60\uC9C4 \uACE0\uAC1D \uCC44\uC6B0\uAE30"), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11, color: "#888780", margin: "0 0 14px" } }, "\uC5D1\uC140\uC5D0\uB294 \uC774\uB984/\uC804\uD654\uBC88\uD638/\uC6B0\uD3B8\uBC88\uD638/\uC8FC\uC18C/\uBA54\uBAA8\uC640 \uD568\uAED8 \uC815\uAE30\uBC30\uC1A1 \uC5EC\uBD80\xB7\uC9C4\uD589\uD68C\uCC28\xB7\uB0A8\uC740\uD68C\uC218\uAC00 \uD3EC\uD568\uB3FC\uC694."), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 } }, /* @__PURE__ */ React.createElement("input", { placeholder: "\uC774\uB984", value: newCustomer.name, onChange: (e) => setNewCustomer(__spreadProps(__spreadValues({}, newCustomer), { name: e.target.value })), style: inputStyle() }), /* @__PURE__ */ React.createElement("input", { placeholder: "\uC804\uD654\uBC88\uD638", value: newCustomer.phone, onChange: (e) => setNewCustomer(__spreadProps(__spreadValues({}, newCustomer), { phone: e.target.value })), style: inputStyle() }), /* @__PURE__ */ React.createElement("input", { placeholder: "\uC8FC\uC18C", value: newCustomer.address, onChange: (e) => setNewCustomer(__spreadProps(__spreadValues({}, newCustomer), { address: e.target.value })), style: inputStyle() }), newCustomer.address.trim() && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#185FA5", padding: "0 2px" } }, "\uC790\uB3D9 \uC785\uB825\uB41C \uC6B0\uD3B8\uBC88\uD638: ", estimatePostalCode(newCustomer.address)), /* @__PURE__ */ React.createElement("input", { placeholder: "\uBA54\uBAA8", value: newCustomer.memo, onChange: (e) => setNewCustomer(__spreadProps(__spreadValues({}, newCustomer), { memo: e.target.value })), style: inputStyle() }), /* @__PURE__ */ React.createElement("button", { onClick: addCustomer, style: addBtnStyle }, "\uACE0\uAC1D \uCD94\uAC00")), /* @__PURE__ */ React.createElement(
+  }, style: toolBtnStyle("#185FA5") }, "\uC5C5\uB85C\uB4DC"), /* @__PURE__ */ React.createElement("input", { ref: customerInputRef, type: "file", accept: ".xlsx,.xls,.csv", multiple: true, onChange: handleCustomerUpload, style: { display: "none" } })), /* @__PURE__ */ React.createElement("button", { onClick: backfillMissingCustomers, style: { width: "100%", padding: "10px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12.5, cursor: "pointer", marginBottom: 16 } }, "\uACFC\uAC70 \uC8FC\uBB38\uC5D0\uC11C \uBE60\uC9C4 \uACE0\uAC1D \uCC44\uC6B0\uAE30"), /* @__PURE__ */ React.createElement("button", { onClick: mergeDuplicateCustomers, style: { width: "100%", padding: "10px 0", borderRadius: 8, border: "1px solid #854F0B", background: "#fff", color: "#854F0B", fontWeight: 700, fontSize: 12.5, cursor: "pointer", marginBottom: 16 } }, "\uD83E\uDDF9 \uC911\uBCF5 \uACE0\uAC1D \uC815\uB9AC (\uAC19\uC740 \uBD84 \uD569\uCE58\uAE30)"), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11, color: "#888780", margin: "0 0 14px" } }, "\uC5D1\uC140\uC5D0\uB294 \uC774\uB984/\uC804\uD654\uBC88\uD638/\uC6B0\uD3B8\uBC88\uD638/\uC8FC\uC18C/\uBA54\uBAA8\uC640 \uD568\uAED8 \uC815\uAE30\uBC30\uC1A1 \uC5EC\uBD80\xB7\uC9C4\uD589\uD68C\uCC28\xB7\uB0A8\uC740\uD68C\uC218\uAC00 \uD3EC\uD568\uB3FC\uC694."), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 } }, /* @__PURE__ */ React.createElement("input", { placeholder: "\uC774\uB984", value: newCustomer.name, onChange: (e) => setNewCustomer(__spreadProps(__spreadValues({}, newCustomer), { name: e.target.value })), style: inputStyle() }), /* @__PURE__ */ React.createElement("input", { placeholder: "\uC804\uD654\uBC88\uD638", value: newCustomer.phone, onChange: (e) => setNewCustomer(__spreadProps(__spreadValues({}, newCustomer), { phone: e.target.value })), style: inputStyle() }), /* @__PURE__ */ React.createElement("input", { placeholder: "\uC8FC\uC18C", value: newCustomer.address, onChange: (e) => setNewCustomer(__spreadProps(__spreadValues({}, newCustomer), { address: e.target.value })), style: inputStyle() }), newCustomer.address.trim() && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#185FA5", padding: "0 2px" } }, "\uC790\uB3D9 \uC785\uB825\uB41C \uC6B0\uD3B8\uBC88\uD638: ", estimatePostalCode(newCustomer.address)), /* @__PURE__ */ React.createElement("input", { placeholder: "\uBA54\uBAA8", value: newCustomer.memo, onChange: (e) => setNewCustomer(__spreadProps(__spreadValues({}, newCustomer), { memo: e.target.value })), style: inputStyle() }), /* @__PURE__ */ React.createElement("button", { onClick: addCustomer, style: addBtnStyle }, "\uACE0\uAC1D \uCD94\uAC00")), /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: () => setRegularOnly((v) => !v),
@@ -18998,16 +19105,16 @@ function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, rem
     "input",
     {
       type: "checkbox",
-      checked: filteredCustomers.length > 0 && filteredCustomers.every((c) => checkedIds.has(c.id)),
+      checked: displayCustomers.length > 0 && displayCustomers.every((c) => checkedIds.has(c.id)),
       onChange: (e) => {
         setCheckedIds((prev) => {
           const next = new Set(prev);
-          filteredCustomers.forEach((c) => e.target.checked ? next.add(c.id) : next.delete(c.id));
+          displayCustomers.forEach((c) => e.target.checked ? next.add(c.id) : next.delete(c.id));
           return next;
         });
       }
     }
-  ), "\uC804\uCCB4\uC120\uD0DD"), checkedIds.size > 0 && /* @__PURE__ */ React.createElement("button", { onClick: handleDeleteChecked, style: { border: "none", background: "#E24B4A", color: "#fff", fontWeight: 700, fontSize: 12, padding: "6px 12px", borderRadius: 8, cursor: "pointer" } }, "\uC120\uD0DD \uC0AD\uC81C (", checkedIds.size, ")")), filteredCustomers.length === 0 ? /* @__PURE__ */ React.createElement("div", { style: { padding: "40px 0", textAlign: "center", color: "#888780", fontSize: 13 } }, searchQuery ? "\uAC80\uC0C9 \uACB0\uACFC\uAC00 \uC5C6\uC5B4\uC694." : "\uC544\uC9C1 \uB4F1\uB85D\uB41C \uACE0\uAC1D\uC774 \uC5C6\uC5B4\uC694.") : /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8 } }, filteredCustomers.map((c) => {
+  ), "\uC804\uCCB4\uC120\uD0DD"), checkedIds.size > 0 && /* @__PURE__ */ React.createElement("button", { onClick: handleDeleteChecked, style: { border: "none", background: "#E24B4A", color: "#fff", fontWeight: 700, fontSize: 12, padding: "6px 12px", borderRadius: 8, cursor: "pointer" } }, "\uC120\uD0DD \uC0AD\uC81C (", checkedIds.size, ")")), filteredCustomers.length === 0 ? /* @__PURE__ */ React.createElement("div", { style: { padding: "40px 0", textAlign: "center", color: "#888780", fontSize: 13 } }, searchQuery ? "\uAC80\uC0C9 \uACB0\uACFC\uAC00 \uC5C6\uC5B4\uC694." : "\uC544\uC9C1 \uB4F1\uB85D\uB41C \uACE0\uAC1D\uC774 \uC5C6\uC5B4\uC694.") : /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8 } }, custListCapped && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "#888780", padding: "2px 2px 8px" } }, "\uACE0\uAC1D\uC774 \uB9CE\uC544 \uCD5C\uADFC 100\uBA85\uB9CC \uD45C\uC2DC\uD588\uC5B4\uC694. \uC774\uB984\u00B7\uC804\uD654\uBC88\uD638\uB85C \uAC80\uC0C9\uD558\uBA74 \uB2E4 \uB098\uC640\uC694."), displayCustomers.map((c) => {
     const orderCount = orders.filter((o) => o.customerId === c.id).length;
     const sub = subscriptions.find((s) => s.customerId === c.id && s.active);
     const isRegular = isRegularCustomer(c, orders);
