@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 149;
+const APP_VERSION = 151;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
 function ordChunkDocId(i) {
@@ -234,38 +234,52 @@ function syncCustomerAddressNotes(ordersToScan, existingCustomers) {
   });
   return patches;
 }
-function countRecentOrdersForCustomer(customerId, orders) {
+function parseOrderDate(o) {
+  const s = String((o && (o.orderDate || o.createdAt)) || "");
+  const m = s.match(/(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
+function orderBelongsToCustomer(o, customer) {
+  if (!o || o.isBusiness) return false;
+  if (customer && customer.id && o.customerId === customer.id) return true;
+  const cp = ((customer && customer.phone) || "").replace(/[^0-9]/g, "");
+  if (!cp || cp.length < 8) return false;
+  const rp = ((o.recipient && o.recipient.phone) || "").replace(/[^0-9]/g, "");
+  const sp = ((o.sender && o.sender.phone) || "").replace(/[^0-9]/g, "");
+  return cp === rp || cp === sp;
+}
+function countRecentOrdersForCustomer(customer, orders) {
   const oneYearAgo = /* @__PURE__ */ new Date();
   oneYearAgo.setDate(oneYearAgo.getDate() - 365);
   return orders.filter((o) => {
-    if (o.customerId !== customerId) return false;
-    if (o.isBusiness) return false;
-    const d = new Date(o.createdAt || o.orderDate || 0);
-    return !isNaN(d.getTime()) && d >= oneYearAgo;
+    if (!orderBelongsToCustomer(o, customer)) return false;
+    const d = parseOrderDate(o);
+    return d && d >= oneYearAgo;
   }).length;
 }
-function countOrdersInLastNDays(customerId, orders, days) {
+function countOrdersInLastNDays(customer, orders, days) {
   const cutoff = /* @__PURE__ */ new Date();
   cutoff.setDate(cutoff.getDate() - days);
   return orders.filter((o) => {
-    if (o.customerId !== customerId) return false;
-    if (o.isBusiness) return false;
-    const d = new Date(o.createdAt || o.orderDate || 0);
-    return !isNaN(d.getTime()) && d >= cutoff;
+    if (!orderBelongsToCustomer(o, customer)) return false;
+    const d = parseOrderDate(o);
+    return d && d >= cutoff;
   }).length;
 }
 function isRegularCustomer(customer, orders, threshold) {
   if (customer.regularOverride === true) return true;
   if (customer.regularOverride === false) return false;
-  if (countRecentOrdersForCustomer(customer.id, orders) >= (threshold || 10)) return true;
-  if (countOrdersInLastNDays(customer.id, orders, 30) >= 4) return true;
+  if (countRecentOrdersForCustomer(customer, orders) >= (threshold || 10)) return true;
+  if (countOrdersInLastNDays(customer, orders, 30) >= 4) return true;
   return false;
 }
 function findNewMonthlyRegularCandidates(customers, orders) {
   return customers.filter((c) => {
     if (c.regularOverride === false) return false;
     if (c.regularOverride === true) return false;
-    return countOrdersInLastNDays(c.id, orders, 30) >= 4;
+    return countOrdersInLastNDays(c, orders, 30) >= 4;
   });
 }
 function findMatchingParty(name, phone, address, list) {
@@ -1871,7 +1885,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v149 (\uC790\uB3D9\uBD84\uD560 \uC800\uC7A5: \uC8FC\uBB38\u00B7\uACE0\uAC1D \uBB34\uC81C\uD55C \uD655\uC7A5 \u2013 \uC601\uAD6C\uD574\uACB0)";
+const APP_BUILD = "v151 (\uC790\uB3D9\uBD84\uD560 + \uBC1C\uC1A1\uC644\uB8CC \uC804\uCCB4\uBCF4\uAE30 + \uB2E8\uACE8 \uC0C1\uC704 30\uBA85)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -12350,6 +12364,8 @@ function App() {
   const filteredOrders = orders.filter((o) => statusFilter === "all" || o.status === statusFilter).filter((o) => methodFilter === "all" || (methodFilter === "message" ? !!o.message : !o.message)).filter((o) => inDateRange(o, dateFilter)).filter((o) => {
     if (isOrderSearching) return true;
     if (o.status !== "shipped") return true;
+    if (statusFilter === "shipped") return true;
+    if (dateFilter && dateFilter !== "all") return true;
     const shippedDateStr = (o.shippedAt || o.createdAt || "").slice(0, 10);
     return !shippedDateStr || shippedDateStr >= threeDaysAgoStr;
   }).filter((o) => {
@@ -14279,8 +14295,8 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         paymentAmount: ""
       };
       const row = Object.fromEntries(orderTemplate.map((label) => [label, resolveOrderField(label, pseudo)]));
-      row["\uCD5C\uADFC1\uB144 \uC8FC\uBB38\uD69F\uC218"] = countRecentOrdersForCustomer(c.id, orders);
-      row["\uCD5C\uADFC\uD55C\uB2EC \uC8FC\uBB38\uD69F\uC218"] = countOrdersInLastNDays(c.id, orders, 30);
+      row["\uCD5C\uADFC1\uB144 \uC8FC\uBB38\uD69F\uC218"] = countRecentOrdersForCustomer(c, orders);
+      row["\uCD5C\uADFC\uD55C\uB2EC \uC8FC\uBB38\uD69F\uC218"] = countOrdersInLastNDays(c, orders, 30);
       row["\uB2E8\uACE8\uC5EC\uBD80"] = isRegularCustomer(c, orders) ? "\uB2E8\uACE8" : "";
       return row;
     });
@@ -18922,10 +18938,18 @@ function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, rem
       );
       list = [...list].sort((a, b) => cscore(b) - cscore(a) || String(a.name || "").localeCompare(String(b.name || "")));
     }
-    if (regularOnly) list = list.filter((c) => isRegularCustomer(c, orders));
+    if (regularOnly) {
+      let regs = list.filter((c) => isRegularCustomer(c, orders));
+      regs = [...regs].sort((a, b) => countRecentOrdersForCustomer(b, orders) - countRecentOrdersForCustomer(a, orders));
+      list = q ? regs : regs.slice(0, 30);
+    }
     return list;
   }, [customers, searchQuery, regularOnly, orders]);
   const regularCount = useMemo(() => customers.filter((c) => isRegularCustomer(c, orders)).length, [customers, orders]);
+  const topRegulars = useMemo(() => {
+    const regs = customers.filter((c) => isRegularCustomer(c, orders));
+    return [...regs].sort((a, b) => countRecentOrdersForCustomer(b, orders) - countRecentOrdersForCustomer(a, orders)).slice(0, 30);
+  }, [customers, orders]);
   return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", { style: { fontSize: 19, fontWeight: 700, margin: "2px 0 14px", letterSpacing: "-0.02em" } }, "\uACE0\uAC1D"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, color: "#5F5E5A", fontWeight: 600, margin: "-8px 0 12px" } }, "\uC804\uCCB4 \uACE0\uAC1D ", customers.length, "\uBA85"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 10 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => exportCustomersExcel(), style: toolBtnStyle("#2F6F4E") }, "\uC804\uCCB4 \uB2E4\uC6B4\uB85C\uB4DC"), /* @__PURE__ */ React.createElement("button", { onClick: () => {
     var _a;
     return (_a = customerInputRef.current) == null ? void 0 : _a.click();
@@ -18947,20 +18971,20 @@ function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, rem
       }
     },
     "\u2B50 \uB2E8\uACE8 \uACE0\uAC1D\uB9CC \uBCF4\uAE30 (",
-    regularCount,
+    regularCount > 30 ? "\uC0C1\uC704 30" : regularCount,
     "\uBA85) ",
     regularOnly ? "\xB7 \uCF1C\uC9D0" : ""
   ), /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: () => {
-        const regulars = customers.filter((c) => isRegularCustomer(c, orders));
+        const regulars = topRegulars;
         exportCustomersExcel(regulars, `\uB2E8\uACE8 \uACE0\uAC1D ${regulars.length}\uBA85\uC744 \uB2E4\uC6B4\uB85C\uB4DC\uD588\uC2B5\uB2C8\uB2E4`);
       },
       style: { width: "100%", marginBottom: 12, padding: "10px 0", borderRadius: 10, border: "1px solid #854F0B", background: "#fff", color: "#854F0B", fontWeight: 700, fontSize: 12.5, cursor: "pointer" }
     },
     "\u2B50 \uB2E8\uACE8 \uACE0\uAC1D\uB9CC \uB2E4\uC6B4\uB85C\uB4DC (",
-    regularCount,
+    regularCount > 30 ? "\uC0C1\uC704 30" : regularCount,
     "\uBA85)"
   ), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, background: "#fff", border: "1px solid #E2E4DD", borderRadius: 10, padding: "8px 12px", marginBottom: 12 } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#888780" } }, "\u{1F50D}"), /* @__PURE__ */ React.createElement(
     "input",
@@ -19000,7 +19024,7 @@ function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, rem
         checked: checkedIds.has(c.id),
         onToggleChecked: () => toggleChecked(c.id),
         isRegular,
-        recentOrderCount: countRecentOrdersForCustomer(c.id, orders)
+        recentOrderCount: countRecentOrdersForCustomer(c, orders)
       }
     );
   })));
