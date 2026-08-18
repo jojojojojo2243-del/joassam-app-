@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 152;
+const APP_VERSION = 153;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
 function ordChunkDocId(i) {
@@ -1933,7 +1933,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v152 (\uC18D\uB3C4\uAC1C\uC120 + \uC911\uBCF5\uACE0\uAC1D \uC815\uB9AC + \uB2E8\uACE8 \uC0C1\uC704 30)";
+const APP_BUILD = "v153 (\uC18D\uB3C4\uAC1C\uC120 + \uC911\uBCF5\uC815\uB9AC + \uC800\uC7A5\uACBD\uACE0 \uC815\uC0C1\uD654)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -3004,12 +3004,31 @@ function aiEstimateDocSize(appData) {
 function aiSelfMonitor(appData, extra) {
   const e = extra || {};
   const orders = appData && appData.orders || [];
-  const bytes = aiEstimateDocSize(appData);
+  const customers = appData && appData.customers || [];
+  let bytes = 0;
+  try {
+    const rest = __spreadValues({}, appData || {});
+    delete rest.orders;
+    delete rest.customers;
+    let mx = JSON.stringify(rest).length;
+    const ordChunks = chunkArraySized(orders, RECORD_CHUNK_SIZE);
+    for (let i = 0; i < ordChunks.length; i++) {
+      const b = JSON.stringify({ orders: ordChunks[i] }).length;
+      if (b > mx) mx = b;
+    }
+    const cusChunks = chunkArraySized(customers, RECORD_CHUNK_SIZE);
+    for (let i = 0; i < cusChunks.length; i++) {
+      const b = JSON.stringify({ customers: cusChunks[i] }).length;
+      if (b > mx) mx = b;
+    }
+    bytes = mx;
+  } catch (err) {
+    bytes = aiEstimateDocSize(appData);
+  }
   const limit = 1024 * 1024;
   const pct = Math.round(bytes / limit * 100);
   const warnings = [];
-  if (pct >= 80) warnings.push({ level: "high", text: `\uC800\uC7A5 \uBB38\uC11C\uAC00 1MB\uC758 ${pct}%\uC785\uB2C8\uB2E4. \uC800\uC7A5\uAD6C\uC870 \uBD84\uB9AC(P8)\uAC00 \uACE7 \uD544\uC694\uD574\uC694.`, evidence: `\uD604\uC7AC ~${Math.round(bytes / 1024)}KB / 1024KB` });
-  else if (pct >= 60) warnings.push({ level: "mid", text: `\uC800\uC7A5 \uBB38\uC11C\uAC00 1MB\uC758 ${pct}%\uC785\uB2C8\uB2E4. \uCD94\uC774\uB97C \uC9C0\uCF1C\uBCF4\uC138\uC694.`, evidence: `\uD604\uC7AC ~${Math.round(bytes / 1024)}KB` });
+  if (pct >= 85) warnings.push({ level: "high", text: `\uC800\uC7A5 \uC870\uAC01 \uD558\uB098\uAC00 1MB\uC758 ${pct}%\uC608\uC694. \uC870\uAC01\uC744 \uB354 \uC798\uAC8C \uB098\uB220\uC57C \uD574\uC694.`, evidence: `\uAC00\uC7A5 \uD070 \uC870\uAC01 ~${Math.round(bytes / 1024)}KB / 1024KB` });
   if (typeof e.errorCount === "number" && e.errorCount > 0) warnings.push({ level: "mid", text: `\uCD5C\uADFC \uC624\uB958 ${e.errorCount}\uAC74\uC774 \uAE30\uB85D\uB418\uC5C8\uC5B4\uC694.`, evidence: "\uC624\uB958 \uB85C\uADF8" });
   const health = pct >= 80 ? "\uC8FC\uC758" : warnings.length ? "\uC591\uD638(\uAD00\uCC30)" : "\uC591\uD638";
   return {
