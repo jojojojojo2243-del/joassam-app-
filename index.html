@@ -54,8 +54,27 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 147;
+const APP_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
+const RECORD_CHUNK_SIZE = 400;
+function ordChunkDocId(i) {
+  return (IS_TEST ? "test_ord_" : "ord_") + i;
+}
+function cusChunkDocId(i) {
+  return (IS_TEST ? "test_cus_" : "cus_") + i;
+}
+function chunkArraySized(arr, size) {
+  const a = arr || [];
+  const out = [];
+  for (let i = 0; i < a.length; i += size) out.push(a.slice(i, i + size));
+  return out;
+}
+function recordChunkSig(arr) {
+  const s = JSON.stringify(arr || []);
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return (arr ? arr.length : 0) + ":" + (h >>> 0).toString(36);
+}
 const MEMBERS_DOC = IS_TEST ? "test_members" : "members";
 const STATUS = {
   waiting: { label: "\uC785\uAE08\uB300\uAE30", color: "#993C1D", bg: "#FAECE7" },
@@ -1852,7 +1871,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v147 (\uBCC0\uACBD\uC2DC\uC5D0\uB9CC \uC800\uC7A5 + \uD55C\uB3C4\uB0AD\uBE44\uCC28\uB2E8 + \uC8FC\uBB38\uD1B5\uD569 \uC548\uC815\uD654)";
+const APP_BUILD = "v149 (\uC790\uB3D9\uBD84\uD560 \uC800\uC7A5: \uC8FC\uBB38\u00B7\uACE0\uAC1D \uBB34\uC81C\uD55C \uD655\uC7A5 \u2013 \uC601\uAD6C\uD574\uACB0)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11124,10 +11143,55 @@ function App() {
       setDataLoaded(true);
     })();
   }, []);
+  const loadedDataSigRef = useRef(null);
+  function fetchRecordChunks(idFn, count, key) {
+    const n = count || 0;
+    if (!n) return Promise.resolve([]);
+    const gets = [];
+    for (let i = 0; i < n; i++) {
+      gets.push(fbDb.collection("stores").doc(idFn(i)).get().then((s) => s.exists && s.data() && Array.isArray(s.data()[key]) ? s.data()[key] : []).catch(() => []));
+    }
+    return Promise.all(gets).then((parts) => parts.reduce((a, b) => a.concat(b), []));
+  }
+  function recordCounts(partial) {
+    try {
+      const raw = localStorage.getItem("joassam_last_counts_" + DATA_DOC);
+      const c = raw ? JSON.parse(raw) : {};
+      Object.assign(c, partial);
+      if (c.customers || c.orders || c.products || c.vendors) {
+        localStorage.setItem("joassam_seen_real_data_" + DATA_DOC, "1");
+        localStorage.setItem("joassam_last_counts_" + DATA_DOC, JSON.stringify(c));
+      }
+    } catch (e) {
+    }
+  }
+  function applyOrdersArray(arr) {
+    const list = Array.isArray(arr) ? arr : [];
+    const newCount = list.length;
+    const prevCount = prevOrderCountRef.current;
+    const wasJustSubmitted = justSubmittedRef.current;
+    justSubmittedRef.current = false;
+    if (prevCount !== null && newCount > prevCount && newCount - prevCount <= 50 && !wasJustSubmitted) {
+      setNewOrderAlert((n) => n + (newCount - prevCount));
+      playAlertSound();
+    }
+    prevOrderCountRef.current = newCount;
+    setOrders(list);
+    lastGoodDataRef.current = __spreadProps(__spreadValues({}, lastGoodDataRef.current || {}), { orders: list });
+    recordCounts({ orders: newCount });
+  }
+  function applyCustomersArray(arr) {
+    const list = Array.isArray(arr) ? arr : [];
+    setCustomers(list);
+    lastGoodDataRef.current = __spreadProps(__spreadValues({}, lastGoodDataRef.current || {}), { customers: list });
+    recordCounts({ customers: list.length });
+  }
   useEffect(() => {
     if (!firebaseReady) return;
     let unsubData = null;
     let unsubMembers = null;
+    let unsubOrders = null;
+    let unsubCust = null;
     let unsubAuth = null;
     let attached = false;
     function attachListeners() {
@@ -11143,46 +11207,28 @@ function App() {
             const data = snap.data();
             if (data.appName) setAppName(data.appName);
             if (data.appLogo) setAppLogo(data.appLogo);
-            if (data.customers) setCustomers(data.customers);
             if (data.products) setProducts(data.products);
             if (data.vendors) setVendors(data.vendors);
             if (data.invoices) setInvoices(data.invoices);
             if (data.supplier) setSupplier(data.supplier);
-            let fullOrdersSnapshot = data.orders || [];
-            if (data.orders) {
-              const activeOrders = data.orders;
-              const wasJustSubmitted = justSubmittedRef.current;
-              justSubmittedRef.current = false;
-              const chunkCount = data.archiveChunkCount || 0;
-              const archSig = data.archiveSig || null;
-              archiveMetaRef.current = { chunkCount, sig: archSig };
-              if (chunkCount > 0 && archSig !== loadedArchiveSigRef.current) {
-                loadArchiveChunks(chunkCount).then((arch) => {
-                  archivedOrdersRef.current = arch;
-                  loadedArchiveSigRef.current = archSig;
-                  const full = mergeOrdersWithArchive(activeOrders, arch);
-                  setOrders(full);
-                  prevOrderCountRef.current = full.length;
-                  try {
-                    const raw = localStorage.getItem("joassam_last_counts_" + DATA_DOC);
-                    const c = raw ? JSON.parse(raw) : {};
-                    c.orders = full.length;
-                    localStorage.setItem("joassam_last_counts_" + DATA_DOC, JSON.stringify(c));
-                  } catch (e) {
-                  }
+            const hasManifest = typeof data.ordersChunkCount === "number" || typeof data.customersChunkCount === "number";
+            if (hasManifest) {
+              const sig = String(data.dataSig || "");
+              if (sig !== loadedDataSigRef.current) {
+                loadedDataSigRef.current = sig;
+                Promise.all([
+                  fetchRecordChunks(ordChunkDocId, data.ordersChunkCount || 0, "orders"),
+                  fetchRecordChunks(cusChunkDocId, data.customersChunkCount || 0, "customers")
+                ]).then((res) => {
+                  applyOrdersArray(res[0]);
+                  applyCustomersArray(res[1]);
                 }).catch(() => {
-                  setOrders(mergeOrdersWithArchive(activeOrders, archivedOrdersRef.current));
+                  loadedDataSigRef.current = null;
                 });
               }
-              fullOrdersSnapshot = mergeOrdersWithArchive(activeOrders, archivedOrdersRef.current);
-              setOrders(fullOrdersSnapshot);
-              const newCount = fullOrdersSnapshot.length;
-              const prevCount = prevOrderCountRef.current;
-              if (prevCount !== null && newCount > prevCount && newCount - prevCount <= 50 && !wasJustSubmitted) {
-                setNewOrderAlert((n) => n + (newCount - prevCount));
-                playAlertSound();
-              }
-              prevOrderCountRef.current = newCount;
+            } else {
+              if (data.orders) applyOrdersArray(data.orders);
+              if (data.customers) applyCustomersArray(data.customers);
             }
             if (data.subscriptions) setSubscriptions(data.subscriptions);
             if (data.integrations) setIntegrations(data.integrations);
@@ -11195,25 +11241,11 @@ function App() {
             if (data.courierTemplates) setCourierTemplates(data.courierTemplates);
             fbFirstLoadRef.current = true;
             const prevGood = lastGoodDataRef.current || {};
-            lastGoodDataRef.current = {
-              customers: data.customers || prevGood.customers,
-              orders: fullOrdersSnapshot.length ? fullOrdersSnapshot : data.orders || prevGood.orders,
+            lastGoodDataRef.current = __spreadProps(__spreadValues({}, prevGood), {
               products: data.products || prevGood.products,
               vendors: data.vendors || prevGood.vendors
-            };
-            try {
-              const counts2 = {
-                customers: (data.customers || []).length,
-                orders: fullOrdersSnapshot.length,
-                products: (data.products || []).length,
-                vendors: (data.vendors || []).length
-              };
-              if (counts2.customers || counts2.orders || counts2.products || counts2.vendors) {
-                localStorage.setItem("joassam_seen_real_data_" + DATA_DOC, "1");
-                localStorage.setItem("joassam_last_counts_" + DATA_DOC, JSON.stringify(counts2));
-              }
-            } catch (e) {
-            }
+            });
+            recordCounts({ products: (data.products || []).length, vendors: (data.vendors || []).length });
             try {
               const storedMinVersion = data.appMinVersion || 0;
               if (APP_VERSION < storedMinVersion) {
@@ -11266,6 +11298,8 @@ function App() {
     return () => {
       if (unsubData) unsubData();
       if (unsubMembers) unsubMembers();
+      if (unsubOrders) unsubOrders();
+      if (unsubCust) unsubCust();
       if (unsubAuth) unsubAuth();
     };
   }, []);
@@ -11285,7 +11319,11 @@ function App() {
   }, [dataLoaded]);
   const saveTimerRef = useRef(null);
   const pendingSaveDataRef = useRef(null);
-  const lastSavedHashRef = useRef(null);
+  const lastOrdSigsRef = useRef([]);
+  const lastCusSigsRef = useRef([]);
+  const prevOrdChunkCountRef = useRef(0);
+  const prevCusChunkCountRef = useRef(0);
+  const lastMainHashRef = useRef(null);
   const archivedOrdersRef = useRef([]);
   const loadedArchiveSigRef = useRef(null);
   const archiveWrittenSigRef = useRef(null);
@@ -11324,51 +11362,22 @@ function App() {
       });
       return;
     }
-    let dataHash = null;
+    const ordersArr = data.orders || [];
+    const custArr = data.customers || [];
+    const mainPayload = __spreadValues({}, data);
+    delete mainPayload.orders;
+    delete mainPayload.customers;
+    const ordChunks = chunkArraySized(ordersArr, RECORD_CHUNK_SIZE);
+    const cusChunks = chunkArraySized(custArr, RECORD_CHUNK_SIZE);
+    const ordSigs = ordChunks.map(recordChunkSig);
+    const cusSigs = cusChunks.map(recordChunkSig);
+    const dataSig = recordChunkSig([ordSigs, cusSigs]);
+    let mainHash = null;
     try {
-      dataHash = JSON.stringify(data);
+      mainHash = JSON.stringify(mainPayload);
     } catch (e) {
     }
-    if (dataHash !== null && dataHash === lastSavedHashRef.current) {
-      return;
-    }
-    fbDb.collection("stores").doc(DATA_DOC).set(__spreadProps(__spreadValues({}, data), { archiveChunkCount: 0, archiveSig: null }), { merge: true }).then(() => {
-      if (dataHash !== null) lastSavedHashRef.current = dataHash;
-      lastGoodDataRef.current = { customers: data.customers, orders: data.orders, products: data.products, vendors: data.vendors };
-      try {
-        const prevCount = archiveMetaRef.current && archiveMetaRef.current.chunkCount || 0;
-        for (let i = 0; i < prevCount; i++) {
-          fbDb.collection("stores").doc(archiveChunkDocId(i)).delete().catch(() => {
-          });
-        }
-      } catch (e) {
-      }
-      archiveMetaRef.current = { chunkCount: 0, sig: null };
-      archivedOrdersRef.current = [];
-      loadedArchiveSigRef.current = null;
-      archiveWrittenSigRef.current = null;
-      try {
-        const d = /* @__PURE__ */ new Date();
-        const pad = (n) => String(n).padStart(2, "0");
-        const hourKey = `${todayStr()}_${pad(d.getHours())}`;
-        const bkKey = "joassam_last_backup_hour_" + DATA_DOC;
-        let lastBk = null;
-        try {
-          lastBk = localStorage.getItem(bkKey);
-        } catch (e) {
-        }
-        if (lastBk !== hourKey) {
-          try {
-            localStorage.setItem(bkKey, hourKey);
-          } catch (e) {
-          }
-          const backupRef = fbDb.collection("stores").doc((IS_TEST ? "test_backup_" : "backup_") + hourKey);
-          backupRef.set(__spreadProps(__spreadValues({}, data), { backedUpAt: nowStamp() })).catch(() => {
-          });
-        }
-      } catch (e) {
-      }
-    }).catch((err) => {
+    const onErr = (err) => {
       try {
         logDiag("save_failed", { msg: String(err && err.message || err).slice(0, 140) });
       } catch (e) {
@@ -11377,7 +11386,53 @@ function App() {
         fireToast("⚠️ 저장 실패 — 인터넷 연결이나 저장 용량을 확인하세요. 화면을 닫지 말고 잠시 후 자동 재시도됩니다.");
       } catch (e) {
       }
-    });
+    };
+    const prevOrdSigs = lastOrdSigsRef.current || [];
+    const prevCusSigs = lastCusSigsRef.current || [];
+    const jobs = [];
+    for (let i = 0; i < ordChunks.length; i++) {
+      if (ordSigs[i] !== prevOrdSigs[i]) {
+        jobs.push(fbDb.collection("stores").doc(ordChunkDocId(i)).set({ orders: ordChunks[i], sig: ordSigs[i], part: i }));
+      }
+    }
+    for (let i = 0; i < cusChunks.length; i++) {
+      if (cusSigs[i] !== prevCusSigs[i]) {
+        jobs.push(fbDb.collection("stores").doc(cusChunkDocId(i)).set({ customers: cusChunks[i], sig: cusSigs[i], part: i }));
+      }
+    }
+    Promise.all(jobs).then(() => {
+      const dels = [];
+      for (let i = ordChunks.length; i < (prevOrdChunkCountRef.current || 0); i++) {
+        dels.push(fbDb.collection("stores").doc(ordChunkDocId(i)).delete().catch(() => {
+        }));
+      }
+      for (let i = cusChunks.length; i < (prevCusChunkCountRef.current || 0); i++) {
+        dels.push(fbDb.collection("stores").doc(cusChunkDocId(i)).delete().catch(() => {
+        }));
+      }
+      return Promise.all(dels);
+    }).then(() => {
+      lastOrdSigsRef.current = ordSigs;
+      lastCusSigsRef.current = cusSigs;
+      prevOrdChunkCountRef.current = ordChunks.length;
+      prevCusChunkCountRef.current = cusChunks.length;
+      loadedDataSigRef.current = dataSig;
+      const del = firebase.firestore.FieldValue.delete();
+      const mainWrite = __spreadProps(__spreadValues({}, mainPayload), {
+        ordersChunkCount: ordChunks.length,
+        customersChunkCount: cusChunks.length,
+        dataSig,
+        orders: del,
+        customers: del,
+        archiveChunkCount: del,
+        archiveSig: del
+      });
+      return fbDb.collection("stores").doc(DATA_DOC).set(mainWrite, { merge: true }).then(() => {
+        lastMainHashRef.current = mainHash;
+      });
+    }).then(() => {
+      lastGoodDataRef.current = { customers: custArr, orders: ordersArr, products: data.products, vendors: data.vendors };
+    }).catch(onErr);
   }
   useEffect(() => {
     if (!dataLoaded) return;
