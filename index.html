@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 153;
+const APP_VERSION = 154;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
 function ordChunkDocId(i) {
@@ -1933,7 +1933,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v153 (\uC18D\uB3C4\uAC1C\uC120 + \uC911\uBCF5\uC815\uB9AC + \uC800\uC7A5\uACBD\uACE0 \uC815\uC0C1\uD654)";
+const APP_BUILD = "v154 (\uC790\uB3D9\uD559\uC2B5 \uAC15\uD654: \uC0C1\uD488\uBA85 2\uD68C \uBC18\uBCF5\uC2DC \uC790\uB3D9 \uD559\uC2B5)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -5534,6 +5534,33 @@ function clearWordFreq(w) {
 function ignoreWord(w) {
   addIgnoredWord(w);
   clearWordFreq(w);
+}
+function autoLearnFreqProducts(products) {
+  const learned = [];
+  let cands = [];
+  try {
+    cands = wordCandidates(2);
+  } catch (e) {
+    return learned;
+  }
+  for (let i = 0; i < cands.length; i++) {
+    const c = cands[i];
+    let matched = null;
+    try {
+      const prod = fuzzyProductMatch(c.word, products, 0.72);
+      if (prod && prod.name) matched = prod.name.replace(new RegExp(WEIGHT_RE, "g"), "").replace(/\s/g, "");
+    } catch (e) {
+    }
+    const fromNS = String(c.word || "").replace(/\s/g, "");
+    if (matched && matched !== fromNS && typeof learnAlias === "function" && learnAlias(fromNS, matched)) {
+      learned.push({ from: c.word, to: matched });
+      try {
+        clearWordFreq(c.word);
+      } catch (e) {
+      }
+    }
+  }
+  return learned;
 }
 function parseTeachAlias(text) {
   const t = String(text || "").replace(/\s+/g, " ").trim();
@@ -9334,6 +9361,10 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       bumpWordFreq(text);
     } catch (e) {
     }
+    try {
+      autoLearnFreqProducts(products);
+    } catch (e) {
+    }
     if (awaitingMemoRef.current) {
       awaitingMemoRef.current = false;
       clearInterval(countdownRef.current);
@@ -10576,6 +10607,11 @@ function App() {
     return false;
   }
   function refreshMemoryCands() {
+    let autoLearned = [];
+    try {
+      autoLearned = autoLearnFreqProducts(products);
+    } catch (e) {
+    }
     let cands = [];
     try {
       cands = (typeof wordCandidates === "function" ? wordCandidates(3) : []).filter((c) => !isKnownWord(c.word));
@@ -10583,6 +10619,12 @@ function App() {
       cands = [];
     }
     setMemoryCands(cands);
+    if (autoLearned.length) {
+      try {
+        fireToast(`🧠 자동 학습: ${autoLearned.slice(0, 2).map((a) => `'${a.from}'→'${a.to}'`).join(", ")}${autoLearned.length > 2 ? ` 외 ${autoLearned.length - 2}개` : ""}`);
+      } catch (e) {
+      }
+    }
   }
   function openMemoryManager() {
     const map = typeof getLearnedAliases === "function" ? getLearnedAliases() : {};
