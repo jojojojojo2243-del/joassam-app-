@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 154;
+const APP_VERSION = 155;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
 function ordChunkDocId(i) {
@@ -1933,7 +1933,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v154 (\uC790\uB3D9\uD559\uC2B5 \uAC15\uD654: \uC0C1\uD488\uBA85 2\uD68C \uBC18\uBCF5\uC2DC \uC790\uB3D9 \uD559\uC2B5)";
+const APP_BUILD = "v155 (\uB07C\uC5B4\uB4E4\uAE30 \uC778\uC2DD \uAC1C\uC120 + \uBC18\uBCF5 \uB9D0 AI \uB3C4\uC6B0\uBBF8\xB7\uC790\uB3D9\uD559\uC2B5)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -7602,6 +7602,9 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   const accumTimerRef = React.useRef(null);
   const speakTextRef = React.useRef("");
   const bargeRecRef = React.useRef(null);
+  const bargedRef = React.useRef(false);
+  const repeatAssistRef = React.useRef({ text: "", count: 0 });
+  const repeatConfirmRef = React.useRef(null);
   const wasAwayRef = React.useRef(false);
   const prevSheetHRef = React.useRef("52vh");
   function speakFillerNow(reason) {
@@ -7895,30 +7898,70 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       rec.lang = "ko-KR";
       rec.continuous = false;
       rec.interimResults = true;
-      rec.maxAlternatives = 1;
+      rec.maxAlternatives = 5;
       let fired = false;
-      rec.onresult = (e) => {
-        if (fired || bargeRecRef.current !== rec) return;
-        let txt = "";
-        for (let i = 0; i < e.results.length; i++) txt += e.results[i][0].transcript;
-        txt = txt.trim();
-        if ((txt.match(/[가-힣A-Za-z]/g) || []).length < 2) return;
-        if (isEchoOfSpoken(txt, speakTextRef.current)) return;
-        fired = true;
-        try {
-          window.speechSynthesis && window.speechSynthesis.cancel();
-        } catch (_) {
+      let finalText = "";
+      let interimText = "";
+      let finalAlts = [];
+      const routeBarged = () => {
+        bargedRef.current = false;
+        const raw = (finalText || "").trim() || (interimText || "").trim();
+        const best = pickBestTranscript(dedupCascade(raw), finalAlts);
+        finalText = "";
+        finalAlts = [];
+        if (best && (best.match(/[가-힣A-Za-z0-9]/g) || []).length >= 1) {
+          silenceCountRef.current = 0;
+          setInterim("");
+          if (phaseRef.current !== "listening") setPhaseSync("listening");
+          routeCapturedSpeech(best);
+        } else {
+          setPhaseSync("idle");
+          setTimeout(() => {
+            if (activeRef.current && autoListenRef.current) beginListening();
+          }, 80);
         }
-        stopBargeIn();
-        clearTimeout(ttsTimerRef.current);
-        setPhaseSync("idle");
-        setTimeout(() => {
-          if (activeRef.current) beginListening();
-        }, 60);
+      };
+      rec.onresult = (e) => {
+        if (bargeRecRef.current !== rec) return;
+        let finals = "";
+        let interim2 = "";
+        for (let i = 0; i < e.results.length; i++) {
+          if (e.results[i].isFinal) {
+            finals += e.results[i][0].transcript + " ";
+            const alts = [];
+            for (let j = 0; j < e.results[i].length; j++) alts.push(e.results[i][j].transcript);
+            finalAlts = alts;
+          } else {
+            interim2 += e.results[i][0].transcript;
+          }
+        }
+        if (!fired) {
+          const probe = (finals + interim2).trim();
+          if ((probe.match(/[가-힣A-Za-z]/g) || []).length < 2) return;
+          if (isEchoOfSpoken(probe, speakTextRef.current)) return;
+          fired = true;
+          bargedRef.current = true;
+          try {
+            window.speechSynthesis && window.speechSynthesis.cancel();
+          } catch (_) {
+          }
+          clearTimeout(ttsTimerRef.current);
+          setPhaseSync("listening");
+        }
+        finalText = dedupCascade(finals.trim());
+        interimText = dedupCascade((finals + interim2).trim());
+        setInterim(interimText);
       };
       rec.onerror = () => {
       };
       rec.onend = () => {
+        if (bargeRecRef.current !== rec) return;
+        bargeRecRef.current = null;
+        if (fired) {
+          setTimeout(() => {
+            if (activeRef.current) routeBarged();
+          }, 120);
+        }
       };
       bargeRecRef.current = rec;
       rec.start();
@@ -9394,6 +9437,42 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         return;
       }
     }
+    if (repeatConfirmRef.current) {
+      const rc = repeatConfirmRef.current;
+      const _tt = (text || "").replace(/\s/g, "");
+      const _yes = /^(응|어|네|예|그래|맞아|맞아요|맞습니다|맞어|맞다|정답|그거|그거야|좋아|오케이|오케|응맞아|어맞아)/.test(_tt);
+      const _no = /^(아니|아니요|아니오|아니야|아냐|틀려|틀렸|노|놉|다시|땡)/.test(_tt);
+      if (_yes) {
+        repeatConfirmRef.current = null;
+        repeatAssistRef.current = { text: "", count: 0 };
+        clearInterval(countdownRef.current);
+        setRetryCountdown(0);
+        try {
+          if (typeof learnAlias === "function" && rc.from && rc.to) learnAlias(rc.from, rc.to);
+        } catch (e) {
+        }
+        const m = `네, 앞으로 "${rc.shown}"로 알아들을게요. 계속 말씀하세요.`;
+        setLastAI(m);
+        pushExchange(text, m);
+        processingRef.current = false;
+        speakThenListen(m);
+        return;
+      }
+      if (_no) {
+        repeatConfirmRef.current = null;
+        repeatAssistRef.current = { text: "", count: 0 };
+        clearInterval(countdownRef.current);
+        setRetryCountdown(0);
+        const m = "아, 제가 잘못 알았네요. 천천히 한 번만 다시 말씀해 주세요.";
+        setLastAI(m);
+        pushExchange(text, m);
+        processingRef.current = false;
+        speakThenListen(m);
+        return;
+      }
+      repeatConfirmRef.current = null;
+      repeatAssistRef.current = { text: "", count: 0 };
+    }
     {
       const teach = parseTeachAlias(text);
       if (teach) {
@@ -9556,6 +9635,44 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       return;
     }
     try {
+      const _norm = (text || "").replace(/\s/g, "");
+      const _now = Date.now();
+      const _prev = repeatAssistRef.current || { text: "", count: 0, ts: 0 };
+      let _sim = false;
+      if (_prev.text && _norm && _now - (_prev.ts || 0) < 3e4) {
+        if (_norm === _prev.text || _norm.includes(_prev.text) || _prev.text.includes(_norm)) {
+          _sim = true;
+        } else {
+          const seen = {};
+          for (const ch of _prev.text) seen[ch] = 1;
+          let hit = 0;
+          for (const ch of _norm) if (seen[ch]) hit++;
+          if (_norm.length && hit / _norm.length >= 0.6) _sim = true;
+        }
+      }
+      repeatAssistRef.current = { text: _norm, count: _sim ? _prev.count + 1 : 1, ts: _now };
+      if (repeatAssistRef.current.count >= 2 && _norm.length >= 2 && !repeatConfirmRef.current) {
+        let pm = null;
+        try {
+          pm = typeof fuzzyProductMatch === "function" ? fuzzyProductMatch(text, products, 0.45) : null;
+        } catch (e) {
+        }
+        if (pm && pm.name) {
+          const stored = pm.name.replace(new RegExp(WEIGHT_RE, "g"), "").replace(/\s/g, "");
+          repeatConfirmRef.current = { from: _norm, to: stored, shown: pm.name };
+          clearInterval(countdownRef.current);
+          setRetryCountdown(0);
+          const m = `혹시 "${pm.name}" 말씀이신가요? 맞으면 "맞아", 아니면 "아니"라고 말씀해 주세요.`;
+          setLastAI(m);
+          pushExchange(text, m);
+          processingRef.current = false;
+          speakThenListen(m);
+          return;
+        }
+      }
+    } catch (e) {
+    }
+    try {
       const _gkey = geminiKey || (typeof localStorage !== "undefined" && localStorage.getItem("joassam_gemini_key_v1") || "");
       let _intent = "unknown";
       try {
@@ -9678,6 +9795,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   }
   function speakThenListen(text) {
     if (!activeRef.current) return;
+    bargedRef.current = false;
     setPhaseSync("speaking");
     clearTimeout(ttsTimerRef.current);
     window.speechSynthesis && window.speechSynthesis.cancel();
@@ -9688,8 +9806,11 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       if (done) return;
       done = true;
       clearTimeout(ttsTimerRef.current);
-      stopBargeIn();
       speakTextRef.current = "";
+      if (bargedRef.current) {
+        return;
+      }
+      stopBargeIn();
       setPhaseSync("idle");
       if (autoListenRef.current) {
         wantListenCueRef.current = true;
