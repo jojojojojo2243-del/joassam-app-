@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 156;
+const APP_VERSION = 157;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
 function ordChunkDocId(i) {
@@ -1933,7 +1933,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v156 (\uB9C8\uC774\uD06C \uB204\uB974\uBA74 \uBC14\uB85C \uB300\uD654 \uC2DC\uC791 + \uB07C\uC5B4\uB4E4\uAE30 \uC778\uC2DD \uAC1C\uC120\xB7\uBC18\uBCF5 \uB9D0 \uC790\uB3D9\uD559\uC2B5)";
+const APP_BUILD = "v157 (\uC2E0\uD638\uC74C \uC791\uAC8C \uD55C \uBC88 + \uB9C8\uC774\uD06C \uB204\uB974\uBA74 \uBC14\uB85C \uB300\uD654\xB7\uB07C\uC5B4\uB4E4\uAE30 \uAC1C\uC120\xB7\uBC18\uBCF5 \uB9D0 \uC790\uB3D9\uD559\uC2B5)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8000,25 +8000,25 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       if (!AC) return;
       const ctx = new AC();
       const now = ctx.currentTime;
-      [[660, 0], [990, 0.12]].forEach(([f, t]) => {
+      [[880, 0]].forEach(([f, t]) => {
         const o = ctx.createOscillator();
         const g = ctx.createGain();
         o.type = "sine";
         o.frequency.value = f;
         g.gain.setValueAtTime(1e-4, now + t);
-        g.gain.exponentialRampToValueAtTime(0.18, now + t + 0.02);
-        g.gain.exponentialRampToValueAtTime(1e-4, now + t + 0.11);
+        g.gain.exponentialRampToValueAtTime(0.07, now + t + 0.015);
+        g.gain.exponentialRampToValueAtTime(1e-4, now + t + 0.08);
         o.connect(g);
         g.connect(ctx.destination);
         o.start(now + t);
-        o.stop(now + t + 0.12);
+        o.stop(now + t + 0.09);
       });
       setTimeout(() => {
         try {
           ctx.close();
         } catch (e) {
         }
-      }, 400);
+      }, 300);
     } catch (e) {
     }
   }
