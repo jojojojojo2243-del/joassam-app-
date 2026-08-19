@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 155;
+const APP_VERSION = 156;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
 function ordChunkDocId(i) {
@@ -1933,7 +1933,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v155 (\uB07C\uC5B4\uB4E4\uAE30 \uC778\uC2DD \uAC1C\uC120 + \uBC18\uBCF5 \uB9D0 AI \uB3C4\uC6B0\uBBF8\xB7\uC790\uB3D9\uD559\uC2B5)";
+const APP_BUILD = "v156 (\uB9C8\uC774\uD06C \uB204\uB974\uBA74 \uBC14\uB85C \uB300\uD654 \uC2DC\uC791 + \uB07C\uC5B4\uB4E4\uAE30 \uC778\uC2DD \uAC1C\uC120\xB7\uBC18\uBCF5 \uB9D0 \uC790\uB3D9\uD559\uC2B5)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -7571,7 +7571,14 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   const [minimized, setMinimized] = React.useState(true);
   const [iconOnly, setIconOnly] = React.useState(false);
   const [awayReturn, setAwayReturn] = React.useState(false);
-  const [autoListen, setAutoListen] = React.useState(false);
+  const [autoListen, setAutoListen] = React.useState(() => {
+    try {
+      const v = localStorage.getItem("joassam_autolisten_v1");
+      return v === null ? true : v === "1";
+    } catch (e) {
+      return true;
+    }
+  });
   const phaseRef = React.useRef("idle");
   const recRef = React.useRef(null);
   const ttsTimerRef = React.useRef(null);
@@ -7588,7 +7595,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   const awaitingMemoRef = React.useRef(false);
   const audioStreamRef = React.useRef(null);
   const nsDisabledRef = React.useRef(false);
-  const autoListenRef = React.useRef(false);
+  const autoListenRef = React.useRef(autoListen);
   const geminiBackoffUntilRef = React.useRef(0);
   const silenceCountRef = React.useRef(0);
   const wantListenCueRef = React.useRef(false);
@@ -7658,6 +7665,10 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     const next = !autoListenRef.current;
     autoListenRef.current = next;
     setAutoListen(next);
+    try {
+      localStorage.setItem("joassam_autolisten_v1", next ? "1" : "0");
+    } catch (e) {
+    }
     silenceCountRef.current = 0;
     if (next) {
       wantListenCueRef.current = true;
