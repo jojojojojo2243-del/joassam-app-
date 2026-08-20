@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 157;
+const APP_VERSION = 158;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
 function ordChunkDocId(i) {
@@ -1933,7 +1933,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v157 (\uC2E0\uD638\uC74C \uC791\uAC8C \uD55C \uBC88 + \uB9C8\uC774\uD06C \uB204\uB974\uBA74 \uBC14\uB85C \uB300\uD654\xB7\uB07C\uC5B4\uB4E4\uAE30 \uAC1C\uC120\xB7\uBC18\uBCF5 \uB9D0 \uC790\uB3D9\uD559\uC2B5)";
+const APP_BUILD = "v158 (\uC8FC\uBB38 \uC911 \uAC00\uAC8C \uC774\uB984 \uBC18\uBCF5\uC2DC \uAC00\uAE4C\uC6B4 \uAC00\uAC8C \uC81C\uC548\xB7\uC790\uB3D9\uD559\uC2B5 + \uB9C8\uC774\uD06C \uBC14\uB85C \uB300\uD654\xB7\uC2E0\uD638\uC74C \uC791\uAC8C)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -9455,9 +9455,18 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       const _no = /^(아니|아니요|아니오|아니야|아냐|틀려|틀렸|노|놉|다시|땡)/.test(_tt);
       if (_yes) {
         repeatConfirmRef.current = null;
-        repeatAssistRef.current = { text: "", count: 0 };
+        repeatAssistRef.current = { text: "", count: 0, ts: 0 };
         clearInterval(countdownRef.current);
         setRetryCountdown(0);
+        if (rc.orderName && orderModeRef.current) {
+          try {
+            if (typeof learnAlias === "function" && rc.from) learnAlias(rc.from, rc.orderName.replace(/\s/g, ""));
+          } catch (e) {
+          }
+          processingRef.current = false;
+          routeCapturedSpeech(rc.orderName);
+          return;
+        }
         try {
           if (typeof learnAlias === "function" && rc.from && rc.to) learnAlias(rc.from, rc.to);
         } catch (e) {
@@ -9553,6 +9562,49 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     if (orderModeRef.current) {
       clearInterval(countdownRef.current);
       setRetryCountdown(0);
+      try {
+        const _cur = orderDraftRef.current || {};
+        const _needName = !_cur.name && !_cur._recipCollect && !_cur._bulkRecipients && !pendingBulkChoiceRef.current && !_cur.awaitingBundle;
+        if (_needName && !repeatConfirmRef.current) {
+          const _nm = typeof findKnownNameIn === "function" ? findKnownNameIn(text, customers, vendors, products) : "";
+          const _tNS = (text || "").replace(/\s/g, "");
+          const _hasProdNow = (products || []).some((p) => p && p.name && _tNS.includes(p.name.replace(/\s/g, "")));
+          const _cmdish = /등록|취소|그만|관둬|처음부터|다시|삭제|빼|맞아|아니|각각|일괄|없어/.test(_tNS);
+          if (!_nm && !_hasProdNow && !_cmdish && _tNS.length >= 2) {
+            const _now = Date.now();
+            const _prev = repeatAssistRef.current || { text: "", count: 0, ts: 0 };
+            const _sim = _prev.text && _now - (_prev.ts || 0) < 3e4 && typeof simJamo === "function" && simJamo(_tNS, _prev.text) >= 0.5;
+            repeatAssistRef.current = { text: _tNS, count: _sim ? _prev.count + 1 : 1, ts: _now };
+            if (repeatAssistRef.current.count >= 2) {
+              const _names = /* @__PURE__ */ new Set();
+              (customers || []).forEach((c) => c && c.name && _names.add(String(c.name).trim()));
+              (vendors || []).forEach((v) => v && v.name && _names.add(String(v.name).trim()));
+              let _best = null, _bs = 0;
+              for (const _n of _names) {
+                const _ns = _n.replace(/\s/g, "");
+                if (_ns.length < 2) continue;
+                const _s = typeof simJamo === "function" ? simJamo(_ns, _tNS) : 0;
+                if (_s > _bs) {
+                  _bs = _s;
+                  _best = _n;
+                }
+              }
+              if (_best && _bs >= 0.5) {
+                repeatConfirmRef.current = { from: _tNS, to: null, shown: _best, orderName: _best };
+                const _m = `혹시 "${_best}" 말씀이신가요? 맞으면 "맞아", 아니면 "아니"라고 해주세요.`;
+                setLastAI(_m);
+                pushExchange(text, _m);
+                processingRef.current = false;
+                speakThenListen(_m);
+                return;
+              }
+            }
+          } else if (_nm || _hasProdNow) {
+            repeatAssistRef.current = { text: "", count: 0, ts: 0 };
+          }
+        }
+      } catch (e) {
+      }
       safeOrderTurn(text);
       return;
     }
