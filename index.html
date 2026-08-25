@@ -8698,6 +8698,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         let okCount = 0;
         recs.forEach((r) => {
           const vo = buildRecipientVo(linked2, r, sender);
+          vo.forceNew = true;
           const a = createVoiceOrder ? createVoiceOrder(vo) : null;
           if (a) {
             okCount++;
@@ -8723,7 +8724,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       const _sender = cur2._sender || null;
       const _eachTotal = cur2._eachTotal || 0;
       const _eachDone = cur2._eachDone || 0;
-      const createdArr = createVoiceOrder ? createVoiceOrder(linked2) : null;
+      const createdArr = createVoiceOrder ? createVoiceOrder({ ...linked2, forceNew: true }) : null;
       const created = Array.isArray(createdArr) ? createdArr[0] : createdArr;
       const boxN = Array.isArray(createdArr) ? createdArr.length : 1;
       if (_eachTotal) {
@@ -13978,7 +13979,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       const addrNS = (recipient.address || "").replace(/\s/g, "");
       const today = todayStr();
       const sameDay = prev.filter((o) => o && o.status !== "shipped" && orderRecipientName(o).replace(/\s/g, "") === nmNS && nmNS && o.orderDate === today && (o.vendorId || "") === (vo.vendorId || "") && (!addrNS || !(o.recipient && o.recipient.address) || String(o.recipient.address).replace(/\s/g, "") === addrNS));
-      if (sameDay.length && total === 1 && !plan && !(vo.boxList && vo.boxList.length)) {
+      if (!vo.forceNew && sameDay.length && total === 1 && !plan && !(vo.boxList && vo.boxList.length)) {
         const targetId = sameDay[0].id;
         lastCreatedRef.current = { ids: [targetId], name: recipient.name };
         return prev.map((o) => {
