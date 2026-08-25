@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 159;
+const APP_VERSION = 161;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1934,7 +1934,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v159 (\uC800\uC7A5 \uB9C9\uD798 \uADFC\uBCF8 \uC218\uC815: \uBC84\uC804 \uC62C\uB824\uB3C4 \uC624\uB798\uB41C \uAE30\uAE30 \uC800\uC7A5 \uC548 \uB9C9\uD798 + \uC774\uB984 \uC81C\uC548\xB7\uB9C8\uC774\uD06C \uBC14\uB85C \uB300\uD654)";
+const APP_BUILD = "v161 (B300D654C8FCBB38 B4F1B85DC548B428 BC84ADF8 C218C815 + C800C7A5 B529B808C774 B2E8CD95 + C785B825CC3D C794C5EC BC84ADF8 C218C815)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11754,7 +11754,7 @@ function App() {
       if (isStaleVersion) return;
       pendingSaveDataRef.current = data;
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = setTimeout(flushSaveNow, 2500);
+      saveTimerRef.current = setTimeout(flushSaveNow, 800);
     } else if (hasSharedStorage) {
       sharedSet("store-data", data);
     } else {
@@ -14010,6 +14010,8 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       if (bizNew.length) regenGroupInvoices(bizNew);
     } catch (e) {
     }
+    // 대화 주문 등록 후 메시지 입력창 초기화
+    setDraft((prev) => prev.message ? __spreadProps(__spreadValues({}, prev), { message: "" }) : prev);
     return newOrders;
   }
   function setLastOrderMemo(memoText) {
