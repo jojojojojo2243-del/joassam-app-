@@ -1593,7 +1593,7 @@ function blockGeminiModel(model) {
 }
 async function getGeminiModel(apiKey) {
   if (_geminiModelCache && _geminiModelCacheKey === apiKey && !_geminiBlockedModels.has(_geminiModelCache)) return _geminiModelCache;
-  const preferred = ["gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-lite-latest", "gemini-2.0-flash-001", "gemini-pro-latest", "gemini-2.5-pro"];
+  const preferred = ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-flash-latest", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-lite-latest", "gemini-2.0-flash-001", "gemini-pro-latest", "gemini-2.5-pro"];
   const pick = (arr) => arr.find((n) => !_geminiBlockedModels.has(n));
   try {
     const _c = new AbortController();
@@ -1605,7 +1605,7 @@ async function getGeminiModel(apiKey) {
       clearTimeout(_t);
     }
     if (!r.ok) {
-      const d = pick(["gemini-2.0-flash", "gemini-flash-latest", "gemini-1.5-flash"]) || "gemini-2.0-flash";
+      const d = pick(["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-flash-latest"]) || "gemini-3.5-flash-lite";
       _geminiModelCache = d;
       _geminiModelCacheKey = apiKey;
       return d;
@@ -1621,11 +1621,11 @@ async function getGeminiModel(apiKey) {
         return found;
       }
     }
-    _geminiModelCache = names[0] || "gemini-2.0-flash";
+    _geminiModelCache = names[0] || "gemini-3.5-flash-lite";
     _geminiModelCacheKey = apiKey;
     return _geminiModelCache;
   } catch (e) {
-    return pick(["gemini-2.0-flash", "gemini-flash-latest", "gemini-1.5-flash"]) || "gemini-2.0-flash";
+    return pick(["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-flash-latest"]) || "gemini-3.5-flash-lite";
   }
 }
 function isGeminiModelUnavailable(msg) {
