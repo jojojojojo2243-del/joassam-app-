@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 161;
+const APP_VERSION = 162;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1934,7 +1934,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v161 (Gemini model update + chat order fix + save delay fix + input clear fix)";
+const APP_BUILD = "v162 (Gemini model update + chat order fix + vendor name search fix)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -12038,10 +12038,12 @@ function App() {
     };
     let best = null, bestScore = 0.6;
     (orders || []).forEach((o) => {
+      const vendorName = (vendorMap && vendorMap[o.vendorId] || {}).name || "";
       const cand = Math.max(
         scoreName(orderRecipientName(o)),
         scoreName((customerMap[o.customerId] || {}).name),
-        scoreName(o.name)
+        scoreName(o.name),
+        scoreName(vendorName)
       );
       if (cand >= bestScore) {
         bestScore = cand;
