@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 162;
+const APP_VERSION = 163;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -428,6 +428,7 @@ function resolveProductField(label, p) {
   const map = {
     "\uAD6C\uBD84": CH[channel],
     "\uC0C1\uD488\uBA85": p.name,
+    "\uAC00\uACA9": p.price || p.wholesalePrice || 0,
     "\uACF5\uC6A9 \uAC00\uACA9": channel === "both" ? p.price : "",
     "\uC77C\uBC18\uC6A9 \uAC00\uACA9": channel === "retail" ? p.price : "",
     "\uC5C5\uCCB4\uAC00\uACA9": channel === "business" ? p.wholesalePrice || p.price : p.wholesalePrice || "",
@@ -1934,7 +1935,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v162 (Gemini model update + chat order fix + vendor name search fix)";
+const APP_BUILD = "v163 (product price in excel + auto register new product with similar price)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -14014,6 +14015,25 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     }
     // 대화 주문 등록 후 메시지 입력창 초기화
     setDraft((prev) => prev.message ? __spreadProps(__spreadValues({}, prev), { message: "" }) : prev);
+    // 신규 상품 자동 등록 (DB에 없는 상품명 → 유사 상품 단가 복사 후 등록)
+    const allItemNames = newOrders.flatMap((o) => (o.items || []).filter((it) => !it.productId).map((it) => it.name)).filter(Boolean);
+    const uniqueNewNames = [...new Set(allItemNames)];
+    if (uniqueNewNames.length > 0) {
+      setProducts((prevProds) => {
+        let updated = [...prevProds];
+        uniqueNewNames.forEach((nm) => {
+          const alreadyExists = updated.some((p) => p.name === nm);
+          if (alreadyExists) return;
+          // 유사 상품 찾아서 단가 복사
+          const nmNS = nm.replace(/\s/g, "");
+          const similar = updated.map((p) => ({ p, s: typeof simJamo === "function" ? simJamo(nmNS, p.name.replace(/\s/g, "")) : 0 })).filter((x) => x.s >= 0.6).sort((a, b) => b.s - a.s)[0];
+          const basePrice = similar ? (similar.p.price || similar.p.wholesalePrice || 0) : 0;
+          const baseWholesale = similar ? (similar.p.wholesalePrice || similar.p.price || 0) : 0;
+          updated.push({ id: uid("p"), name: nm, price: basePrice, wholesalePrice: baseWholesale, stock: 100000, unit: "kg", channel: "both" });
+        });
+        return updated;
+      });
+    }
     return newOrders;
   }
   function setLastOrderMemo(memoText) {
