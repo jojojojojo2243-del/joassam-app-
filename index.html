@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 163;
+const APP_VERSION = 164;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1935,7 +1935,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v163 (product price in excel + auto register new product with similar price)";
+const APP_BUILD = "v164 (postal file auto import: orders + customers + vendors)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -14301,6 +14301,160 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       productText
     };
   }
+  // ===== 우체국 배송 완료 파일 처리 =====
+  const postalInputRef = useRef(null);
+  function handlePostalUpload(e) {
+    var _a;
+    const file = (_a = e.target.files) == null ? void 0 : _a[0];
+    if (!file) return;
+    setBusyMessage("\uC6B0\uCCB4\uAD6D \uD30C\uC77C\uC744 \uBD84\uC11D\uD558\uACE0 \uC788\uC5B4\uC694...");
+    readWorkbookFile(file, (rows) => {
+      const normPhone = (p) => String(p || "").replace(/[^0-9]/g, "");
+      const stamp = nowStamp();
+
+      // 업체 판별: 수취인명이 업체 목록과 일치하거나 채소2kg처럼 업체 상품인 경우
+      const isVendorRow = (recipName, productText) => {
+        if (!recipName) return false;
+        if (findMatchingParty(recipName, "", "", vendors)) return true;
+        // 채소2kg, 2kg 등 업체 패턴
+        if (/채소\s*\d+kg|2kg\s*X\s*[2-9]|업체/i.test(productText || "")) return true;
+        return false;
+      };
+
+      const parseProductText = (text, qty) => {
+        const t = String(text || "").trim();
+        if (!t) return [{ name: "채소", qty: Number(qty) || 1 }];
+        // "A X 1개, B X 2개" 형태
+        const parts = t.split(/,|，/).map((s) => s.trim()).filter(Boolean);
+        return parts.map((part) => {
+          const m = part.match(/^(.+?)\s*X\s*(\d+)/i);
+          if (m) return { name: m[1].trim(), qty: Number(m[2]) };
+          return { name: part.replace(/\s*X?\s*\d+개?$/i, "").trim() || part, qty: Number(qty) || 1 };
+        }).filter((it) => it.name);
+      };
+
+      const newCustomers = [];
+      const newVendors = [];
+      const newOrders = [];
+      let dupOrders = 0;
+      let dupCustomers = 0;
+      let dupVendors = 0;
+
+      // 이미 등록된 주문 등기번호 Set
+      const existingTrackNos = new Set(
+        orders.map((o) => o.trackingNo).filter(Boolean)
+      );
+
+      rows.forEach((r) => {
+        const status = String(r["\uBC30\uC1A1\uC9C4\uD589 \uC0C1\uD0DC\uB0B4\uC5ED"] || r["\uBC30\uC1A1\uC0C1\uD0DC"] || "").trim();
+        if (!status.includes("\uBC30\uB2EC\uC644\uB8CC") && !status.includes("\uBC30\uB2EC")) return; // 배달완료만
+
+        const recipName = String(r["\uC218\uCDE8\uC778\uBA85"] || "").trim();
+        const addr1 = String(r["\uC218\uCDE8\uC778\uC8FC\uC18C"] || "").trim();
+        const addr2 = String(r["\uC218\uCDE8\uC778\uC0C1\uC138\uC8FC\uC18C"] || "").trim();
+        const address = [addr1, addr2].filter(Boolean).join(" ");
+        const phone = normPhone(r["\uC218\uCDE8\uC778 \uC774\uB3D9\uD1B5\uC2E0"] || r["\uC218\uCDE8\uC778 \uC804\uD654\uBC88\uD638"] || "");
+        const productText = String(r["\uC0C1\uD488\uBA85"] || "").trim();
+        const qty = r["\uC218\uB7C9"] || 1;
+        const trackingNo = String(r["\uB4F1\uAE30\uBC88\uD638"] || "").trim();
+        const orderDateRaw = String(r["\uBC30\uB2EC\uC644\uB8CC\uC77C\uC2DC"] || r["\uB4F1\uB85D\uC77C\uC790"] || "").trim();
+        const orderDate = orderDateRaw ? orderDateRaw.slice(0, 10).replace(/\//g, "-") : stamp.slice(0, 10);
+        const deliveryMessage = String(r["\uBC30\uC1A1\uBA54\uC138\uC9C0"] || r["\uBE44\uACE0"] || "").trim();
+
+        if (!recipName || !address) return;
+
+        // 중복 주문 체크 (등기번호 기준)
+        if (trackingNo && existingTrackNos.has(trackingNo)) {
+          dupOrders++;
+          return;
+        }
+
+        const items = parseProductText(productText, qty).map((it) => {
+          const matched = products.find((p) => {
+            const pn = p.name.replace(/\s/g, "");
+            const itn = it.name.replace(/\s/g, "");
+            return pn === itn || pn.includes(itn) || itn.includes(pn);
+          });
+          return { productId: matched ? matched.id : null, name: matched ? matched.name : it.name, qty: it.qty };
+        });
+
+        const isBiz = isVendorRow(recipName, productText);
+
+        // 업체 자동 등록
+        let vendorId = null;
+        if (isBiz) {
+          const existingV = findMatchingParty(recipName, phone, address, vendors);
+          if (existingV) {
+            vendorId = existingV.id;
+          } else {
+            const alreadyNew = newVendors.find((v) => v.name === recipName);
+            if (alreadyNew) {
+              vendorId = alreadyNew.id;
+            } else {
+              const newV = { id: uid("v"), name: recipName, phone: phone || "", address, bizNo: "", ceo: "", memo: "" };
+              newVendors.push(newV);
+              vendorId = newV.id;
+            }
+          }
+        } else {
+          // 일반 고객 자동 등록
+          const existingC = findMatchingParty(recipName, phone, address, customers);
+          if (!existingC) {
+            const alreadyNew = newCustomers.find((c) => c.name === recipName && normPhone(c.phone) === phone);
+            if (!alreadyNew) {
+              newCustomers.push({ id: uid("c"), name: recipName, phone: phone || "", address, memo: "" });
+            }
+          }
+        }
+
+        // 주문 생성
+        const orderId = uid("o");
+        existingTrackNos.add(trackingNo); // 같은 파일 내 중복 방지
+        newOrders.push({
+          id: orderId,
+          orderDate,
+          status: "shipped",
+          vendorId: vendorId || null,
+          trackingNo,
+          recipient: { name: recipName, phone: phone || "", address },
+          sender: { name: "\uC870\uC544\uC800\uC528\uC068", phone: "" },
+          items,
+          deliveryMessage,
+          memo: "\uC6B0\uCCB4\uAD6D \uC790\uB3D9\uB4F1\uB85D",
+          createdAt: stamp,
+          isBusiness: isBiz
+        });
+      });
+
+      // 일괄 적용
+      if (newCustomers.length > 0) setCustomers((prev) => [...prev, ...newCustomers]);
+      if (newVendors.length > 0) setVendors((prev) => [...prev, ...newVendors]);
+      if (newOrders.length > 0) {
+        justSubmittedRef.current = true;
+        setOrders((prev) => [...newOrders, ...prev]);
+        // 업체 주문은 거래명세 자동 생성
+        const bizOrders = newOrders.filter((o) => o.vendorId);
+        if (bizOrders.length > 0) {
+          try { regenGroupInvoices(bizOrders); } catch (_) {}
+        }
+      }
+
+      setBusyMessage(null);
+      const msgs = [];
+      if (newOrders.length > 0) msgs.push(`\uC8FC\uBB38 ${newOrders.length}\uAC74 \uB4F1\uB85D`);
+      if (newCustomers.length > 0) msgs.push(`\uC2E0\uADDC \uACE0\uAC1D ${newCustomers.length}\uBA85`);
+      if (newVendors.length > 0) msgs.push(`\uC2E0\uADDC \uC5C5\uCCB4 ${newVendors.length}\uACF3`);
+      if (dupOrders > 0) msgs.push(`\uC911\uBCF5 ${dupOrders}\uAC74 \uC81C\uC678`);
+      if (msgs.length === 0) msgs.push("\uB4F1\uB85D\uD560 \uC8FC\uBB38\uC774 \uC5C6\uC5B4\uC694 (\uBC30\uB2EC\uC644\uB8CC \uD56D\uBAA9 \uD655\uC778)");
+      fireToast(msgs.join(" | "));
+    }, () => {
+      setBusyMessage(null);
+      fireToast("\uD30C\uC77C\uC744 \uC77D\uC9C0 \uBABB\uD588\uC5B4\uC694");
+    });
+    e.target.value = "";
+  }
+  // ===== 우체국 처리 끝 =====
+
   function startBulkOrder() {
     setBulkOrderModal({ step: "choose", mode: "" });
   }
@@ -15540,6 +15694,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
       }
     ),
     /* @__PURE__ */ React.createElement("input", { ref: bulkOrderInputRef, type: "file", accept: ".xlsx,.xls,.csv", onChange: handleBulkOrderUpload, style: { display: "none" } }),
+    /* @__PURE__ */ React.createElement("input", { ref: postalInputRef, type: "file", accept: ".xlsx,.xls,.csv", onChange: handlePostalUpload, style: { display: "none" } }),
     bulkOrderModal && /* @__PURE__ */ React.createElement(
       BulkOrderModal,
       {
@@ -17314,7 +17469,7 @@ function OrdersTab({
   })(), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => {
     var _a;
     return (_a = invoiceInputRef.current) == null ? void 0 : _a.click();
-  }, style: toolBtnStyle("#185FA5") }, "\uC1A1\uC7A5\uBC88\uD638 \uC5C5\uB85C\uB4DC"), /* @__PURE__ */ React.createElement("button", { onClick: onBulkOrder, style: toolBtnStyle("#1B2430") }, "\u{1F4CB} \uC5D1\uC140 \uD30C\uC77C \uC8FC\uBB38 \uB4F1\uB85D"), /* @__PURE__ */ React.createElement("input", { ref: invoiceInputRef, type: "file", accept: ".xlsx,.xls,.csv", onChange: handleInvoiceUpload, style: { display: "none" } })), checkedIds.size > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: onExportVendorChecked, style: toolBtnStyle("#2F6F4E") }, "\u{1F3E2} \uC120\uD0DD \uC911 \uC5C5\uCCB4\uC8FC\uBB38 \uAC70\uB798\uBA85\uC138\uC11C")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#5F5E5A", background: "#F0F1EC", borderRadius: 8, padding: "7px 10px", marginBottom: 8, lineHeight: 1.5 } }, "\uC5C5\uCCB4\xB7\uC77C\uBC18 \uC8FC\uBB38\uC774 \uD568\uAED8 \uBCF4\uC785\uB2C8\uB2E4. \uCE74\uB4DC\uC758 \uBC30\uC9C0\uB85C \uAD6C\uBD84\uB418\uBA70, \uC804\uCCB4\uC120\uD0DD\xB7\uB2E4\uC6B4\uB85C\uB4DC \uC2DC \uC5B4\uB290 \uCABD\uB3C4 \uB204\uB77D\uB418\uC9C0 \uC54A\uC544\uC694."), statusFilter === "shipped" && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#27500A", background: "#EAF3DE", borderRadius: 8, padding: "7px 10px", marginBottom: 8, lineHeight: 1.5 } }, '\uBC1C\uC1A1\uC644\uB8CC \uC8FC\uBB38\uB9CC \uBCF4\uACE0 \uC788\uC5B4\uC694. "\uC774 \uBAA9\uB85D \uC804\uCCB4 \uB2E4\uC6B4\uB85C\uB4DC"\uB85C \uB2E4\uC2DC \uBC1B\uC544\uB3C4 \uC0C1\uD0DC\uB294 \uBC1C\uC1A1\uC644\uB8CC \uADF8\uB300\uB85C \uC720\uC9C0\uB3FC\uC694(\uC7AC\uBC1C\uC1A1 \uAC00\uB2A5).'), orders.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 } }, /* @__PURE__ */ React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#5F5E5A", cursor: "pointer" } }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: allChecked, onChange: toggleCheckAll }), "\uC804\uCCB4\uC120\uD0DD (", orders.length, "\uAC74)"), /* @__PURE__ */ React.createElement(
+  }, style: toolBtnStyle("#185FA5") }, "\uC1A1\uC7A5\uBC88\uD638 \uC5C5\uB85C\uB4DC"), /* @__PURE__ */ React.createElement("button", { onClick: onBulkOrder, style: toolBtnStyle("#1B2430") }, "\u{1F4CB} \uC5D1\uC140 \uD30C\uC77C \uC8FC\uBB38 \uB4F1\uB85D"), /* @__PURE__ */ React.createElement("button", { onClick: () => { var _a; return (_a = postalInputRef.current) == null ? void 0 : _a.click(); }, style: toolBtnStyle("#5B3A8A") }, "\uD83D\uDCEE \uC6B0\uCCB4\uAD6D \uD30C\uC77C \uB4F1\uB85D"), /* @__PURE__ */ React.createElement("input", { ref: invoiceInputRef, type: "file", accept: ".xlsx,.xls,.csv", onChange: handleInvoiceUpload, style: { display: "none" } })), checkedIds.size > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: onExportVendorChecked, style: toolBtnStyle("#2F6F4E") }, "\u{1F3E2} \uC120\uD0DD \uC911 \uC5C5\uCCB4\uC8FC\uBB38 \uAC70\uB798\uBA85\uC138\uC11C")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#5F5E5A", background: "#F0F1EC", borderRadius: 8, padding: "7px 10px", marginBottom: 8, lineHeight: 1.5 } }, "\uC5C5\uCCB4\xB7\uC77C\uBC18 \uC8FC\uBB38\uC774 \uD568\uAED8 \uBCF4\uC785\uB2C8\uB2E4. \uCE74\uB4DC\uC758 \uBC30\uC9C0\uB85C \uAD6C\uBD84\uB418\uBA70, \uC804\uCCB4\uC120\uD0DD\xB7\uB2E4\uC6B4\uB85C\uB4DC \uC2DC \uC5B4\uB290 \uCABD\uB3C4 \uB204\uB77D\uB418\uC9C0 \uC54A\uC544\uC694."), statusFilter === "shipped" && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#27500A", background: "#EAF3DE", borderRadius: 8, padding: "7px 10px", marginBottom: 8, lineHeight: 1.5 } }, '\uBC1C\uC1A1\uC644\uB8CC \uC8FC\uBB38\uB9CC \uBCF4\uACE0 \uC788\uC5B4\uC694. "\uC774 \uBAA9\uB85D \uC804\uCCB4 \uB2E4\uC6B4\uB85C\uB4DC"\uB85C \uB2E4\uC2DC \uBC1B\uC544\uB3C4 \uC0C1\uD0DC\uB294 \uBC1C\uC1A1\uC644\uB8CC \uADF8\uB300\uB85C \uC720\uC9C0\uB3FC\uC694(\uC7AC\uBC1C\uC1A1 \uAC00\uB2A5).'), orders.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 } }, /* @__PURE__ */ React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#5F5E5A", cursor: "pointer" } }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: allChecked, onChange: toggleCheckAll }), "\uC804\uCCB4\uC120\uD0DD (", orders.length, "\uAC74)"), /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: () => onExportFiltered(orders),
