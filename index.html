@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 164;
+const APP_VERSION = 165;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1935,7 +1935,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v164 (postal file auto import: orders + customers + vendors)";
+const APP_BUILD = "v165 (postal button fix: onPostal prop passed to OrdersTab)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -15240,6 +15240,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
           setBulkSmsOpen(true);
         },
         onBulkOrder: startBulkOrder,
+        onPostal: () => { var _a; return (_a = postalInputRef.current) == null ? void 0 : _a.click(); },
         onDeleteChecked: deleteCheckedOrders,
         onSetCheckedStatus: setCheckedOrdersStatus,
         onSetCheckedBusiness: setCheckedOrdersBusiness,
@@ -17371,6 +17372,7 @@ function OrdersTab({
   onNewOrder,
   onOpenBulkSms,
   onBulkOrder,
+  onPostal,
   onPickCustomerForOrder,
   onNewNameOrder,
   onDeleteChecked,
@@ -17469,7 +17471,7 @@ function OrdersTab({
   })(), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => {
     var _a;
     return (_a = invoiceInputRef.current) == null ? void 0 : _a.click();
-  }, style: toolBtnStyle("#185FA5") }, "\uC1A1\uC7A5\uBC88\uD638 \uC5C5\uB85C\uB4DC"), /* @__PURE__ */ React.createElement("button", { onClick: onBulkOrder, style: toolBtnStyle("#1B2430") }, "\u{1F4CB} \uC5D1\uC140 \uD30C\uC77C \uC8FC\uBB38 \uB4F1\uB85D"), /* @__PURE__ */ React.createElement("button", { onClick: () => { var _a; return (_a = postalInputRef.current) == null ? void 0 : _a.click(); }, style: toolBtnStyle("#5B3A8A") }, "\uD83D\uDCEE \uC6B0\uCCB4\uAD6D \uD30C\uC77C \uB4F1\uB85D"), /* @__PURE__ */ React.createElement("input", { ref: invoiceInputRef, type: "file", accept: ".xlsx,.xls,.csv", onChange: handleInvoiceUpload, style: { display: "none" } })), checkedIds.size > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: onExportVendorChecked, style: toolBtnStyle("#2F6F4E") }, "\u{1F3E2} \uC120\uD0DD \uC911 \uC5C5\uCCB4\uC8FC\uBB38 \uAC70\uB798\uBA85\uC138\uC11C")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#5F5E5A", background: "#F0F1EC", borderRadius: 8, padding: "7px 10px", marginBottom: 8, lineHeight: 1.5 } }, "\uC5C5\uCCB4\xB7\uC77C\uBC18 \uC8FC\uBB38\uC774 \uD568\uAED8 \uBCF4\uC785\uB2C8\uB2E4. \uCE74\uB4DC\uC758 \uBC30\uC9C0\uB85C \uAD6C\uBD84\uB418\uBA70, \uC804\uCCB4\uC120\uD0DD\xB7\uB2E4\uC6B4\uB85C\uB4DC \uC2DC \uC5B4\uB290 \uCABD\uB3C4 \uB204\uB77D\uB418\uC9C0 \uC54A\uC544\uC694."), statusFilter === "shipped" && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#27500A", background: "#EAF3DE", borderRadius: 8, padding: "7px 10px", marginBottom: 8, lineHeight: 1.5 } }, '\uBC1C\uC1A1\uC644\uB8CC \uC8FC\uBB38\uB9CC \uBCF4\uACE0 \uC788\uC5B4\uC694. "\uC774 \uBAA9\uB85D \uC804\uCCB4 \uB2E4\uC6B4\uB85C\uB4DC"\uB85C \uB2E4\uC2DC \uBC1B\uC544\uB3C4 \uC0C1\uD0DC\uB294 \uBC1C\uC1A1\uC644\uB8CC \uADF8\uB300\uB85C \uC720\uC9C0\uB3FC\uC694(\uC7AC\uBC1C\uC1A1 \uAC00\uB2A5).'), orders.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 } }, /* @__PURE__ */ React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#5F5E5A", cursor: "pointer" } }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: allChecked, onChange: toggleCheckAll }), "\uC804\uCCB4\uC120\uD0DD (", orders.length, "\uAC74)"), /* @__PURE__ */ React.createElement(
+  }, style: toolBtnStyle("#185FA5") }, "\uC1A1\uC7A5\uBC88\uD638 \uC5C5\uB85C\uB4DC"), /* @__PURE__ */ React.createElement("button", { onClick: onBulkOrder, style: toolBtnStyle("#1B2430") }, "\u{1F4CB} \uC5D1\uC140 \uD30C\uC77C \uC8FC\uBB38 \uB4F1\uB85D"), /* @__PURE__ */ React.createElement("button", { onClick: onPostal, style: toolBtnStyle("#5B3A8A") }, "\uD83D\uDCEE \uC6B0\uCCB4\uAD6D \uD30C\uC77C \uB4F1\uB85D"), /* @__PURE__ */ React.createElement("input", { ref: invoiceInputRef, type: "file", accept: ".xlsx,.xls,.csv", onChange: handleInvoiceUpload, style: { display: "none" } })), checkedIds.size > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: onExportVendorChecked, style: toolBtnStyle("#2F6F4E") }, "\u{1F3E2} \uC120\uD0DD \uC911 \uC5C5\uCCB4\uC8FC\uBB38 \uAC70\uB798\uBA85\uC138\uC11C")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#5F5E5A", background: "#F0F1EC", borderRadius: 8, padding: "7px 10px", marginBottom: 8, lineHeight: 1.5 } }, "\uC5C5\uCCB4\xB7\uC77C\uBC18 \uC8FC\uBB38\uC774 \uD568\uAED8 \uBCF4\uC785\uB2C8\uB2E4. \uCE74\uB4DC\uC758 \uBC30\uC9C0\uB85C \uAD6C\uBD84\uB418\uBA70, \uC804\uCCB4\uC120\uD0DD\xB7\uB2E4\uC6B4\uB85C\uB4DC \uC2DC \uC5B4\uB290 \uCABD\uB3C4 \uB204\uB77D\uB418\uC9C0 \uC54A\uC544\uC694."), statusFilter === "shipped" && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#27500A", background: "#EAF3DE", borderRadius: 8, padding: "7px 10px", marginBottom: 8, lineHeight: 1.5 } }, '\uBC1C\uC1A1\uC644\uB8CC \uC8FC\uBB38\uB9CC \uBCF4\uACE0 \uC788\uC5B4\uC694. "\uC774 \uBAA9\uB85D \uC804\uCCB4 \uB2E4\uC6B4\uB85C\uB4DC"\uB85C \uB2E4\uC2DC \uBC1B\uC544\uB3C4 \uC0C1\uD0DC\uB294 \uBC1C\uC1A1\uC644\uB8CC \uADF8\uB300\uB85C \uC720\uC9C0\uB3FC\uC694(\uC7AC\uBC1C\uC1A1 \uAC00\uB2A5).'), orders.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 } }, /* @__PURE__ */ React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#5F5E5A", cursor: "pointer" } }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: allChecked, onChange: toggleCheckAll }), "\uC804\uCCB4\uC120\uD0DD (", orders.length, "\uAC74)"), /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: () => onExportFiltered(orders),
