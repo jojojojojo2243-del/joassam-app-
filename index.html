@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 166;
+const APP_VERSION = 167;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1418,14 +1418,24 @@ function parseNameAddr(text, products) {
   for (let line of lines) {
     if (/(상품|주문내역|메시지|요청사항|메모)/.test(line)) continue;
     if (/\d+\s*(개|박스|봉지|봉|팩|세트|kg|키로|킬로|근|망|단|포|상자)/.test(line)) continue;
-    let ln = line.replace(NAME_PHONE_RE, " ").replace(/(받는\s*분|보내는\s*분|주문자|이름|성함|연락처|전화|휴대폰|핸드폰)\s*[:：]?/g, " ").replace(/(사장님|대표님|고객님|님|씨)/g, " ").replace(/[.,·․‧・]/g, " ").trim();
+    // 주소: 라벨 제거 (버그 2 수정)
+    let ln = line.replace(/^(주소|배송\s*주소|받는\s*분\s*주소)\s*[:：]\s*/, "")
+      .replace(NAME_PHONE_RE, " ")
+      .replace(/(받는\s*분|보내는\s*분|주문자|이름|성함|연락처|전화|휴대폰|핸드폰)\s*[:：]?/g, " ")
+      .replace(/(사장님|대표님|고객님|님|씨)/g, " ")
+      .replace(/[.,·․‧・]/g, " ").trim();
     if (!ln) continue;
     if (isProdTok(ln)) continue;
     const toks = ln.split(/\s+/).filter(Boolean);
     const hasAddr = toks.some(isAddrToken);
     if (!hasAddr) {
+      // 이름만 있는 줄 — 주소에 포함 안 되도록 처리 (버그 1 수정)
       const joined = toks.filter((t) => /^[가-힣]{1,4}$/.test(t) && !ADDR_REGIONS.has(t) && !isProdTok(t)).join("");
-      if (joined.length >= 2 && joined.length <= 4 && !ADDR_REGIONS.has(joined) && !ownName) ownName = joined;
+      if (joined.length >= 2 && joined.length <= 4 && !ADDR_REGIONS.has(joined) && !ownName) {
+        // 성씨로 시작하면 이름으로 우선 인식
+        if (KO_SURNAMES.has(joined[0])) ownName = joined;
+        else if (!ownName) ownName = joined;
+      }
       continue;
     }
     const first = toks[0];
@@ -1433,6 +1443,7 @@ function parseNameAddr(text, products) {
       leadName = first;
       nameTokenSet.add(first);
     }
+    // 주소 줄 맨 끝 이름 인식 (버그 3 수정)
     if (!tailName) {
       const tail = [];
       for (let i = toks.length - 1; i >= 0; i--) {
@@ -1935,7 +1946,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v166 (address priority fix: parsed address over DB address to prevent wrong delivery)";
+const APP_BUILD = "v167 (address parse fix: label strip + end-of-line name + standalone name line)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
