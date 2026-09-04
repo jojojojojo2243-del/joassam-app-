@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 165;
+const APP_VERSION = 166;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1935,7 +1935,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v165 (postal button fix: onPostal prop passed to OrdersTab)";
+const APP_BUILD = "v166 (address priority fix: parsed address over DB address to prevent wrong delivery)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -14074,7 +14074,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
         phone: recipPhone || vendor.phone,
         address: d.address || vendor.address,
         postalCode: estimatePostalCode(d.address || vendor.address || "")
-      } : c && draft.deliveries.length === 1 ? { name: c.name, phone: c.phone || draft.sender.phone || "", address: c.address, postalCode: c.postalCode } : { name: recipName, phone: recipPhone, address: d.address, postalCode: estimatePostalCode(d.address) };
+      } : c && draft.deliveries.length === 1 ? { name: c.name, phone: c.phone || draft.sender.phone || "", address: d.address || c.address, postalCode: estimatePostalCode(d.address || c.address || "") } : { name: recipName, phone: recipPhone, address: d.address, postalCode: estimatePostalCode(d.address) };
       const sender = vendor ? { name: draft.sender.name || vendor.name, phone: draft.sender.phone || vendor.phone } : c ? { name: c.name, phone: c.phone } : draft.sender;
       const allItems = Object.entries(d.cart || {}).map(([productId, qty]) => {
         const p = productMap[productId];
@@ -19083,7 +19083,7 @@ function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, ch
     if (!selc) return null;
     return /* @__PURE__ */ React.createElement("div", { style: { background: "#EAF3DE", border: "1px solid #C0DD97", borderRadius: 10, padding: "12px 14px", marginBottom: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 700, color: "#27500A", marginBottom: 8 } }, "\uC120\uD0DD\uD55C \uACE0\uAC1D \uC815\uBCF4\uB85C \uC8FC\uBB38\uD569\uB2C8\uB2E4"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#27500A", lineHeight: 1.7 } }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("b", null, "\uC8FC\uBB38\uC790(\uBCF4\uB0B4\uB294\uBD84)"), " : ", draft.sender.name || selc.name, " \xB7 ", draft.sender.phone || selc.phone), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("b", null, "\uBC1B\uB294\uBD84"), " : ", selc.name, " \xB7 ", selc.phone), selc.address && /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("b", null, "\uC8FC\uC18C"), " : [", selc.postalCode || estimatePostalCode(selc.address), "] ", selc.address)), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#5F7A4E", marginTop: 8 } }, '\uBC1B\uB294\uBD84\uC744 \uB530\uB85C \uC9C0\uC815\uD558\uB824\uBA74 \uC704 "\uACE0\uAC1D \uC120\uD0DD"\uC5D0\uC11C \uBCC0\uACBD\uC744 \uB204\uB974\uAC70\uB098, "+ \uBC30\uC1A1\uC9C0 \uCD94\uAC00"\uB97C \uC774\uC6A9\uD558\uC138\uC694.'));
   })() : null, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("label", { style: { fontSize: 12, color: "#5F5E5A", fontWeight: 700 } }, "\uBC30\uC1A1\uC9C0 (", draft.deliveries.length, ")"), /* @__PURE__ */ React.createElement("button", { onClick: addDeliveryRow, style: { border: "none", background: "none", color: "#185FA5", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, "+ \uBC30\uC1A1\uC9C0 \uCD94\uAC00")), draft.deliveries.map((d, idx) => {
-    const usesCustomer = !isGuest && draft.deliveries.length === 1;
+    const usesCustomer = false; // 항상 주소 입력란 표시 - 원문 주소와 DB 주소 불일치 방지
     const postal = estimatePostalCode(d.address);
     return /* @__PURE__ */ React.createElement("div", { key: d.id, style: { background: "#fff", border: "1px solid #E2E4DD", borderRadius: 10, padding: 12, marginBottom: 12 } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "#27500A" } }, "\uBC30\uC1A1\uC9C0 ", idx + 1), draft.deliveries.length > 1 && /* @__PURE__ */ React.createElement("button", { onClick: () => removeDeliveryRow(d.id), style: { border: "none", background: "none", color: "#A32D2D", fontSize: 12, cursor: "pointer" } }, "\uC0AD\uC81C")), !usesCustomer && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("input", { placeholder: "\uBC1B\uB294\uBD84", value: d.name, onChange: (e) => updateDeliveryField(d.id, "name", e.target.value), style: inputStyle() }), /* @__PURE__ */ React.createElement("input", { placeholder: "\uBC1B\uB294\uBD84 \uC5F0\uB77D\uCC98", value: d.phone, onChange: (e) => updateDeliveryField(d.id, "phone", e.target.value), style: inputStyle() })), /* @__PURE__ */ React.createElement("input", { placeholder: "\uBC1B\uB294\uBD84 \uC8FC\uC18C(\uC804\uCCB4)", value: d.address, onChange: (e) => updateDeliveryField(d.id, "address", e.target.value), style: __spreadProps(__spreadValues({}, inputStyle()), { marginBottom: 6 }) }), d.address.trim() && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#185FA5", marginBottom: 10 } }, "\uC790\uB3D9 \uC785\uB825\uB41C \uC6B0\uD3B8\uBC88\uD638: ", postal)), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 700, color: isBiz ? "#854F0B" : "#27500A" } }, isBiz ? "\uC0C1\uD488 \uC120\uD0DD (\uC5C5\uCCB4 \uC77C\uCE58 \u2014 \uC5C5\uCCB4\uC6A9 \uAD8C\uC7A5)" : "\uC0C1\uD488 \uC120\uD0DD"), /* @__PURE__ */ React.createElement("button", { onClick: onGoProducts, style: { border: "none", background: "none", color: "#185FA5", fontSize: 11, fontWeight: 700, cursor: "pointer" } }, "+ \uC0C1\uD488 \uB4F1\uB85D")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 5, marginBottom: 8 } }, [["all", "\uC804\uCCB4"], ["both", "\uACF5\uC6A9"], ["retail", "\uC77C\uBC18\uC6A9"], ["business", "\uC5C5\uCCB4\uC6A9"]].map(([key, label]) => /* @__PURE__ */ React.createElement(
       "button",
