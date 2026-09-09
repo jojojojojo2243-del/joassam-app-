@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 169;
+const APP_VERSION = 170;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1946,7 +1946,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v169 (xls file support fix + product label strip + isBiz order fix)";
+const APP_BUILD = "v170 (diag log Korean labels + detailed descriptions)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -15689,7 +15689,30 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
     diagLog !== null && /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "flex-end", zIndex: 100001 } }, /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", borderRadius: "16px 16px 0 0", padding: "18px 16px", maxHeight: "80vh", width: "100%", display: "flex", flexDirection: "column" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 } }, /* @__PURE__ */ React.createElement("h2", { style: { fontSize: 15, fontWeight: 700, margin: 0 } }, "\u{1F50D} \uC9C4\uB2E8 \uAE30\uB85D (\uCD5C\uADFC 30\uAC74)"), /* @__PURE__ */ React.createElement("button", { onClick: () => setDiagLog(null), style: { border: "none", background: "none", fontSize: 20, cursor: "pointer", color: "#888780" } }, "\xD7")), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 10.5, color: "#888780", margin: "0 0 10px" } }, "sessionAge(\uBD84)\uAC00 \uD06C\uBA74 \uC624\uB798 \uCF1C\uC838\uC788\uB358 \uD0ED\uC774\uB77C\uB294 \uB73B\uC774\uC5D0\uC694. blocked_*\uB294 \uC548\uC804\uC7A5\uCE58\uAC00 \uC800\uC7A5\uC744 \uB9C9\uC740 \uAE30\uB85D\uC774\uC5D0\uC694."), /* @__PURE__ */ React.createElement("div", { style: { overflowY: "auto", flex: 1 } }, diagLog === "loading" && /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", padding: 30, color: "#888780", fontSize: 13 } }, "\uBD88\uB7EC\uC624\uB294 \uC911..."), Array.isArray(diagLog) && diagLog.length === 0 && /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", padding: 30, color: "#888780", fontSize: 13 } }, "\uC544\uC9C1 \uAE30\uB85D\uC774 \uC5C6\uC5B4\uC694"), Array.isArray(diagLog) && diagLog.map((ev, i) => {
       var _a, _b, _c, _d, _e;
       const isBlocked = (ev.event || "").startsWith("blocked");
-      return /* @__PURE__ */ React.createElement("div", { key: i, style: { border: "1px solid #E2E4DD", borderLeft: `4px solid ${isBlocked ? "#A32D2D" : "#2F6F4E"}`, borderRadius: 8, padding: "8px 10px", marginBottom: 6 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: isBlocked ? "#A32D2D" : "#2F6F4E" } }, ev.event), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#5F5E5A", marginTop: 2 } }, ev.at, " \xB7 v", (_a = ev.appVersion) != null ? _a : "?", " \xB7 \uC138\uC158 ", Math.round((ev.sessionAgeSec || 0) / 60), "\uBD84\uC9F8 \xB7 \uD654\uBA74\uC0C1\uD0DC ", ev.visibility), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#5F5E5A" } }, "\uC800\uC7A5\uD558\uB824\uB358 \uAC12 \u2014 \uACE0\uAC1D", (_b = ev.counts) == null ? void 0 : _b.customers, " \uC8FC\uBB38", (_c = ev.counts) == null ? void 0 : _c.orders, " \uC0C1\uD488", (_d = ev.counts) == null ? void 0 : _d.products, " \uC5C5\uCCB4", (_e = ev.counts) == null ? void 0 : _e.vendors), ev.prevCounts && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#888780" } }, "\uC9C1\uC804 \uC815\uC0C1\uAC12 \u2014 \uACE0\uAC1D", ev.prevCounts.customers, " \uC8FC\uBB38", ev.prevCounts.orders, " \uC0C1\uD488", ev.prevCounts.products, " \uC5C5\uCCB4", ev.prevCounts.vendors), ev.storedCounts && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#888780" } }, "\uD3F0\uC5D0 \uAE30\uC5B5\uB41C \uAC12 \u2014 \uACE0\uAC1D", ev.storedCounts.customers, " \uC8FC\uBB38", ev.storedCounts.orders, " \uC0C1\uD488", ev.storedCounts.products, " \uC5C5\uCCB4", ev.storedCounts.vendors), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 9.5, color: "#B9BBB2", marginTop: 2, wordBreak: "break-all" } }, ev.sessionId, " \xB7 ", ev.href));
+      const isStale = (ev.event || "").startsWith("stale");
+      const diagLabel = (evt) => {
+        const m = {"blocked_customers_dropped_to_empty":"🚨 고객 데이터 소실 차단","blocked_orders_dropped_to_empty":"🚨 주문 데이터 소실 차단","blocked_products_dropped_to_empty":"🚨 상품 데이터 소실 차단","blocked_vendors_dropped_to_empty":"🚨 업체 데이터 소실 차단","stale_version_detected":"⚠️ 구버전 탭 감지 (저장 차단)","save_failed":"❌ 저장 실패"};
+        return m[evt] || evt;
+      };
+      const diagDesc = (evt) => {
+        if (evt === "blocked_customers_dropped_to_empty") return "고객 목록이 0건으로 사라지려 해서 안전장치가 저장을 막았어요. 앱 시작 직후 Firebase 로딩 전에 빈 상태로 저장 시도한 것이며 실제 데이터 손실은 없습니다.";
+        if (evt === "blocked_orders_dropped_to_empty") return "주문 목록이 0건으로 사라지려 해서 안전장치가 저장을 막았어요. 실제 주문 데이터는 안전합니다.";
+        if (evt === "blocked_products_dropped_to_empty") return "상품 목록이 0건으로 사라지려 해서 저장을 막았어요.";
+        if (evt === "blocked_vendors_dropped_to_empty") return "업체 목록이 0건으로 사라지려 해서 저장을 막았어요.";
+        if (evt === "stale_version_detected") return "구버전 캐시가 남아있는 탭이 새 버전과 충돌해서 저장을 차단했어요. 앱을 껐다 켜면 해결됩니다.";
+        if (evt === "save_failed") return "Firebase 저장에 실패했어요. 인터넷 연결을 확인해주세요.";
+        return "";
+      };
+      const borderColor = isBlocked ? "#A32D2D" : isStale ? "#B86800" : "#2F6F4E";
+      const textColor = isBlocked ? "#A32D2D" : isStale ? "#B86800" : "#2F6F4E";
+      return /* @__PURE__ */ React.createElement("div", { key: i, style: { border: "1px solid #E2E4DD", borderLeft: `4px solid ${borderColor}`, borderRadius: 8, padding: "8px 10px", marginBottom: 6 } },
+        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: textColor } }, diagLabel(ev.event || "")),
+        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#333", marginTop: 3, lineHeight: 1.6 } }, diagDesc(ev.event || "")),
+        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#5F5E5A", marginTop: 4 } }, ev.at, " · v", (_a = ev.appVersion) != null ? _a : "?", " · 세션 ", Math.round((ev.sessionAgeSec || 0) / 60), "분째 · 화면상태 ", ev.visibility),
+        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#5F5E5A" } }, "저장하려던 값 — 고객", (_b = ev.counts) == null ? void 0 : _b.customers, " 주문", (_c = ev.counts) == null ? void 0 : _c.orders, " 상품", (_d = ev.counts) == null ? void 0 : _d.products, " 업체", (_e = ev.counts) == null ? void 0 : _e.vendors),
+        ev.prevCounts && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#888780" } }, "직전 정상값 — 고객", ev.prevCounts.customers, " 주문", ev.prevCounts.orders, " 상품", ev.prevCounts.products, " 업체", ev.prevCounts.vendors),
+        ev.storedCounts && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#888780" } }, "폰에 기억된 값 — 고객", ev.storedCounts.customers, " 주문", ev.storedCounts.orders, " 상품", ev.storedCounts.products, " 업체", ev.storedCounts.vendors),
+        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 9.5, color: "#B9BBB2", marginTop: 2, wordBreak: "break-all" } }, ev.sessionId, " · ", ev.href));
     })))),
     busyMessage && /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(27,36,48,0.55)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 99999 } }, /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", borderRadius: 14, padding: "26px 30px", display: "flex", flexDirection: "column", alignItems: "center", gap: 12, minWidth: 200 } }, /* @__PURE__ */ React.createElement("div", { style: { width: 34, height: 34, border: "3px solid #E2E4DD", borderTopColor: "#2F6F4E", borderRadius: "50%", animation: "joassamSpin 0.8s linear infinite" } }), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#1B2430", textAlign: "center" } }, busyMessage)), /* @__PURE__ */ React.createElement("style", null, "@keyframes joassamSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }")),
     confirmDialog && /* @__PURE__ */ React.createElement(
