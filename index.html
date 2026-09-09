@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 168;
+const APP_VERSION = 169;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1946,7 +1946,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v168 (isBiz detection: vendors DB + product name + address keywords + box volume)";
+const APP_BUILD = "v169 (xls file support fix + product label strip + isBiz order fix)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -10695,7 +10695,7 @@ function readWorkbookFile(file, onRows, onError) {
   reader.onload = (e) => {
     try {
       const data = new Uint8Array(e.target.result);
-      const wb = XLSX.read(data, { type: "array" });
+      const wb = XLSX.read(data, { type: "array", cellDates: true, cellNF: false, cellText: false });
       const sheetName = wb.SheetNames.find((n) => /발송처리|주문|order/i.test(n)) || wb.SheetNames[0];
       const sheet = wb.Sheets[sheetName];
       const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
@@ -14224,17 +14224,18 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     const invoiceNo = String(r["\uC1A1\uC7A5\uBC88\uD638"] || r["\uC6B4\uC1A1\uC7A5\uBC88\uD638"] || "").trim();
     const gubunRaw = String(r["\uAD6C\uBD84 (\uC77C\uBC18 /\uC5C5\uCCB4)"] || r["\uAD6C\uBD84"] || "").trim();
     const boxVolumeNum = Number(boxVolume.replace(/[^0-9]/g, "")) || 0;
+    // 상품명 먼저 파싱 (isBiz 판별에 필요)
+    const optionText = String(r["\uC635\uC158\uC815\uBCF4"] || r["\uC635\uC158"] || "").replace(/^(상품선택|상품)\s*:\s*/i, "").trim();
+    const baseProductName = String(r["\uC0C1\uD488\uBA85"] || "").replace(/^(상품선택|상품)\s*:\s*/i, "").trim();
+    const productText = (optionText || baseProductName).trim();
     // 업체 판별: 구분컬럼 > vendors DB 매칭 > 상품명 > 주소 > 박스부피
     const isBizByGubun = /업체/.test(gubunRaw);
     const isBizByVendor = !!(recipName && findMatchingParty(recipName, "", "", vendors));
-    const isBizByProduct = /채소\s*2\s*kg|채소2kg|업체용/i.test(productText || baseProductName);
+    const isBizByProduct = /채소\s*2\s*kg|채소2kg|업체용/i.test(productText);
     const isBizByAddress = /(정육|식당|음식점|쌈밥|카페|교회|마트|농장|베이커리|분식|치킨|피자|족발|순대|국밥|떡볶이|김밥|도시락|반찬|식품|슈퍼|편의점|가게|상가|사무소|점포|본점|지점|오송점|동남점|중앙점|본사|회사)/.test(address);
     const isBizByVolume = boxVolumeNum >= 10;
     const isBiz = isBizByGubun || isBizByVendor || isBizByProduct || isBizByAddress || isBizByVolume;
     const payRaw = String(r["\uC785\uAE08\uAE08\uC561"] || r["\uACB0\uC81C\uAE08\uC561"] || r["\uC0C1\uD488\uBCC4 \uCD1D \uC8FC\uBB38\uAE08\uC561"] || "").replace(/[^0-9.]/g, "");
-    const optionText = String(r["\uC635\uC158\uC815\uBCF4"] || r["\uC635\uC158"] || "").replace(/^상품선택\s*:\s*/, "").trim();
-    const baseProductName = String(r["\uC0C1\uD488\uBA85"] || "").trim();
-    const productText = (optionText || baseProductName).trim();
     const qtyRaw = String(r["\uC218\uB7C9"] || "").trim();
     const priceRaw = String(r["\uAC00\uACA9"] || r["\uB2E8\uAC00"] || "").replace(/[^0-9.]/g, "");
     const rowPrice = priceRaw ? Number(priceRaw) : 0;
