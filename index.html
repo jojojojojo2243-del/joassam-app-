@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 171;
+const APP_VERSION = 172;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1946,7 +1946,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v171 (customer + vendor: recent 3-month order history expandable)";
+const APP_BUILD = "v172 (isBusiness fix: draft.isBusiness + vendorId + vendor name match in submitOrder + createVoiceOrder)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -13985,8 +13985,8 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       memo: autoMemo,
       boxInfo: total > 1 ? `${i + 1}/${total}\uBC15\uC2A4` : "",
       message: "",
-      isBusiness: !!vo.vendorId,
-      vendorId: vo.vendorId || ""
+      isBusiness: !!(vo.vendorId || (vendors && vendors.some((v) => v.name && recipient.name && v.name === recipient.name))),
+      vendorId: vo.vendorId || (vendors && vendors.find((v) => v.name && recipient.name && v.name === recipient.name) || {}).id || ""
     }));
     setOrders((prev) => {
       const nmNS = (recipient.name || "").replace(/\s/g, "");
@@ -14077,7 +14077,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       const recipName = (c && draft.deliveries.length === 1 ? c.name : d.name) || draft.sender.name || "";
       const recipPhone = (c && draft.deliveries.length === 1 ? c.phone : d.phone) || draft.sender.phone || "";
       const vendor = findVendorFor(recipName, recipPhone) || findVendorFor(draft.sender.name, draft.sender.phone);
-      const biz = !!vendor;
+      const biz = !!vendor || !!draft.isBusiness || !!draft.vendorId;
       const recipient = vendor ? {
         // 받는분 이름을 직접 입력하셨으면 그 이름을 그대로 쓰고(전화번호 우연 일치로 엉뚱한
         // 업체명으로 바뀌는 사고 방지), 비어있을 때만 등록된 업체명으로 채움
