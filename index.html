@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 170;
+const APP_VERSION = 171;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1946,7 +1946,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v170 (diag log Korean labels + detailed descriptions)";
+const APP_BUILD = "v171 (customer + vendor: recent 3-month order history expandable)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -17214,18 +17214,46 @@ function VendorsTab({ vendors, orders, addVendor, addVendorsMulti, updateVendor,
 }
 function VendorRow({ vendor, orders, updateVendor, removeVendor, askConfirm, checked, onToggleChecked }) {
   const [editing, setEditing] = useState(false);
+  const [showOrders, setShowOrders] = useState(false);
   const [form, setForm] = useState(vendor);
   const orderCount = orders.filter((o) => o.vendorId === vendor.id).length;
+  // 최근 3개월 주문
+  const recentOrders = useMemo(() => {
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - 3);
+    const cutStr = cutoff.toISOString().slice(0, 10);
+    return orders.filter((o) => o.vendorId === vendor.id && (o.orderDate || "") >= cutStr)
+      .sort((a, b) => (b.orderDate || "").localeCompare(a.orderDate || ""));
+  }, [orders, vendor.id]);
   if (editing) {
     return /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid #185FA5", borderRadius: 10, padding: 12 } }, /* @__PURE__ */ React.createElement("input", { placeholder: "\uC5C5\uCCB4\uBA85", value: form.name, onChange: (e) => setForm(__spreadProps(__spreadValues({}, form), { name: e.target.value })), style: __spreadProps(__spreadValues({}, inputStyle()), { marginBottom: 8 }) }), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("input", { placeholder: "\uC0AC\uC5C5\uC790\uBC88\uD638", value: form.bizNo || "", onChange: (e) => setForm(__spreadProps(__spreadValues({}, form), { bizNo: e.target.value })), style: inputStyle() }), /* @__PURE__ */ React.createElement("input", { placeholder: "\uB300\uD45C\uC790", value: form.ceo || "", onChange: (e) => setForm(__spreadProps(__spreadValues({}, form), { ceo: e.target.value })), style: inputStyle() })), /* @__PURE__ */ React.createElement("input", { placeholder: "\uC804\uD654\uBC88\uD638", value: form.phone || "", onChange: (e) => setForm(__spreadProps(__spreadValues({}, form), { phone: e.target.value })), style: __spreadProps(__spreadValues({}, inputStyle()), { marginBottom: 8 }) }), /* @__PURE__ */ React.createElement("input", { placeholder: "\uB2F4\uB2F9\uC790 \uC774\uBA54\uC77C", type: "email", value: form.email || "", onChange: (e) => setForm(__spreadProps(__spreadValues({}, form), { email: e.target.value })), style: __spreadProps(__spreadValues({}, inputStyle()), { marginBottom: 8 }) }), /* @__PURE__ */ React.createElement("input", { placeholder: "\uC8FC\uC18C", value: form.address || "", onChange: (e) => setForm(__spreadProps(__spreadValues({}, form), { address: e.target.value })), style: __spreadProps(__spreadValues({}, inputStyle()), { marginBottom: 8 }) }), /* @__PURE__ */ React.createElement("input", { placeholder: "\uBA54\uBAA8", value: form.memo || "", onChange: (e) => setForm(__spreadProps(__spreadValues({}, form), { memo: e.target.value })), style: __spreadProps(__spreadValues({}, inputStyle()), { marginBottom: 10 }) }), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => setEditing(false), style: { flex: 1, padding: "8px 0", borderRadius: 8, border: "1px solid #D3D1C7", background: "#fff", color: "#5F5E5A", fontWeight: 700, fontSize: 12, cursor: "pointer" } }, "\uCDE8\uC18C"), /* @__PURE__ */ React.createElement("button", { onClick: () => {
       updateVendor(vendor.id, form);
       setEditing(false);
     }, style: { flex: 2, padding: "8px 0", borderRadius: 8, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" } }, "\uC800\uC7A5")));
   }
-  return /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid #E2E4DD", borderRadius: 10, padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "flex-start", gap: 10, minWidth: 0 } }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: !!checked, onChange: onToggleChecked, style: { marginTop: 3, flexShrink: 0 } }), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { style: { fontWeight: 700, fontSize: 13 } }, vendor.name, " ", /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 400, color: "#888780", fontSize: 11 } }, "\xB7 \uC8FC\uBB38 ", orderCount, "\uAC74")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A" } }, vendor.phone, vendor.address ? ` \xB7 ${vendor.address}` : ""), vendor.bizNo && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#888780" } }, "\uC0AC\uC5C5\uC790 ", vendor.bizNo, vendor.ceo ? ` \xB7 ${vendor.ceo}` : ""), vendor.email && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#185FA5" } }, "\u2709 ", vendor.email), vendor.bizLicense && /* @__PURE__ */ React.createElement("a", { href: vendor.bizLicense, target: "_blank", rel: "noreferrer", style: { display: "inline-flex", alignItems: "center", gap: 4, marginTop: 4, fontSize: 11, color: "#185FA5", textDecoration: "none" } }, /* @__PURE__ */ React.createElement("img", { src: vendor.bizLicense, alt: "\uC0AC\uC5C5\uC790\uB4F1\uB85D\uC99D", style: { width: 32, height: 32, borderRadius: 4, objectFit: "cover", border: "1px solid #E2E4DD" } }), "\uC0AC\uC5C5\uC790\uB4F1\uB85D\uC99D \uBCF4\uAE30"))), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 10 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => {
-    setForm(vendor);
-    setEditing(true);
-  }, style: { border: "none", background: "none", color: "#185FA5", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, "\uC218\uC815"), /* @__PURE__ */ React.createElement("button", { onClick: () => askConfirm(`${vendor.name} \uC5C5\uCCB4\uB97C \uC0AD\uC81C\uD560\uAE4C\uC694?`, () => removeVendor(vendor.id)), style: removeBtnStyle }, "\uC0AD\uC81C")));
+  return /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid #E2E4DD", borderRadius: 10, padding: "10px 14px" } },
+    /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center" } },
+      /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "flex-start", gap: 10, minWidth: 0 } },
+        /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: !!checked, onChange: onToggleChecked, style: { marginTop: 3, flexShrink: 0 } }),
+        /* @__PURE__ */ React.createElement("div", null,
+          /* @__PURE__ */ React.createElement("div", { style: { fontWeight: 700, fontSize: 13 } }, vendor.name, " ", /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 400, color: "#888780", fontSize: 11 } }, "\xB7 \uC8FC\uBB38 ", orderCount, "\uAC74")),
+          /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A" } }, vendor.phone, vendor.address ? ` \xB7 ${vendor.address}` : ""),
+          vendor.bizNo && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#888780" } }, "\uC0AC\uC5C5\uC790 ", vendor.bizNo, vendor.ceo ? ` \xB7 ${vendor.ceo}` : ""),
+          vendor.email && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#185FA5" } }, "\u2709 ", vendor.email),
+          vendor.bizLicense && /* @__PURE__ */ React.createElement("a", { href: vendor.bizLicense, target: "_blank", rel: "noreferrer", style: { display: "inline-flex", alignItems: "center", gap: 4, marginTop: 4, fontSize: 11, color: "#185FA5", textDecoration: "none" } }, /* @__PURE__ */ React.createElement("img", { src: vendor.bizLicense, alt: "\uC0AC\uC5C5\uC790\uB4F1\uB85D\uC99D", style: { width: 32, height: 32, borderRadius: 4, objectFit: "cover", border: "1px solid #E2E4DD" } }), "\uC0AC\uC5C5\uC790\uB4F1\uB85D\uC99D \uBCF4\uAE30"))),
+      /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 10 } },
+        /* @__PURE__ */ React.createElement("button", { onClick: () => { setForm(vendor); setEditing(true); }, style: { border: "none", background: "none", color: "#185FA5", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, "\uC218\uC815"),
+        /* @__PURE__ */ React.createElement("button", { onClick: () => askConfirm(`${vendor.name} \uC5C5\uCCB4\uB97C \uC0AD\uC81C\uD560\uAE4C\uC694?`, () => removeVendor(vendor.id)), style: removeBtnStyle }, "\uC0AD\uC81C"))),
+    /* @__PURE__ */ React.createElement("button", { onClick: () => setShowOrders((v) => !v), style: { marginTop: 8, width: "100%", padding: "6px 0", borderRadius: 8, border: "1px solid #E2E4DD", background: showOrders ? "#F1F2EC" : "#fff", color: "#5F5E5A", fontSize: 11.5, fontWeight: 700, cursor: "pointer" } },
+      showOrders ? "\u25B2 \uCD5C\uADFC 3\uAC1C\uC6D4 \uC8FC\uBB38 \uB2EB\uAE30" : `\u25BC \uCD5C\uADFC 3\uAC1C\uC6D4 \uC8FC\uBB38 \uD655\uC778 (${recentOrders.length}\uAC74)`),
+    showOrders && /* @__PURE__ */ React.createElement("div", { style: { marginTop: 8, borderTop: "1px solid #F1F2EC", paddingTop: 8 } },
+      recentOrders.length === 0
+        ? /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#888780", padding: "8px 0", textAlign: "center" } }, "\uCD5C\uADFC 3\uAC1C\uC6D4 \uC8FC\uBB38\uC774 \uC5C6\uC5B4\uC694.")
+        : recentOrders.map((o, i) => /* @__PURE__ */ React.createElement("div", { key: o.id || i, style: { fontSize: 11.5, color: "#1B2430", padding: "5px 0", borderBottom: i < recentOrders.length - 1 ? "1px solid #F5F5F0" : "none" } },
+            /* @__PURE__ */ React.createElement("div", { style: { fontWeight: 600 } }, o.orderDate, " ", o.status === "shipped" ? "(\uBC1C\uC1A1\uC644\uB8CC)" : o.status === "pending" ? "(\uC811\uC218)" : ""),
+            /* @__PURE__ */ React.createElement("div", { style: { color: "#5F5E5A", marginTop: 2 } }, (o.items || []).map((it) => `${it.name} ${it.qty}개`).join(", ") || "\uC0C1\uD488\uC5C6\uC74C"),
+            o.recipient && /* @__PURE__ */ React.createElement("div", { style: { color: "#888780", fontSize: 10.5 } }, o.recipient.name, o.recipient.address ? " · " + o.recipient.address.slice(0, 20) + (o.recipient.address.length > 20 ? "..." : "") : ""),
+            o.trackingNo && /* @__PURE__ */ React.createElement("div", { style: { color: "#888780", fontSize: 10.5 } }, "\uC1A1\uC7A5: ", o.trackingNo)))));
 }
 function SupplierTab({ supplier, setSupplier, fireToast, onBack }) {
   const [form, setForm] = useState(supplier);
@@ -19604,14 +19632,31 @@ function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, rem
         checked: checkedIds.has(c.id),
         onToggleChecked: () => toggleChecked(c.id),
         isRegular,
-        recentOrderCount: countRecentOrdersForCustomer(c, orders)
+        recentOrderCount: countRecentOrdersForCustomer(c, orders),
+        orders
       }
     );
   })));
 }
-function CustomerRow({ customer, orderCount, subscription, updateCustomer, removeCustomer, askConfirm, checked, onToggleChecked, isRegular, recentOrderCount }) {
+function CustomerRow({ customer, orderCount, subscription, updateCustomer, removeCustomer, askConfirm, checked, onToggleChecked, isRegular, recentOrderCount, orders }) {
   const [editing, setEditing] = useState(false);
+  const [showOrders, setShowOrders] = useState(false);
   const [form, setForm] = useState({ name: customer.name, phone: customer.phone, address: customer.address, memo: customer.memo });
+  // 최근 3개월 주문 내역
+  const recentOrders = useMemo(() => {
+    if (!orders) return [];
+    const cutoff = new Date();
+    cutoff.setMonth(cutoff.getMonth() - 3);
+    const cutStr = cutoff.toISOString().slice(0, 10);
+    return orders.filter((o) => {
+      const recipPhone = (o.recipient && o.recipient.phone || "").replace(/[^0-9]/g, "");
+      const custPhone = (customer.phone || "").replace(/[^0-9]/g, "");
+      const nameMatch = orderRecipientName(o) === customer.name;
+      const phoneMatch = recipPhone && custPhone && recipPhone === custPhone;
+      const idMatch = o.customerId === customer.id;
+      return (nameMatch || phoneMatch || idMatch) && (o.orderDate || "") >= cutStr;
+    }).sort((a, b) => (b.orderDate || "").localeCompare(a.orderDate || ""));
+  }, [orders, customer]);
   function startEdit() {
     setForm({ name: customer.name, phone: customer.phone, address: customer.address, memo: customer.memo });
     setEditing(true);
@@ -19627,14 +19672,33 @@ function CustomerRow({ customer, orderCount, subscription, updateCustomer, remov
     });
   }
   if (!editing) {
-    return /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid #E2E4DD", borderRadius: 10, padding: "10px 14px", display: "flex", alignItems: "center", gap: 10 } }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: !!checked, onChange: onToggleChecked, style: { flexShrink: 0 } }), /* @__PURE__ */ React.createElement(CustomerAvatar, { name: customer.name }), /* @__PURE__ */ React.createElement("div", { style: { flex: 1, minWidth: 0 } }, /* @__PURE__ */ React.createElement("div", { style: { fontWeight: 700, fontSize: 13, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } }, customer.name, " ", /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 400, color: "#888780", fontSize: 11 } }, "\xB7 \uC8FC\uBB38 ", orderCount, "\uAC74"), isRegular && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10.5, fontWeight: 700, color: "#854F0B", background: "#FAEEDA", padding: "1px 7px", borderRadius: 20 } }, "\u2B50 \uB2E8\uACE8 (\uCD5C\uADFC 1\uB144 ", recentOrderCount, "\uD68C)"), subscription && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10.5, fontWeight: 700, color: "#185FA5", background: "#E6F1FB", padding: "1px 7px", borderRadius: 20 } }, "\uC815\uAE30\uBC30\uC1A1 ", (subscription.occurrenceCount || 0) + 1, "\uD68C\uCC28", subscription.totalOccurrences ? ` (\uB0A8\uC740 ${Math.max(subscription.totalOccurrences - (subscription.occurrenceCount || 0), 0)}\uD68C)` : " (\uBB34\uC81C\uD55C)")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A" } }, customer.phone, customer.address ? ` \xB7 [${customer.postalCode}] ${customer.address}` : "", customer.memo ? ` \xB7 ${customer.memo}` : "")), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4, flexShrink: 0, alignItems: "flex-end" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 10 } }, /* @__PURE__ */ React.createElement("button", { onClick: startEdit, style: { border: "none", background: "none", color: "#185FA5", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, "\uC218\uC815"), /* @__PURE__ */ React.createElement("button", { onClick: handleDelete, style: removeBtnStyle }, "\uC0AD\uC81C")), /* @__PURE__ */ React.createElement(
-      "button",
-      {
-        onClick: () => updateCustomer(customer.id, { regularOverride: isRegular ? false : true }),
-        style: { border: "none", background: "none", color: isRegular ? "#A32D2D" : "#854F0B", fontSize: 11, fontWeight: 700, cursor: "pointer", padding: 0 }
-      },
-      isRegular ? "\uB2E8\uACE8 \uD574\uC81C" : "\uB2E8\uACE8\uB85C \uC9C0\uC815"
-    )));
+    return /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid #E2E4DD", borderRadius: 10, padding: "10px 14px" } },
+      /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 10 } },
+        /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: !!checked, onChange: onToggleChecked, style: { flexShrink: 0 } }),
+        /* @__PURE__ */ React.createElement(CustomerAvatar, { name: customer.name }),
+        /* @__PURE__ */ React.createElement("div", { style: { flex: 1, minWidth: 0 } },
+          /* @__PURE__ */ React.createElement("div", { style: { fontWeight: 700, fontSize: 13, display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" } },
+            customer.name, " ",
+            /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 400, color: "#888780", fontSize: 11 } }, "\xB7 \uC8FC\uBB38 ", orderCount, "\uAC74"),
+            isRegular && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10.5, fontWeight: 700, color: "#854F0B", background: "#FAEEDA", padding: "1px 7px", borderRadius: 20 } }, "\u2B50 \uB2E8\uACE8 (\uCD5C\uADFC 1\uB144 ", recentOrderCount, "\uD68C)"),
+            subscription && /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10.5, fontWeight: 700, color: "#185FA5", background: "#E6F1FB", padding: "1px 7px", borderRadius: 20 } }, "\uC815\uAE30\uBC30\uC1A1 ", (subscription.occurrenceCount || 0) + 1, "\uD68C\uCC28", subscription.totalOccurrences ? ` (\uB0A8\uC740 ${Math.max(subscription.totalOccurrences - (subscription.occurrenceCount || 0), 0)}\uD68C)` : " (\uBB34\uC81C\uD55C)")),
+          /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A" } }, customer.phone, customer.address ? ` \xB7 [${customer.postalCode}] ${customer.address}` : "", customer.memo ? ` \xB7 ${customer.memo}` : "")),
+        /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4, flexShrink: 0, alignItems: "flex-end" } },
+          /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 10 } },
+            /* @__PURE__ */ React.createElement("button", { onClick: startEdit, style: { border: "none", background: "none", color: "#185FA5", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, "\uC218\uC815"),
+            /* @__PURE__ */ React.createElement("button", { onClick: handleDelete, style: removeBtnStyle }, "\uC0AD\uC81C")),
+          /* @__PURE__ */ React.createElement("button", { onClick: () => updateCustomer(customer.id, { regularOverride: isRegular ? false : true }), style: { border: "none", background: "none", color: isRegular ? "#A32D2D" : "#854F0B", fontSize: 11, fontWeight: 700, cursor: "pointer", padding: 0 } }, isRegular ? "\uB2E8\uACE8 \uD574\uC81C" : "\uB2E8\uACE8\uB85C \uC9C0\uC815"))),
+      /* @__PURE__ */ React.createElement("button", { onClick: () => setShowOrders((v) => !v), style: { marginTop: 8, width: "100%", padding: "6px 0", borderRadius: 8, border: "1px solid #E2E4DD", background: showOrders ? "#F1F2EC" : "#fff", color: "#5F5E5A", fontSize: 11.5, fontWeight: 700, cursor: "pointer" } },
+        showOrders ? "\u25B2 \uCD5C\uADFC 3\uAC1C\uC6D4 \uC8FC\uBB38 \uB2EB\uAE30" : `\u25BC \uCD5C\uADFC 3\uAC1C\uC6D4 \uC8FC\uBB38 \uD655\uC778 (${recentOrders.length}\uAC74)`),
+      showOrders && /* @__PURE__ */ React.createElement("div", { style: { marginTop: 8, borderTop: "1px solid #F1F2EC", paddingTop: 8 } },
+        recentOrders.length === 0
+          ? /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#888780", padding: "8px 0", textAlign: "center" } }, "\uCD5C\uADFC 3\uAC1C\uC6D4 \uC8FC\uBB38\uC774 \uC5C6\uC5B4\uC694.")
+          : recentOrders.map((o, i) => /* @__PURE__ */ React.createElement("div", { key: o.id || i, style: { fontSize: 11.5, color: "#1B2430", padding: "5px 0", borderBottom: i < recentOrders.length - 1 ? "1px solid #F5F5F0" : "none", display: "flex", justifyContent: "space-between", alignItems: "flex-start" } },
+              /* @__PURE__ */ React.createElement("div", null,
+                /* @__PURE__ */ React.createElement("div", { style: { fontWeight: 600 } }, o.orderDate, " ", o.isBusiness ? "\uD76C" : "\uC77C\uBC18", " ", o.status === "shipped" ? "(\uBC1C\uC1A1\uC644\uB8CC)" : o.status === "pending" ? "(\uC811\uC218)" : ""),
+                /* @__PURE__ */ React.createElement("div", { style: { color: "#5F5E5A", marginTop: 2 } }, (o.items || []).map((it) => `${it.name} ${it.qty}개`).join(", ") || "\uC0C1\uD488\uC5C6\uC74C"),
+                o.trackingNo && /* @__PURE__ */ React.createElement("div", { style: { color: "#888780", fontSize: 10.5 } }, "\uC1A1\uC7A5: ", o.trackingNo)),
+              /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#888780", flexShrink: 0, marginLeft: 8 } }, o.recipient && o.recipient.address ? o.recipient.address.slice(0, 15) + (o.recipient.address.length > 15 ? "..." : "") : "")))));
   }
   return /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid #185FA5", borderRadius: 10, padding: "12px 14px" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("input", { placeholder: "\uC774\uB984", value: form.name, onChange: (e) => setForm(__spreadProps(__spreadValues({}, form), { name: e.target.value })), style: inputStyle() }), /* @__PURE__ */ React.createElement("input", { placeholder: "\uC804\uD654\uBC88\uD638", value: form.phone, onChange: (e) => setForm(__spreadProps(__spreadValues({}, form), { phone: e.target.value })), style: inputStyle() }), /* @__PURE__ */ React.createElement("input", { placeholder: "\uC8FC\uC18C", value: form.address, onChange: (e) => setForm(__spreadProps(__spreadValues({}, form), { address: e.target.value })), style: inputStyle() }), form.address.trim() && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#185FA5" } }, "\uC790\uB3D9 \uC785\uB825\uB41C \uC6B0\uD3B8\uBC88\uD638: ", estimatePostalCode(form.address)), /* @__PURE__ */ React.createElement("input", { placeholder: "\uBA54\uBAA8", value: form.memo, onChange: (e) => setForm(__spreadProps(__spreadValues({}, form), { memo: e.target.value })), style: inputStyle() })), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => setEditing(false), style: { flex: 1, padding: "8px 0", borderRadius: 8, border: "1px solid #D3D1C7", background: "#fff", color: "#5F5E5A", fontWeight: 700, fontSize: 12, cursor: "pointer" } }, "\uCDE8\uC18C"), /* @__PURE__ */ React.createElement("button", { onClick: save, style: { flex: 2, padding: "8px 0", borderRadius: 8, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" } }, "\uC800\uC7A5")));
 }
