@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 173;
+const APP_VERSION = 174;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -208,7 +208,7 @@ function resolveOrderField(label, o) {
     "\uC6B4\uC1A1\uC7A5\uBC88\uD638": o.invoiceNo || "",
     "\uD0DD\uBC30\uC0AC": o.courier || "",
     "\uC785\uAE08\uAE08\uC561": (_j = o.paymentAmount) != null ? _j : "",
-    "\uAD6C\uBD84 (\uC77C\uBC18 /\uC5C5\uCCB4)": o.isBusiness ? "\uC5C5\uCCB4" : "\uC77C\uBC18"
+    "\uAD6C\uBD84 (\uC77C\uBC18 /\uC5C5\uCCB4)": (o.isBusiness || !!o.vendorId) ? "\uC5C5\uCCB4" : "\uC77C\uBC18"
   };
   return map[label] !== void 0 ? map[label] : "";
 }
@@ -216,7 +216,7 @@ function syncCustomerAddressNotes(ordersToScan, existingCustomers) {
   const normPhone = (p) => String(p || "").replace(/[^0-9]/g, "");
   const patches = {};
   ordersToScan.forEach((o) => {
-    if (o.isBusiness) return;
+    if (o.isBusiness || o.vendorId) return;
     [o.recipient, o.sender].forEach((who) => {
       var _a;
       const nm = ((who == null ? void 0 : who.name) || "").trim();
@@ -243,13 +243,12 @@ function parseOrderDate(o) {
   return isNaN(d.getTime()) ? null : d;
 }
 function orderBelongsToCustomer(o, customer) {
-  if (!o || o.isBusiness) return false;
+  if (!o || o.isBusiness || o.vendorId) return false;
   if (customer && customer.id && o.customerId === customer.id) return true;
   const cp = ((customer && customer.phone) || "").replace(/[^0-9]/g, "");
   if (!cp || cp.length < 8) return false;
   const rp = ((o.recipient && o.recipient.phone) || "").replace(/[^0-9]/g, "");
-  const sp = ((o.sender && o.sender.phone) || "").replace(/[^0-9]/g, "");
-  return cp === rp || cp === sp;
+  return cp === rp;
 }
 let _ocIdxOrders = null;
 let _ocIdx = null;
@@ -263,7 +262,7 @@ function getOrderCountIndex(orders) {
   const list = orders || [];
   for (let i = 0; i < list.length; i++) {
     const o = list[i];
-    if (!o || o.isBusiness) continue;
+    if (!o || o.isBusiness || o.vendorId) continue;
     const d = parseOrderDate(o);
     if (!d) continue;
     const t = d.getTime();
@@ -381,7 +380,7 @@ function findMissingCustomersFromOrders(ordersToScan, existingCustomers) {
   };
   const toAdd = [];
   ordersToScan.forEach((o) => {
-    if (o.isBusiness) return;
+    if (o.isBusiness || o.vendorId) return;
     const recip = o.recipient || {};
     const snd = o.sender || {};
     const recipName = (recip.name || "").trim();
@@ -1946,7 +1945,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v173 (recent orders date fix: createdAt MM.DD format fallback to full date)";
+const APP_BUILD = "v174 (vendor/customer separation fix: vendorId check in all customer functions)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
