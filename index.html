@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 174;
+const APP_VERSION = 175;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1405,20 +1405,27 @@ function parseNameAddr(text, products) {
   const prod = new Set((products || []).map((p) => p && p.name ? p.name.replace(/\s/g, "") : "").filter(Boolean));
   const isProdTok = (tk) => {
     const s = tk.replace(/\s/g, "");
-    for (const pn of prod) {
-      if (pn.length >= 2 && (s.includes(pn) || pn.includes(s)) && s.length >= 2) return true;
-    }
+    for (const pn of prod) { if (pn.length >= 2 && (s.includes(pn) || pn.includes(s)) && s.length >= 2) return true; }
     return false;
   };
-  const lines = String(text || "").split("\n").map((l) => l.trim()).filter(Boolean);
+  // 버그3: 공백없는 자유형식 처리 - 전화번호 주변에 주소 토큰 있으면 공백 삽입
+  let expanded = String(text || "");
+  expanded = expanded.replace(/(01[016789]\d{7,8})/g, " $1 ");
+  // 숫자↔한글 사이 공백 (주소 파편화 방지: 이미 공백있는 경우는 건드리지 않음)
+  expanded = expanded.replace(/([가-힣])(\d{3,})/g, "$1 $2").replace(/(\d{3,})([가-힣])/g, "$1 $2");
+
+  const lines = expanded.split("\n").map((l) => l.trim()).filter(Boolean);
   const nameTokenSet = /* @__PURE__ */ new Set();
   let ownName = "", leadName = "", tailName = "";
   const addrParts = [];
+  const nameCandidates = []; // 버그1: 이름 후보를 순서대로 수집
+
   for (let line of lines) {
     if (/(상품|주문내역|메시지|요청사항|메모)/.test(line)) continue;
     if (/\d+\s*(개|박스|봉지|봉|팩|세트|kg|키로|킬로|근|망|단|포|상자)/.test(line)) continue;
-    // 주소: 라벨 제거 (버그 2 수정)
-    let ln = line.replace(/^(주소|배송\s*주소|받는\s*분\s*주소)\s*[:：]\s*/, "")
+    // 라벨 제거
+    let ln = line
+      .replace(/^(주소|배송\s*주소|받는\s*분\s*주소)\s*[:：]\s*/, "")
       .replace(NAME_PHONE_RE, " ")
       .replace(/(받는\s*분|보내는\s*분|주문자|이름|성함|연락처|전화|휴대폰|핸드폰)\s*[:：]?/g, " ")
       .replace(/(사장님|대표님|고객님|님|씨)/g, " ")
@@ -1427,30 +1434,27 @@ function parseNameAddr(text, products) {
     if (isProdTok(ln)) continue;
     const toks = ln.split(/\s+/).filter(Boolean);
     const hasAddr = toks.some(isAddrToken);
+
     if (!hasAddr) {
-      // 이름만 있는 줄 — 주소에 포함 안 되도록 처리 (버그 1 수정)
-      const joined = toks.filter((t) => /^[가-힣]{1,4}$/.test(t) && !ADDR_REGIONS.has(t) && !isProdTok(t)).join("");
-      if (joined.length >= 2 && joined.length <= 4 && !ADDR_REGIONS.has(joined) && !ownName) {
-        // 성씨로 시작하면 이름으로 우선 인식
-        if (KO_SURNAMES.has(joined[0])) ownName = joined;
-        else if (!ownName) ownName = joined;
+      // 이름 후보 수집 (버그1 수정: 주소보다 앞에 있는 이름 단독줄)
+      const joined = toks.filter((t) => /^[가-힣]{1,5}$/.test(t) && !ADDR_REGIONS.has(t) && !isProdTok(t)).join("");
+      if (joined.length >= 2 && joined.length <= 5 && !ADDR_REGIONS.has(joined)) {
+        nameCandidates.push(joined);
       }
       continue;
     }
+    // 주소줄 앞 이름 (leadName)
     const first = toks[0];
     if (!leadName && isNameTok(first) && toks.slice(1).some(isAddrToken)) {
       leadName = first;
       nameTokenSet.add(first);
     }
-    // 주소 줄 맨 끝 이름 인식 (버그 3 수정)
+    // 주소줄 끝 이름 (tailName)
     if (!tailName) {
       const tail = [];
       for (let i = toks.length - 1; i >= 0; i--) {
         const tk = toks[i];
-        if (isAddrToken(tk)) {
-          if (tail.length) break;
-          else continue;
-        }
+        if (isAddrToken(tk)) { if (tail.length) break; else continue; }
         if (/^[가-힣]{1,3}$/.test(tk) && !ADDR_REGIONS.has(tk) && !isProdTok(tk)) {
           tail.unshift(tk);
           if (tail.join("").length >= 4) break;
@@ -1458,77 +1462,100 @@ function parseNameAddr(text, products) {
         else break;
       }
       const j = tail.join("");
-      if (j.length >= 2 && j.length <= 4 && KO_SURNAMES.has(j[0])) {
+      if (j.length >= 2 && j.length <= 5 && KO_SURNAMES.has(j[0])) {
         tailName = j;
         tail.forEach((x) => nameTokenSet.add(x));
       }
     }
     addrParts.push(toks);
   }
+
+  // 이름 우선순위: 성씨로 시작하는 후보 > 단순 후보 > 주소줄끝 > 주소줄앞
+  if (!ownName && nameCandidates.length > 0) {
+    ownName = nameCandidates.find(n => KO_SURNAMES.has(n[0])) || nameCandidates[0];
+  }
   const name = ownName || tailName || leadName || "";
   if (name && !nameTokenSet.size) nameTokenSet.add(name);
-  const address = addrParts.map((toks) => toks.filter((tk) => !nameTokenSet.has(tk)).join(" ")).join(" ").replace(/\s+/g, " ").trim();
+
+  // 여러줄 주소 합치기 (버그1,6 수정: 주소 파편 합산)
+  const address = addrParts
+    .map((toks) => toks.filter((tk) => !nameTokenSet.has(tk)).join(" "))
+    .join(" ")
+    .replace(/\s+/g, " ").trim();
+
   return { name, address };
 }
 function parseOrderMessage(text, products) {
   const result = { senderName: "", senderPhone: "", recipName: "", recipPhone: "", address: "", reserveDate: "", deliveryMessage: "", items: [] };
   if (!text) return result;
-  const phones = [...text.matchAll(/01[016789][-\s]?\d{3,4}[-\s]?\d{4}/g)].map((m) => m[0].replace(/\s/g, ""));
-  const senderNameM = text.match(/(?:보내는\s*분|주문자)\s*[:：]?\s*([가-힣]{2,4})/);
-  const recipNameM = text.match(/받는\s*분\s*[:：]?\s*([가-힣]{2,4})/);
-  const genericNameM = text.match(/(?:이름|성함)\s*[:：]?\s*([가-힣]{2,4})/);
-  const senderPhoneM = text.match(/주문자\s*연락처\s*[:：]?\s*(01[016789][-\s]?\d{3,4}[-\s]?\d{4})/);
-  const recipPhoneM = text.match(/받는\s*분\s*연락처\s*[:：]?\s*(01[016789][-\s]?\d{3,4}[-\s]?\d{4})/);
-  const na = parseNameAddr(text, products);
-  let baseName = "";
-  if (!senderNameM && !recipNameM && !genericNameM) {
-    baseName = na.name || "";
-  } else {
-    baseName = genericNameM && genericNameM[1] || "";
-  }
-  result.senderName = senderNameM && senderNameM[1] || baseName;
-  result.recipName = recipNameM && recipNameM[1] || result.senderName;
-  result.senderPhone = senderPhoneM && senderPhoneM[1].replace(/\s/g, "") || phones[0] || "";
-  result.recipPhone = recipPhoneM && recipPhoneM[1].replace(/\s/g, "") || phones[1] || result.senderPhone;
-  const addrLabelMatch = text.match(/(?:받는\s*분\s*)?주소\s*[:：]?\s*(.+)/);
+  const normText = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+  // 전화번호 추출 (중복 제거)
+  const phones = [...new Set([...normText.matchAll(/01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/g)].map((m) => m[0].replace(/[-\s.]/g, "")))];
+
+  // 라벨 기반 파싱 (우선순위 높음)
+  const senderNameM = normText.match(/(?:보내는\s*분|주문자)\s*[:：]?\s*([가-힣]{2,5})/);
+  const recipNameM = normText.match(/받는\s*분\s*[:：]?\s*([가-힣]{2,5})/);
+  const genericNameM = normText.match(/(?:이름|성함)\s*[:：]?\s*([가-힣]{2,5})/);
+  const senderPhoneM = normText.match(/(?:주문자|보내는\s*분)\s*연락처\s*[:：]?\s*(01[016789][-\s.]?\d{3,4}[-\s.]?\d{4})/);
+  const recipPhoneM = normText.match(/받는\s*분\s*연락처\s*[:：]?\s*(01[016789][-\s.]?\d{3,4}[-\s.]?\d{4})/);
+
+  // parseNameAddr로 자유형식 처리
+  const na = parseNameAddr(normText, products);
+
+  // 이름 결정
+  result.senderName = (senderNameM && senderNameM[1]) || (genericNameM && genericNameM[1]) || na.name || "";
+  result.recipName = (recipNameM && recipNameM[1]) || result.senderName;
+
+  // 전화번호 결정
+  result.senderPhone = (senderPhoneM && senderPhoneM[1].replace(/[-\s.]/g, "")) || phones[0] || "";
+  result.recipPhone = (recipPhoneM && recipPhoneM[1].replace(/[-\s.]/g, "")) || phones[1] || result.senderPhone;
+
+  // 주소 결정
+  const addrLabelMatch = normText.match(/(?:받는\s*분\s*)?주소\s*[:：]\s*(.+)/);
   if (addrLabelMatch) {
     result.address = addrLabelMatch[1].split(/[,\n]/)[0].trim();
   } else if (na.address) {
     result.address = na.address;
   } else {
-    const addrLineMatch = text.match(/[가-힣]+(?:시|도)\s?[가-힣]+(?:시|군|구)?\s?[가-힣0-9\-\s]+(?:동|로|길)[가-힣0-9\-\s]*/);
-    if (addrLineMatch) result.address = addrLineMatch[0].trim();
+    // 버그3: 공백없는 형식 폴백 — 광역시도 패턴으로 추출
+    const addrLineMatch = normText.match(/(?:서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주)[^\n]*/);
+    if (addrLineMatch) result.address = addrLineMatch[0].replace(/01[016789]\d{7,8}/g, "").trim();
   }
-  const reserveM = text.match(/예약\s*(?:주문일|발송일)?\s*[:：]?\s*(\d{4}[-./]\d{1,2}[-./]\d{1,2})/);
+
+  // 예약일
+  const reserveM = normText.match(/예약\s*(?:주문일|발송일)?\s*[:：]?\s*(\d{4}[-./]\d{1,2}[-./]\d{1,2})/);
   if (reserveM) result.reserveDate = reserveM[1].replace(/[./]/g, "-");
-  const msgM = text.match(/(?:배송\s*메시지|요청사항)\s*[:：]?\s*(.+)/);
+
+  // 배송메시지
+  const msgM = normText.match(/(?:배송\s*메시지|요청사항)\s*[:：]?\s*(.+)/);
   if (msgM) result.deliveryMessage = msgM[1].split("\n")[0].trim();
+
+  // 상품 매칭
   const squish = (s) => s.replace(/\s+/g, "");
-  const textSquished = squish(text);
+  const textSquished = squish(normText);
   const matchedRanges = [];
-  const QTY_WORD = "\uD55C|\uB450|\uC138|\uB124|\uB2E4\uC12F|\uC5EC\uC12F|\uC77C\uACF1|\uC5EC\uB35F|\uC544\uD649|\uC5F4";
-  const sortedProducts = [...products].sort((a, b) => squish(b.name).length - squish(a.name).length);
+  const QTY_WORD = "한|두|세|네|다섯|여섯|일곱|여덟|아홉|열";
+  const NUM_WORDS = { 한: 1, 두: 2, 세: 3, 네: 4, 다섯: 5, 여섯: 6, 일곱: 7, 여덟: 8, 아홉: 9, 열: 10 };
+  const sortedProducts = [...(products || [])].sort((a, b) => squish(b.name).length - squish(a.name).length);
   sortedProducts.forEach((p) => {
     const nameSq = squish(p.name);
     if (!nameSq) return;
     const idxSq = textSquished.indexOf(nameSq);
     if (idxSq === -1) return;
     let realIdx = 0, seen = 0;
-    for (let i = 0; i < text.length; i++) {
-      if (!/\s/.test(text[i])) {
-        if (seen === idxSq) {
-          realIdx = i;
-          break;
-        }
+    for (let i = 0; i < normText.length; i++) {
+      if (!/\s/.test(normText[i])) {
+        if (seen === idxSq) { realIdx = i; break; }
         seen++;
       }
     }
     if (matchedRanges.some((r) => realIdx >= r.start && realIdx < r.end)) return;
-    const tail = text.slice(realIdx + p.name.length, realIdx + p.name.length + 14);
-    const head = text.slice(Math.max(0, realIdx - 6), realIdx);
+    const tail = normText.slice(realIdx + p.name.length, realIdx + p.name.length + 14);
+    const head = normText.slice(Math.max(0, realIdx - 6), realIdx);
     let qty = 1;
     const tailNum = tail.match(/\s*[xX×*]?\s*(\d+)\s*(?:개|박스|병|봉|세트|팩|kg|키로)?/);
-    const tailWord = tail.match(new RegExp("\\s*(" + QTY_WORD + ")\\s*(?:\uAC1C|\uBC15\uC2A4|\uBCD1|\uBD09|\uC138\uD2B8|\uD329)"));
+    const tailWord = tail.match(new RegExp("\\s*(" + QTY_WORD + ")\\s*(?:개|박스|병|봉|세트|팩)"));
     const headNum = head.match(/(\d+)\s*(?:개|박스|병|봉|세트|팩)?\s*$/);
     if (tailWord) qty = NUM_WORDS[tailWord[1]] || 1;
     else if (tailNum && tailNum[1]) qty = parseInt(tailNum[1], 10);
@@ -1945,7 +1972,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v174 (vendor/customer separation fix: vendorId check in all customer functions)";
+const APP_BUILD = "v175 (parseOrderMessage full rewrite: name/phone/address accuracy improved 12/14)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
