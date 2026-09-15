@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 175;
+const APP_VERSION = 176;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -208,7 +208,16 @@ function resolveOrderField(label, o) {
     "\uC6B4\uC1A1\uC7A5\uBC88\uD638": o.invoiceNo || "",
     "\uD0DD\uBC30\uC0AC": o.courier || "",
     "\uC785\uAE08\uAE08\uC561": (_j = o.paymentAmount) != null ? _j : "",
-    "\uAD6C\uBD84 (\uC77C\uBC18 /\uC5C5\uCCB4)": (o.isBusiness || !!o.vendorId) ? "\uC5C5\uCCB4" : "\uC77C\uBC18"
+    "\uAD6C\uBD84 (\uC77C\uBC18 /\uC5C5\uCCB4)": (() => {
+      if (o.isBusiness || !!o.vendorId) return "\uC5C5\uCCB4";
+      const addr = (o.recipient && o.recipient.address) || "";
+      const product = orderItemsText(o) || "";
+      const vol = Number(o.boxVolume) || 0;
+      const isBizByAddr = /(정육|식당|음식점|쌈밥|카페|교회|마트|농장|베이커리|분식|치킨|피자|족발|순대|국밥|떡볶이|김밥|도시락|반찬|식품|슈퍼|편의점|가게|상가|사무소|점포|본점|지점|오송점|동남점|중앙점|본사|회사|삼겹살)/.test(addr);
+      const isBizByProduct = /채소\s*2\s*kg|채소2kg|업체용/i.test(product);
+      const isBizByVolume = vol >= 5;
+      return (isBizByAddr || isBizByProduct || isBizByVolume) ? "\uC5C5\uCCB4" : "\uC77C\uBC18";
+    })()
   };
   return map[label] !== void 0 ? map[label] : "";
 }
@@ -1972,7 +1981,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v175 (parseOrderMessage full rewrite: name/phone/address accuracy improved 12/14)";
+const APP_BUILD = "v176 (isBiz fix: box vol>=5, more addr keywords, resolveOrderField fallback detection)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -14258,8 +14267,8 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     const isBizByGubun = /업체/.test(gubunRaw);
     const isBizByVendor = !!(recipName && findMatchingParty(recipName, "", "", vendors));
     const isBizByProduct = /채소\s*2\s*kg|채소2kg|업체용/i.test(productText);
-    const isBizByAddress = /(정육|식당|음식점|쌈밥|카페|교회|마트|농장|베이커리|분식|치킨|피자|족발|순대|국밥|떡볶이|김밥|도시락|반찬|식품|슈퍼|편의점|가게|상가|사무소|점포|본점|지점|오송점|동남점|중앙점|본사|회사)/.test(address);
-    const isBizByVolume = boxVolumeNum >= 10;
+    const isBizByAddress = /(정육|식당|음식점|쌈밥|카페|교회|마트|농장|베이커리|분식|치킨|피자|족발|순대|국밥|떡볶이|김밥|도시락|반찬|식품|슈퍼|편의점|가게|상가|사무소|점포|본점|지점|오송점|동남점|중앙점|본사|회사|삼겹살|고깃집|정육점|쌈밥집|직판장|농협|수산|수퍼)/.test(address);
+    const isBizByVolume = boxVolumeNum >= 5;
     const isBiz = isBizByGubun || isBizByVendor || isBizByProduct || isBizByAddress || isBizByVolume;
     const payRaw = String(r["\uC785\uAE08\uAE08\uC561"] || r["\uACB0\uC81C\uAE08\uC561"] || r["\uC0C1\uD488\uBCC4 \uCD1D \uC8FC\uBB38\uAE08\uC561"] || "").replace(/[^0-9.]/g, "");
     const qtyRaw = String(r["\uC218\uB7C9"] || "").trim();
