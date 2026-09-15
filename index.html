@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 177;
+const APP_VERSION = 178;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1984,7 +1984,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v177 (box split max 3 per box: 1kg x3 per box instead of 2)";
+const APP_BUILD = "v178 (column swap auto-fix + 050 safe-number support in bulk order import)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -14248,35 +14248,76 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     }));
   }
   function rowToBulkOrder(r, idx) {
-    const senderName = String(r["\uBCF4\uB0B4\uB294\uBD84 (\uC8FC\uBB38\uC790)"] || r["\uBCF4\uB0B4\uB294\uBD84"] || r["\uC8FC\uBB38\uC790"] || r["\uAD6C\uB9E4\uC790\uBA85"] || "").trim();
-    const senderPhone = String(r["\uC8FC\uBB38\uC790 \uC5F0\uB77D\uCC98"] || r["\uBCF4\uB0B4\uB294\uBD84 \uC5F0\uB77D\uCC98"] || r["\uAD6C\uB9E4\uC790\uC5F0\uB77D\uCC98"] || "").trim();
-    const recipName = String(r["\uBC1B\uB294\uBD84"] || r["\uC218\uCDE8\uC778\uBA85"] || r["\uC218\uB839\uC778"] || r["\uC218\uCDE8\uC778"] || senderName).trim();
-    const recipPhone = String(r["\uBC1B\uB294\uBD84 \uC5F0\uB77D\uCC98"] || r["\uC218\uCDE8\uC778\uC5F0\uB77D\uCC981"] || r["\uC218\uCDE8\uC778\uC5F0\uB77D\uCC98"] || r["\uC218\uB839\uC778\uC5F0\uB77D\uCC98"] || senderPhone).trim();
-    const address = String(r["\uBC1B\uB294\uBD84 \uC8FC\uC18C(\uC804\uCCB4)"] || r["\uD1B5\uD569\uBC30\uC1A1\uC9C0"] || r["\uBC30\uC1A1\uC9C0"] || r["\uC218\uCDE8\uC778\uC8FC\uC18C"] || r["\uC8FC\uC18C"] || "").trim();
-    const postalCode = String(r["\uC6B0\uD3B8\uBC88\uD638"] || "").trim() || estimatePostalCode(address);
-    const deliveryMessage = String(r["\uBC30\uC1A1\uBA54\uC2DC\uC9C0"] || r["\uBC30\uC1A1\uBA54\uC138\uC9C0"] || r["\uBC30\uC1A1\uC694\uCCAD\uC0AC\uD56D"] || "").trim();
+    // 050 안심번호 포함 전화번호 패턴
+    const PHONE_RE = /^(01[016789]|0[57]\d{2})[-\s.]?\d{3,4}[-\s.]?\d{4}$/;
+    const isPhone = (v) => PHONE_RE.test(String(v || "").replace(/[-\s.]/g, ""));
+    const isKoName = (v) => /^[가-힣]{2,5}$/.test(String(v || "").trim());
+
+    // 원본 값 읽기
+    let senderName = String(r["\uBCF4\uB0B4\uB294\uBD84 (\uC8FC\uBB38\uC790)"] || r["\uBCF4\uB0B4\uB294\uBD84"] || r["\uC8FC\uBB38\uC790"] || r["\uAD6C\uB9E4\uC790\uBA85"] || "").trim();
+    let senderPhone = String(r["\uC8FC\uBB38\uC790 \uC5F0\uB77D\uCC98"] || r["\uBCF4\uB0B4\uB294\uBD84 \uC5F0\uB77D\uCC98"] || r["\uAD6C\uB9E4\uC790\uC5F0\uB77D\uCC98"] || "").trim();
+    let recipName = String(r["\uBC1B\uB294\uBD84"] || r["\uC218\uCDE8\uC778\uBA85"] || r["\uC218\uB839\uC778"] || r["\uC218\uCDE8\uC778"] || senderName).trim();
+    let recipPhone = String(r["\uBC1B\uB294\uBD84 \uC5F0\uB77D\uCC98"] || r["\uC218\uCDE8\uC778\uC5F0\uB77D\uCC981"] || r["\uC218\uCDE8\uC778\uC5F0\uB77D\uCC98"] || r["\uC218\uB839\uC778\uC5F0\uB77D\uCC98"] || senderPhone).trim();
+    let address = String(r["\uBC1B\uB294\uBD84 \uC8FC\uC18C(\uC804\uCCB4)"] || r["\uD1B5\uD569\uBC30\uC1A1\uC9C0"] || r["\uBC30\uC1A1\uC9C0"] || r["\uC218\uCDE8\uC778\uC8FC\uC18C"] || r["\uC8FC\uC18C"] || "").trim();
+    let postalCodeRaw = String(r["\uC6B0\uD3B8\uBC88\uD638"] || "").trim();
+    let productRaw = String(r["\uC0C1\uD488\uBA85"] || "").trim();
+    let qtyRaw = String(r["\uC218\uB7C9"] || "").trim();
+    let boxVolumeRaw = String(r["\uBC15\uC2A4\uBD80\uD53C"] || "").trim();
+    let deliveryMessage = String(r["\uBC30\uC1A1\uBA54\uC2DC\uC9C0"] || r["\uBC30\uC1A1\uBA54\uC138\uC9C0"] || r["\uBC30\uC1A1\uC694\uCCAD\uC0AC\uD56D"] || "").trim();
+
+    // ===== 컬럼 뒤바뀜 자동 감지 및 교정 =====
+    // 케이스: 받는분에 전화번호, 받는분 연락처에 이름, 우편번호에 전화번호, 주소에 우편번호, 상품명에 주소
+    if (isPhone(recipName) && isKoName(recipPhone)) {
+      // 받는분 ↔ 받는분 연락처 교환
+      [recipName, recipPhone] = [recipPhone, recipName];
+    }
+    // senderPhone에 이름이 들어있으면 교환
+    if (isKoName(senderPhone) && !isKoName(senderName)) {
+      [senderName, senderPhone] = [senderPhone, senderName];
+    }
+    // 우편번호에 전화번호, 주소에 숫자(우편번호), 상품명에 주소가 들어있는 경우
+    const postalIsPhone = isPhone(postalCodeRaw);
+    const addrIsPostal = /^\d{5,6}$/.test(address.replace(/\s/g, ""));
+    const productIsAddr = address.length < 5 && productRaw.length > 10 && /(?:시|도|군|구|로|길|동|읍|면)/.test(productRaw);
+    if (postalIsPhone && addrIsPostal && productIsAddr) {
+      // 완전 시프트: 우편번호=전화, 주소=우편번호, 상품명=주소, 수량=상품명, 박스=수량, 배송메시지=박스
+      const truePhone = postalCodeRaw;
+      const truePostal = address;
+      const trueAddr = productRaw;
+      const trueProduct = qtyRaw;
+      const trueQty = boxVolumeRaw;
+      const trueBox = deliveryMessage;
+      if (!recipPhone || isPhone(recipName)) recipPhone = truePhone.replace(/[-\s.]/g, "");
+      postalCodeRaw = truePostal;
+      address = trueAddr;
+      productRaw = trueProduct.replace(/^(상품선택|상품)\s*:\s*/i, "").trim();
+      qtyRaw = trueQty;
+      boxVolumeRaw = trueBox;
+      deliveryMessage = String(r["\uBA54\uBAA8"] || "").trim();
+    }
     const reserveDate = String(r["\uC608\uC57D\uC8FC\uBB38\uC77C"] || r["\uC608\uC57D\uBC1C\uC1A1\uC77C"] || "").trim();
-    const boxVolume = String(r["\uBC15\uC2A4\uBD80\uD53C"] || "").trim();
+    const postalCode = postalCodeRaw.replace(/\.0$/, "").replace(/[^0-9]/g, "") || estimatePostalCode(address);
+    const boxVolume = boxVolumeRaw;
     const memo = String(r["\uBA54\uBAA8"] || "").trim();
     const courier = String(r["\uD0DD\uBC30\uC0AC"] || "").trim();
     const invoiceNo = String(r["\uC1A1\uC7A5\uBC88\uD638"] || r["\uC6B4\uC1A1\uC7A5\uBC88\uD638"] || "").trim();
     const gubunRaw = String(r["\uAD6C\uBD84 (\uC77C\uBC18 /\uC5C5\uCCB4)"] || r["\uAD6C\uBD84"] || "").trim();
     const boxVolumeNum = Number(boxVolume.replace(/[^0-9]/g, "")) || 0;
-    // 상품명 먼저 파싱 (isBiz 판별에 필요)
+    // 상품명 파싱 (교정된 productRaw 사용)
     const optionText = String(r["\uC635\uC158\uC815\uBCF4"] || r["\uC635\uC158"] || "").replace(/^(상품선택|상품)\s*:\s*/i, "").trim();
-    const baseProductName = String(r["\uC0C1\uD488\uBA85"] || "").replace(/^(상품선택|상품)\s*:\s*/i, "").trim();
+    const baseProductName = (productRaw || String(r["\uC0C1\uD488\uBA85"] || "")).replace(/^(상품선택|상품)\s*:\s*/i, "").trim();
     const productText = (optionText || baseProductName).trim();
-    // 업체 판별: 구분컬럼 > vendors DB 매칭 > 상품명 > 주소 > 박스부피
+    // 수량 (교정된 qtyRaw 사용)
+    const payRaw = String(r["\uC785\uAE08\uAE08\uC561"] || r["\uACB0\uC81C\uAE08\uC561"] || r["\uC0C1\uD488\uBCC4 \uCD1D \uC8FC\uBB38\uAE08\uC561"] || "").replace(/[^0-9.]/g, "");
+    const priceRaw = String(r["\uAC00\uACA9"] || r["\uB2E8\uAC00"] || "").replace(/[^0-9.]/g, "");
+    const rowPrice = priceRaw ? Number(priceRaw) : 0;
+    // 업체 판별
     const isBizByGubun = /업체/.test(gubunRaw);
     const isBizByVendor = !!(recipName && findMatchingParty(recipName, "", "", vendors));
     const isBizByProduct = /채소\s*2\s*kg|채소2kg|업체용/i.test(productText);
     const isBizByAddress = /(정육|식당|음식점|쌈밥|카페|교회|마트|농장|베이커리|분식|치킨|피자|족발|순대|국밥|떡볶이|김밥|도시락|반찬|식품|슈퍼|편의점|가게|상가|사무소|점포|본점|지점|오송점|동남점|중앙점|본사|회사|삼겹살|고깃집|정육점|쌈밥집|직판장|농협|수산|수퍼)/.test(address);
     const isBizByVolume = boxVolumeNum >= 5;
     const isBiz = isBizByGubun || isBizByVendor || isBizByProduct || isBizByAddress || isBizByVolume;
-    const payRaw = String(r["\uC785\uAE08\uAE08\uC561"] || r["\uACB0\uC81C\uAE08\uC561"] || r["\uC0C1\uD488\uBCC4 \uCD1D \uC8FC\uBB38\uAE08\uC561"] || "").replace(/[^0-9.]/g, "");
-    const qtyRaw = String(r["\uC218\uB7C9"] || "").trim();
-    const priceRaw = String(r["\uAC00\uACA9"] || r["\uB2E8\uAC00"] || "").replace(/[^0-9.]/g, "");
-    const rowPrice = priceRaw ? Number(priceRaw) : 0;
     const items = [];
     const unmatched = [];
     const squish = squishStr;
