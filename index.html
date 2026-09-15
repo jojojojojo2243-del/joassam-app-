@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 176;
+const APP_VERSION = 177;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1117,10 +1117,12 @@ function boxCategory(productName) {
 function boxVolumeFor(category, count) {
   if (category === "large") {
     if (count <= 1) return 5;
-    return 10;
+    if (count <= 2) return 10;
+    return 15;
   }
   if (count <= 1) return 2;
-  return 5;
+  if (count <= 2) return 5;
+  return 7;
 }
 function volumeForBoxItems(items, productMap) {
   let small = 0, large = 0;
@@ -1135,6 +1137,7 @@ function volumeForBoxItems(items, productMap) {
   return Math.max(boxVolumeFor("large", large), boxVolumeFor("small", small));
 }
 function splitIntoBoxes(items, productMap) {
+  const BOX_MAX = 3; // 박스당 최대 묶음 수 (1kg 기준 3개)
   const units = { small: [], large: [] };
   items.forEach((it) => {
     const p = productMap[it.productId];
@@ -1146,8 +1149,8 @@ function splitIntoBoxes(items, productMap) {
   const boxes = [];
   ["small", "large"].forEach((cat) => {
     const arr = units[cat];
-    for (let i = 0; i < arr.length; i += 2) {
-      const chunk = arr.slice(i, i + 2);
+    for (let i = 0; i < arr.length; i += BOX_MAX) {
+      const chunk = arr.slice(i, i + BOX_MAX);
       const map = {};
       chunk.forEach((u) => {
         const key = u.productId || u.name;
@@ -1981,7 +1984,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v176 (isBiz fix: box vol>=5, more addr keywords, resolveOrderField fallback detection)";
+const APP_BUILD = "v177 (box split max 3 per box: 1kg x3 per box instead of 2)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -5687,7 +5690,7 @@ function runSelfTests() {
   }, "\uCE74\uC774\uD53C\uB77C 1kg");
   T("\uBCC4\uCE6D canonicalize \uC0B0\uCCB4\uC218\u2192\uCC44\uC18C", () => canonicalizeSpoken("\uC0B0\uCCB4\uC218"), "\uCC44\uC18C");
   T("v128 \uD559\uC2B5\uBCC4\uCE6D \uBE48\uB9F5\uC740 \uC6D0\uBB38\uC720\uC9C0", () => applyLearnedAliasesToText("\uB300\uC194 \uC8FC\uBB38 \uBC1B\uC544\uC918"), "\uB300\uC194 \uC8FC\uBB38 \uBC1B\uC544\uC918");
-  T("\uBC15\uC2A4\uBD84\uD560 \uCC44\uC18C2kg\xD74\u21922\uBC15\uC2A4", () => splitIntoBoxes([{ productId: "p1", name: "\uCC44\uC18C2kg", qty: 4 }], {}).length, 2);
+  T("\uBC15\uC2A4\uBD84\uD560 \uCC44\uC18C2kg\xD76\u21922\uBC15\uC2A4", () => splitIntoBoxes([{ productId: "p1", name: "\uCC44\uC18C2kg", qty: 6 }], {}).length, 2);
   T("\uB530\uB85C\uB530\uB85C 4\uB0B1\uAC1C\u21924\uBC15\uC2A4", () => buildBoxItems([{ name: "\uCC44\uC18C2kg", qty: 4 }], { mode: "each" }).length, 4);
   T("\uC804\uBD80 \uD55C \uBC15\uC2A4\u21921\uBC15\uC2A4", () => buildBoxItems([{ name: "\uCC44\uC18C2kg", qty: 4 }], { mode: "all" }).length, 1);
   T("\uBB36\uC74C 2kg \uBB34\uAC8C=2", () => itemWeightKg("\uC0D0\uB7EC\uB4DC 2kg"), 2);
