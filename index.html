@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 178;
+const APP_VERSION = 180;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1291,9 +1291,13 @@ function needsBundleChoice(items, productMap) {
   const hasChoice = cls.some((c) => c.options.length > 1);
   return totalParcels >= 2 || hasChoice;
 }
-function effectiveItemPrice(it, p, isBusiness) {
+function effectiveItemPrice(it, p, isBusiness, vendorId) {
   if (it && it.price != null && it.price !== "") return Number(it.price) || 0;
   if (!p) return 0;
+  // 업체별 개별 단가 우선 적용
+  if (vendorId && p.vendorPrices && p.vendorPrices[vendorId] != null) {
+    return Number(p.vendorPrices[vendorId]) || 0;
+  }
   return isBusiness || p.channel === "business" ? p.wholesalePrice || p.price || 0 : p.price || 0;
 }
 function invNormNS(s) {
@@ -1984,7 +1988,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v178 (column swap auto-fix + 050 safe-number support in bulk order import)";
+const APP_BUILD = "v180 (vendor-specific pricing: vendorPrices per product + invoice auto price by vendor)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -2327,13 +2331,20 @@ function convReset(ctx) {
   });
   return ctx;
 }
-const _AI_YES = /^(응|네|예|어|그래|맞아|맞아요|좋아|좋아요|오케이|오케|해줘|그렇게|등록|진행|확인)$/;
-const _AI_NO = /^(아니|아니야|아니요|아니오|아니다|취소|그만|됐어|됐어요|잠깐|스톱|중단|말아|하지마)$/;
+const _AI_YES = /^(응|네|예|어|그래|맞아|맞아요|좋아|좋아요|오케이|오케|해줘|등록|진행|확인)$/;
+const _AI_NO = /^(아니|아니야|아니요|아니오|아니다|취소|그만|됐어|됐어요|잠깐|스톱|중단|말아|하지마)$|그렇게.*(등록|주문|한).*(없|안|아닌)|.*(주문|등록).*(안했|안한|아니야|아니|없어|없는데|아닌데|안했는데|한적없|한적이없)/;
 function aiIsYes(t) {
   return _AI_YES.test(String(t || "").replace(/\s/g, ""));
 }
 function aiIsNo(t) {
-  return _AI_NO.test(String(t || "").replace(/\s/g, ""));
+  const s = String(t || "").replace(/\s/g, "");
+  if (/^(아니|아니야|아니요|아니오|아니다|취소|그만|됐어|됐어요|잠깐|스톱|중단|말아|하지마)$/.test(s)) return true;
+  // 부정 문장 패턴: "그렇게 등록한 적이 없는데", "그렇게 주문 안 했는데"
+  const orig = String(t || "");
+  if (/(그렇게|그런|이런).*(등록|주문|한|했).*(없|안|아닌|아니)/.test(orig)) return true;
+  if (/(주문|등록).*(안\s*했|안\s*한|아니야|아니|없어|없는데|아닌데|한\s*적\s*없)/.test(orig)) return true;
+  if (/(난|나는|저는|저).*(그렇게|이렇게|저렇게).*(안|아니|없)/.test(orig)) return true;
+  return false;
 }
 function aiResolvePronouns(text, ctx) {
   let t = String(text || "");
@@ -6682,27 +6693,39 @@ function fuzzyProductMatch(spoken, products, minScore) {
   const th = typeof minScore === "number" ? minScore : 0.55;
   const list = (products || []).filter((p) => p && p.name);
   const core = (s) => String(s).replace(new RegExp(WEIGHT_RE, "g"), "").replace(/\s/g, "");
-  let hit = list.find((p) => {
+  // 1순위: 완전 일치
+  const exact = list.find((p) => p.name.replace(/\s/g, "") === q);
+  if (exact) return exact;
+  // 2순위: core 완전 일치
+  const coreExact = list.find((p) => core(p.name) === q || core(p.name) === core(q));
+  if (coreExact) return coreExact;
+  // 3순위: 검색어가 상품명을 포함 (q가 더 긴 경우 - 예: "곱슬케일1kg" 검색)
+  const qContainsP = list.filter((p) => {
     const n = p.name.replace(/\s/g, "");
-    const c = core(p.name);
-    return n === q || q.includes(n) || n.includes(q) || c.length >= 2 && q.includes(c);
-  });
-  if (hit) return hit;
+    return q.includes(n) && n.length >= 2;
+  }).sort((a, b) => b.name.length - a.name.length)[0];
+  if (qContainsP) return qContainsP;
+  // 4순위: alias 매칭
   const alias = canonicalizeSpoken(q);
   if (alias) {
     let ap = list.find((p) => core(p.name) === alias);
     if (!ap) ap = list.filter((p) => core(p.name).includes(alias)).sort((a, b) => core(a.name).length - core(b.name).length)[0];
     if (ap) return ap;
   }
+  // 5순위: 상품명이 검색어를 포함 (p가 더 긴 경우 - 예: "케일" 검색 시 "곱슬케일" 매칭) → 가장 짧은 것 우선
+  const pContainsQ = list.filter((p) => {
+    const n = p.name.replace(/\s/g, "");
+    const c = core(p.name);
+    return n.includes(q) || c.includes(q);
+  }).sort((a, b) => a.name.length - b.name.length);
+  if (pContainsQ.length > 0) return pContainsQ[0];
+  // 6순위: 유사도 매칭
   let best = null, bs = 0;
   for (const p of list) {
     const s1 = typeof simJamo === "function" ? simJamo(q, p.name.replace(/\s/g, "")) : 0;
     const s2 = typeof simJamo === "function" ? simJamo(q, core(p.name)) : 0;
     const s = Math.max(s1, s2);
-    if (s > bs) {
-      bs = s;
-      best = p;
-    }
+    if (s > bs) { bs = s; best = p; }
   }
   return bs >= th ? best : null;
 }
@@ -12679,7 +12702,7 @@ function App() {
   function orderTotal(order) {
     return (order.items || []).reduce((sum, it) => {
       const p = productMap[it.productId];
-      const price = effectiveItemPrice(it, p, order && order.isBusiness);
+      const price = effectiveItemPrice(it, p, order && order.isBusiness, order && order.vendorId);
       return sum + price * (it.qty || 0);
     }, 0);
   }
@@ -13640,7 +13663,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
         const p = productMap[it.productId];
         const nm = p ? p.name : it.name || "\uC0C1\uD488";
         const unit = p ? p.unit || "kg" : it.unit || "kg";
-        const price = effectiveItemPrice(it, p, order.isBusiness);
+        const price = effectiveItemPrice(it, p, order.isBusiness, order.vendorId);
         const amount = price * (Number(it.qty) || 0);
         if (i === 0) {
           set(r, 0, Number(mm));
@@ -14947,35 +14970,60 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
     if (!file) return;
     setBusyMessage("\uC0C1\uD488 \uC5D1\uC140 \uD30C\uC77C\uC744 \uC77D\uACE0 \uC788\uC5B4\uC694...");
     readWorkbookFile(file, (rows) => {
+      // 업체명→vendorId 매핑 (vendors DB에서)
+      const vendorNameToId = {};
+      (vendors || []).forEach((v) => { if (v && v.name) vendorNameToId[v.name.replace(/\s/g, "")] = v.id; });
+
       const added = rows.map((r) => {
         const name = String(r["\uC0C1\uD488\uBA85"] || r["\uC774\uB984"] || "").trim();
         if (!name) return null;
         const chRaw = String(r["\uAD6C\uBD84"] || "").trim();
-        const channel = chRaw.includes("\uC5C5\uCCB4") ? "business" : chRaw.includes("\uC77C\uBC18") ? "retail" : "both";
+        // 업체 컬럼 파싱 (이 파일 형식: '업체' 컬럼에 업체명 기재)
+        const vendorRaw = String(r["\uC5C5\uCCB4"] || "").trim();
+        const price = Number(r["\uAC00\uACA9"] || r["\uACF5\uC6A9 \uAC00\uACA9"] || r["\uC77C\uBC18\uAC00\uACA9"] || 0);
         const commonP = Number(r["\uACF5\uC6A9 \uAC00\uACA9"] || r["\uACF5\uC6A9\uAC00\uACA9"] || 0);
         const retailP = Number(r["\uC77C\uBC18\uC6A9 \uAC00\uACA9"] || r["\uC77C\uBC18\uAC00\uACA9"] || 0);
         const bizP = Number(r["\uC5C5\uCCB4\uAC00\uACA9"] || r["\uC5C5\uCCB4\uB2E8\uAC00"] || 0);
-        let price = 0, wholesalePrice = bizP;
-        if (channel === "business") {
-          price = bizP || commonP || retailP;
-          wholesalePrice = bizP || commonP || retailP;
-        } else if (channel === "retail") {
-          price = retailP || commonP;
-        } else {
-          price = commonP || retailP;
+
+        // 업체 컬럼으로 channel 결정
+        let channel = "both";
+        const vendorPrices = {};
+        if (vendorRaw) {
+          if (vendorRaw === "\uC77C\uBC18\uACE0\uAC1D") {
+            channel = "retail";
+          } else if (vendorRaw === "\uC5C5\uCCB4\uACF5\uD1B5") {
+            channel = "business";
+          } else {
+            // 특정 업체 지정 (슬래시로 구분된 복수 업체 가능)
+            channel = "business";
+            const vendorNames = vendorRaw.split(/[\/,]/).map((s) => s.trim()).filter(Boolean);
+            vendorNames.forEach((vn) => {
+              const vid = vendorNameToId[vn.replace(/\s/g, "")] ||
+                Object.keys(vendorNameToId).find((k) => vn.replace(/\s/g,"").includes(k) || k.includes(vn.replace(/\s/g,"")));
+              if (vid) vendorPrices[typeof vid === 'string' ? vid : vendorNameToId[vid]] = Number(r["\uAC00\uACA9"] || 0);
+            });
+          }
+        } else if (chRaw) {
+          channel = chRaw.includes("\uC5C5\uCCB4") ? "business" : chRaw.includes("\uC77C\uBC18") ? "retail" : "both";
         }
-        if (!price) price = Number(r["\uAC00\uACA9"] || 0);
-        if (!price && !wholesalePrice) return null;
-        return {
+
+        let finalPrice = price || commonP || retailP || bizP;
+        let wholesalePrice = bizP || commonP || (channel === "business" ? finalPrice : 0);
+        if (!finalPrice && !wholesalePrice) return null;
+
+        const product = {
           id: uid("p"),
           name,
-          price: price || wholesalePrice,
-          wholesalePrice: wholesalePrice || price,
-          stock: Number(r["\uC7AC\uACE0"] || 0),
+          price: channel === "retail" ? finalPrice : (commonP || retailP || finalPrice),
+          wholesalePrice: channel === "business" ? finalPrice : wholesalePrice,
+          stock: Number(r["\uC7AC\uACE0"] || 100000),
           unit: String(r["\uB2E8\uC704"] || "kg").trim() || "kg",
           channel
         };
+        if (Object.keys(vendorPrices).length > 0) product.vendorPrices = vendorPrices;
+        return product;
       }).filter(Boolean);
+
       if (added.length === 0) {
         fireToast("\uCD94\uAC00\uD560 \uC0C1\uD488 \uC815\uBCF4\uB97C \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4");
         setBusyMessage(null);
@@ -14989,13 +15037,19 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         if (updates.length > 0) {
           next = next.map((p) => {
             const match = updates.find((u) => u.name === p.name);
-            return match ? __spreadProps(__spreadValues({}, p), { price: match.price, wholesalePrice: match.wholesalePrice, stock: match.stock, channel: match.channel }) : p;
+            if (!match) return p;
+            return __spreadProps(__spreadValues({}, p), {
+              price: match.price,
+              wholesalePrice: match.wholesalePrice,
+              stock: match.stock,
+              channel: match.channel,
+              ...(match.vendorPrices ? { vendorPrices: __spreadValues(__spreadValues({}, p.vendorPrices || {}), match.vendorPrices) } : {})
+            });
           });
         }
-        if (newOnes.length > 0) {
-          next = [...next, ...newOnes];
-        }
-        fireToast(`\uC0C1\uD488 ${newOnes.length}\uAC74 \uCD94\uAC00, ${updates.length}\uAC74 \uAC31\uC2E0\uD588\uC2B5\uB2C8\uB2E4`);
+        if (newOnes.length > 0) next = [...next, ...newOnes];
+        const bizCount = added.filter((p) => p.vendorPrices && Object.keys(p.vendorPrices).length > 0).length;
+        fireToast(`\uC0C1\uD488 ${newOnes.length}\uAC74 \uCD94\uAC00, ${updates.length}\uAC74 \uAC31\uC2E0${bizCount > 0 ? `, \uC5C5\uCCB4\uBCC4 \uB2E8\uAC00 ${bizCount}\uAC74 \uC801\uC6A9` : ""}`);
         return next;
       });
       setBusyMessage(null);
@@ -18829,7 +18883,7 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
   })(), /* @__PURE__ */ React.createElement(FieldRow, { label: "\uBA54\uBAA8", value: order.memo || "-" }), /* @__PURE__ */ React.createElement(FieldRow, { label: "\uBC30\uC1A1\uBA54\uC2DC\uC9C0", value: order.deliveryMessage || "-" }), /* @__PURE__ */ React.createElement(FieldRow, { label: "\uC785\uAE08\uAE08\uC561", value: order.paymentAmount != null ? won(order.paymentAmount) : won(total) })), /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 16 } }, /* @__PURE__ */ React.createElement("label", { style: { fontSize: 12, color: "#5F5E5A", fontWeight: 700 } }, "\uC1A1\uC7A5\uBC88\uD638"), /* @__PURE__ */ React.createElement(InvoiceQuickEdit, { order, updateOrder, couriers })), /* @__PURE__ */ React.createElement("div", { style: { borderTop: "1px dashed #D3D1C7", borderBottom: "1px dashed #D3D1C7", padding: "10px 0", margin: "0 0 14px" } }, order.isBundle ? /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 700, color: "#185FA5", background: "#E6F1FB", display: "inline-block", padding: "2px 8px", borderRadius: 8, marginBottom: 8 } }, "\u{1F4E6} \uBB36\uC74C\uBC30\uC1A1") : null, (order.items || []).map((it, idx) => {
     const p = productMap[it.productId];
     const dispName = p ? p.name : it.name || "\uC0C1\uD488";
-    const dispPrice = effectiveItemPrice(it, p, order && order.isBusiness);
+    const dispPrice = effectiveItemPrice(it, p, order && order.isBusiness, order && order.vendorId);
     const key = it.productId || it.name;
     return /* @__PURE__ */ React.createElement("div", { key: idx, style: { display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 13, marginBottom: 8, gap: 8 } }, /* @__PURE__ */ React.createElement("span", { style: { flex: 1 } }, dispName), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => quickAdjustQty(key, -1), style: qtyBtnStyle, title: "\uC218\uB7C9 \uAC10\uC18C" }, "\u2212"), /* @__PURE__ */ React.createElement("span", { style: { minWidth: 18, textAlign: "center", fontWeight: 700 } }, it.qty), /* @__PURE__ */ React.createElement("button", { onClick: () => quickAdjustQty(key, 1), style: qtyBtnStyle, title: "\uC218\uB7C9 \uC99D\uAC00" }, "\uFF0B"), /* @__PURE__ */ React.createElement("span", { style: { minWidth: 62, textAlign: "right", color: "#5F5E5A" } }, dispPrice ? won(dispPrice * it.qty) : "-")));
   })), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", fontWeight: 700, fontSize: 15, marginBottom: 16 } }, /* @__PURE__ */ React.createElement("span", null, "\uD569\uACC4"), /* @__PURE__ */ React.createElement("span", null, won(total))), /* @__PURE__ */ React.createElement("label", { style: { fontSize: 12, color: "#5F5E5A", fontWeight: 700 } }, "\uC8FC\uBB38 \uC0C1\uD0DC"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginTop: 6 } }, Object.entries(STATUS).map(([key, val]) => /* @__PURE__ */ React.createElement(
