@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 180;
+const APP_VERSION = 181;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1988,7 +1988,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v180 (vendor-specific pricing: vendorPrices per product + invoice auto price by vendor)";
+const APP_BUILD = "v181 (excel color fix: biz=yellow FAEEDA, regular=white FFFFFF, re-detect by addr/product/vol)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -10727,7 +10727,7 @@ function downloadWorkbook(rows, sheetName, filename, columnOrder, rowFillFn) {
         border: { top: b, bottom: b, left: b, right: b },
         alignment: { vertical: "center", horizontal: isHeader ? "center" : "left", wrapText: false },
         font: { name: "\uB9D1\uC740 \uACE0\uB515", sz: isHeader ? 11 : 10, bold: isHeader },
-        fill: isHeader ? { patternType: "solid", fgColor: { rgb: "E6F1E9" } } : rowFill ? { patternType: "solid", fgColor: { rgb: rowFill } } : void 0
+        fill: isHeader ? { patternType: "solid", fgColor: { rgb: "E6F1E9" } } : rowFill && rowFill !== "FFFFFF" ? { patternType: "solid", fgColor: { rgb: rowFill } } : { patternType: "solid", fgColor: { rgb: "FFFFFF" } }
       };
     }
   }
@@ -14736,9 +14736,19 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     });
     const expanded = sortedTargets.flatMap((o) => expandOrderToBoxes(o));
     const rows = expanded.map(orderToRow);
+    const isBizFn = (o) => {
+      if (!o) return false;
+      if (o.isBusiness || o.vendorId) return true;
+      const addr = (o.recipient && o.recipient.address) || "";
+      const product = orderItemsText(o) || "";
+      const vol = Number(o.boxVolume) || 0;
+      if (/(정육|식당|음식점|쌈밥|카페|교회|마트|농장|베이커리|분식|치킨|피자|족발|순대|국밥|떡볶이|김밥|도시락|반찬|식품|슈퍼|편의점|가게|상가|사무소|점포|본점|지점|오송점|동남점|중앙점|본사|회사|삼겹살|고깃집)/.test(addr)) return true;
+      if (/채소\s*2\s*kg|채소2kg|업체용/i.test(product)) return true;
+      if (vol >= 5) return true;
+      return false;
+    };
     downloadWorkbook(rows, "Orders", nextFilename("\uC8FC\uBB38\uBAA9\uB85D"), orderTemplate, (row, i) => {
-      var _a;
-      return ((_a = expanded[i]) == null ? void 0 : _a.isBusiness) ? "FAEEDA" : null;
+      return isBizFn(expanded[i]) ? "FAEEDA" : "FFFFFF";
     });
     const boxCount = expanded.length;
     const idsToAdvance = targets.filter((o) => o.status === "pending").map((o) => o.id);
@@ -14763,9 +14773,19 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     });
     const expanded = sortedList.flatMap((o) => expandOrderToBoxes(o));
     const rows = expanded.map(orderToRow);
+    const isBizFn2 = (o) => {
+      if (!o) return false;
+      if (o.isBusiness || o.vendorId) return true;
+      const addr = (o.recipient && o.recipient.address) || "";
+      const product = orderItemsText(o) || "";
+      const vol = Number(o.boxVolume) || 0;
+      if (/(정육|식당|음식점|쌈밥|카페|교회|마트|농장|베이커리|분식|치킨|피자|족발|순대|국밥|떡볶이|김밥|도시락|반찬|식품|슈퍼|편의점|가게|상가|사무소|점포|본점|지점|오송점|동남점|중앙점|본사|회사|삼겹살|고깃집)/.test(addr)) return true;
+      if (/채소\s*2\s*kg|채소2kg|업체용/i.test(product)) return true;
+      if (vol >= 5) return true;
+      return false;
+    };
     downloadWorkbook(rows, "Orders", nextFilename("\uC8FC\uBB38\uBAA9\uB85D"), orderTemplate, (row, i) => {
-      var _a;
-      return ((_a = expanded[i]) == null ? void 0 : _a.isBusiness) ? "FAEEDA" : null;
+      return isBizFn2(expanded[i]) ? "FAEEDA" : "FFFFFF";
     });
     const boxCount = expanded.length;
     const idsToAdvance = list.filter((o) => o.status === "pending").map((o) => o.id);
@@ -14793,8 +14813,14 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     const rows = expanded.map((o) => Object.fromEntries(template.map((label) => [label, resolveOrderField(label, o)])));
     const title = courierName ? `\uD0DD\uBC30\uC811\uC218\uC591\uC2DD(${courierName})` : "\uD0DD\uBC30\uC811\uC218\uC591\uC2DD";
     downloadWorkbook(rows, "CourierPickup", nextFilename(title), template, (row, i) => {
-      var _a;
-      return ((_a = expanded[i]) == null ? void 0 : _a.isBusiness) ? "FAEEDA" : null;
+      const o = expanded[i];
+      if (!o) return "FFFFFF";
+      if (o.isBusiness || o.vendorId) return "FAEEDA";
+      const addr = (o.recipient && o.recipient.address) || "";
+      if (/(정육|식당|음식점|쌈밥|카페|교회|마트|농장|베이커리|분식|상가|사무소|점포|본점|지점|동남점|오송점|중앙점|본사|회사|삼겹살)/.test(addr)) return "FAEEDA";
+      if (/채소\s*2\s*kg|채소2kg|업체용/i.test(orderItemsText(o) || "")) return "FAEEDA";
+      if (Number(o.boxVolume) >= 5) return "FAEEDA";
+      return "FFFFFF";
     });
     fireToast(`\uBC1C\uC1A1\uC900\uBE44 ${targets.length}\uAC74\uC744 \uBC15\uC2A4 ${expanded.length}\uAC1C(\uC1A1\uC7A5 ${expanded.length}\uAC1C)\uB85C \uB2E4\uC6B4\uB85C\uB4DC\uD588\uC2B5\uB2C8\uB2E4`);
   }
