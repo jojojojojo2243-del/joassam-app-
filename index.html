@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 186;
+const APP_VERSION = 187;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1514,7 +1514,48 @@ function parseNameAddr(text, products) {
 
   return { name, address };
 }
-function parseOrderMessage(text, products) {
+function parseMultipleRecipients(text, products) {
+  // 발신자(보내는분) 정보 추출
+  const senderPhone = "";
+  const senderName = "";
+  const lines = String(text || "").split("\n").map((l) => l.trim()).filter(Boolean);
+  const PHONE_RE = /01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/;
+  const ADDR_RE = /(서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주)/;
+  // 각 수신자 블록 분리
+  const blocks = [];
+  let current = [];
+  for (const line of lines) {
+    // 이름+전화번호가 같은 줄에 있거나 새 이름으로 시작하면 새 블록
+    const hasPhone = PHONE_RE.test(line);
+    const koNameMatch = line.match(/^([가-힣]{2,5})\s+01[016789]/);
+    if (koNameMatch && current.length > 0) {
+      blocks.push(current);
+      current = [line];
+    } else if (hasPhone && current.length > 0 && !ADDR_RE.test(line) && current.some((l) => ADDR_RE.test(l))) {
+      // 이전 블록에 주소가 있는데 새 전화번호 → 새 블록
+      blocks.push(current);
+      current = [line];
+    } else {
+      current.push(line);
+    }
+  }
+  if (current.length > 0) blocks.push(current);
+  // 각 블록에서 이름/전화/주소 추출
+  const results = [];
+  for (const block of blocks) {
+    const blockText = block.join("\n");
+    const parsed = parseOrderMessage(blockText, products);
+    if (!parsed.recipName && !parsed.recipPhone && !parsed.address) continue;
+    results.push({
+      name: parsed.recipName || parsed.senderName || "",
+      phone: (parsed.recipPhone || parsed.senderPhone || "").replace(/[-\s.]/g, ""),
+      address: parsed.address || "",
+      items: parsed.items || [],
+      deliveryMessage: parsed.deliveryMessage || ""
+    });
+  }
+  return results;
+}
   const result = { senderName: "", senderPhone: "", recipName: "", recipPhone: "", address: "", reserveDate: "", deliveryMessage: "", items: [] };
   if (!text) return result;
   const normText = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
@@ -2001,7 +2042,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v186 (save reliability: retry x3 + chunk-before-delete order + emergency backup + pagehide)";
+const APP_BUILD = "v187 (multi-recipient parse: kakao/sms share → auto split multiple addresses)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11740,9 +11781,13 @@ function App() {
       const params = new URLSearchParams(window.location.search);
       const shared = (params.get("text") || params.get("title") || "").trim();
       if (shared) {
-        applyParsedMessage(shared);
+        const result = applyParsedMessage(shared);
         setTab("new");
-        fireToast("\uACF5\uC720\uBC1B\uC740 \uBA54\uC2DC\uC9C0\uB97C \uC790\uB3D9\uC73C\uB85C \uBD84\uC11D\uD588\uC5B4\uC694. \uD655\uC778 \uD6C4 \uB4F1\uB85D\uD574\uC8FC\uC138\uC694");
+        if (result && result.multiCount >= 2) {
+          fireToast(`\uCE74\uCE74\uC624 \uACF5\uC720 \uC218\uC2E0! \uBC30\uC1A1\uC9C0 ${result.multiCount}\uBA85 \uC790\uB3D9 \uBD84\uC11D \uC644\uB8CC. \uC0C1\uD488\uC744 \uC120\uD0DD\uD574 \uB4F1\uB85D\uD574\uC8FC\uC138\uC694.`);
+        } else {
+          fireToast("\uACF5\uC720\uBC1B\uC740 \uBA54\uC2DC\uC9C0\uB97C \uC790\uB3D9\uC73C\uB85C \uBD84\uC11D\uD588\uC5B4\uC694. \uD655\uC778 \uD6C4 \uB4F1\uB85D\uD574\uC8FC\uC138\uC694");
+        }
         window.history.replaceState({}, "", window.location.pathname + window.location.hash);
       }
     } catch (e) {
@@ -13939,6 +13984,41 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
   const draftTotal = draft.deliveries.reduce((sum, d) => sum + deliveryTotal(d), 0);
   function applyParsedMessage(text) {
     const parsed = parseOrderMessage(text, products);
+    // 여러 명 감지: 전화번호가 2개 이상이면 다중 파싱 시도
+    const phoneMatches = (text || "").match(/01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/g) || [];
+    const uniquePhones = [...new Set(phoneMatches.map((p) => p.replace(/[-\s.]/g, "")))];
+    if (uniquePhones.length >= 2) {
+      const recipients = parseMultipleRecipients(text, products);
+      if (recipients.length >= 2) {
+        // 다중 배송지 등록
+        const deliveries = recipients.map((r) => {
+          const cart = {};
+          (r.items || []).forEach((it) => { if (it.productId) cart[it.productId] = (cart[it.productId] || 0) + it.qty; });
+          const matchedC = customers.find((c) => r.phone && (c.phone || "").replace(/[-\s.]/g, "") === r.phone);
+          return {
+            id: uid("d"),
+            name: r.name,
+            phone: r.phone,
+            address: r.address,
+            cart,
+            postalCode: estimatePostalCode(r.address),
+            customerId: matchedC ? matchedC.id : "",
+            deliveryMessage: r.deliveryMessage || ""
+          };
+        });
+        // 보내는분은 첫 번째 파싱 결과 또는 기존 draft
+        setDraft((prev) => __spreadProps(__spreadValues({}, prev), {
+          message: text,
+          sender: parsed.senderName || parsed.senderPhone
+            ? { name: parsed.senderName, phone: parsed.senderPhone }
+            : prev.sender,
+          deliveries
+        }));
+        fireToast(`\uC218\uC2E0\uC790 ${deliveries.length}\uBA85\uC744 \uC778\uC2DD\uD588\uC5B4\uC694. \uC0C1\uD488\uC744 \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.`);
+        return { ...parsed, multiCount: deliveries.length };
+      }
+    }
+    // 단일 파싱 (기존 로직)
     const matched = customers.find((c) => parsed.recipPhone && (c.phone || "").replace(/-/g, "") === parsed.recipPhone.replace(/-/g, ""));
     const cart = {};
     (parsed.items || []).forEach((it) => {
