@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 183;
+const APP_VERSION = 184;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2001,7 +2001,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v183 (saveGuard fix: customers/orders allow 0 unless >10 prev, products/vendors strict)";
+const APP_BUILD = "v184 (saveGuard 3-bug fix: chunk-load timing + lastGoodRef customers/orders + threshold)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11621,15 +11621,21 @@ function App() {
                 ]).then((res) => {
                   applyOrdersArray(res[0]);
                   applyCustomersArray(res[1]);
+                  // 버그1 수정: 청크 로드 완료 후 fbFirstLoadRef 설정
+                  fbFirstLoadRef.current = true;
                 }).catch(() => {
                   loadedDataSigRef.current = null;
+                  fbFirstLoadRef.current = true;
                 });
+              } else {
+                // 이미 로드된 sig → 바로 설정
+                fbFirstLoadRef.current = true;
               }
             } else {
               if (data.orders) applyOrdersArray(data.orders);
               if (data.customers) applyCustomersArray(data.customers);
+              fbFirstLoadRef.current = true;
             }
-            if (data.subscriptions) setSubscriptions(data.subscriptions);
             if (data.integrations) setIntegrations(data.integrations);
             if (data.customMarketplaces) setCustomMarketplaces(data.customMarketplaces);
             if (data.couriers) setCouriers(data.couriers);
@@ -11638,11 +11644,13 @@ function App() {
             if (data.customerTemplate) setCustomerTemplate(data.customerTemplate);
             if (data.productTemplate) setProductTemplate(data.productTemplate);
             if (data.courierTemplates) setCourierTemplates(data.courierTemplates);
-            fbFirstLoadRef.current = true;
+            // fbFirstLoadRef는 hasManifest 분기에서 이미 설정됨 — 여기서 중복 설정 제거
             const prevGood = lastGoodDataRef.current || {};
             lastGoodDataRef.current = __spreadProps(__spreadValues({}, prevGood), {
               products: data.products || prevGood.products,
-              vendors: data.vendors || prevGood.vendors
+              vendors: data.vendors || prevGood.vendors,
+              orders: prevGood.orders,
+              customers: prevGood.customers
             });
             recordCounts({ products: (data.products || []).length, vendors: (data.vendors || []).length });
             try {
