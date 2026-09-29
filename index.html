@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 190;
+const APP_VERSION = 191;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2043,7 +2043,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v190 (arrange-style: FAB + sender select popup + order registration flow)";
+const APP_BUILD = "v191 (FAB: guide popup + clipboard read + sender popup → arrange-style order flow)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -16722,40 +16722,139 @@ function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal,
   /* @__PURE__ */ React.createElement(FabOrderButton, { setTab, onSetSender }));
 }
 function FabOrderButton({ setTab, onSetSender }) {
-  const [showPopup, setShowPopup] = React.useState(false);
+  const [step, setStep] = React.useState(null); // null | 'guide' | 'sender'
   const [senderName, setSenderName] = React.useState("");
-  function handleStart() {
+  const [sharedText, setSharedText] = React.useState("");
+
+  // 공유로 들어온 텍스트가 있으면 바로 sender 팝업
+  React.useEffect(() => {
+    const onFocus = () => {
+      // 앱으로 돌아왔을 때 클립보드 확인
+      if (step === "guide") {
+        setTimeout(async () => {
+          try {
+            const text = await navigator.clipboard.readText();
+            if (text && text.trim().length > 10) {
+              setSharedText(text.trim());
+              setStep("sender");
+            }
+          } catch (e) {}
+        }, 500);
+      }
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [step]);
+
+  function handleSenderConfirm() {
     if (senderName.trim() && typeof onSetSender === "function") {
       onSetSender(senderName.trim(), "");
     }
-    setShowPopup(false);
+    setStep(null);
     setTab("new");
+    // 클립보드 텍스트가 있으면 자동 분석
+    if (sharedText) {
+      setTimeout(() => {
+        const ta = document.getElementById("orderMsgTextarea");
+        if (ta) {
+          const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
+          nativeInputValueSetter && nativeInputValueSetter.call(ta, sharedText);
+          ta.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      }, 300);
+    }
   }
+
+  function handleSkip() {
+    setStep(null);
+    setTab("new");
+    if (sharedText && typeof onSetSender === "function") onSetSender("", "");
+  }
+
+  // 안내 팝업 (카카오/문자 공유 안내)
+  const guidePopup = step === "guide" && /* @__PURE__ */ React.createElement(
+    "div", { style: { position: "fixed", inset: 0, background: "rgba(27,36,48,0.85)", zIndex: 9000, display: "flex", alignItems: "flex-end" }, onClick: () => setStep(null) },
+    /* @__PURE__ */ React.createElement("div", { onClick: (e) => e.stopPropagation(), style: { width: "100%", background: "#fff", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "24px 20px", paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))" } },
+      /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", marginBottom: 20 } },
+        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 40, marginBottom: 8 } }, "📋"),
+        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 17, fontWeight: 800, color: "#1B2430", marginBottom: 6 } }, "카카오/문자 주문 등록"),
+        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, color: "#5F5E5A", lineHeight: 1.7 } }, "카카오톡이나 문자에서 주문 내용을 복사하거나", /* @__PURE__ */ React.createElement("br"), "공유 버튼으로 이 앱을 선택하세요.")
+      ),
+      // 방법 1 - 공유 버튼
+      /* @__PURE__ */ React.createElement("div", { style: { background: "#F1F5F1", borderRadius: 14, padding: "14px 16px", marginBottom: 10 } },
+        /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12 } },
+          /* @__PURE__ */ React.createElement("div", { style: { width: 40, height: 40, background: "#2F6F4E", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 } }, "↑"),
+          /* @__PURE__ */ React.createElement("div", null,
+            /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#1B2430", marginBottom: 2 } }, "방법 1 — 공유 버튼 (추천)"),
+            /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A", lineHeight: 1.6 } }, "카카오/문자 앱 → 주문 내용 화면 → ", /* @__PURE__ */ React.createElement("b", null, "공유 아이콘"), " → ", /* @__PURE__ */ React.createElement("b", null, "조아저씨쌈"), " 선택")
+          )
+        )
+      ),
+      // 방법 2 - 복사 붙여넣기
+      /* @__PURE__ */ React.createElement("div", { style: { background: "#F1F5F1", borderRadius: 14, padding: "14px 16px", marginBottom: 20 } },
+        /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12 } },
+          /* @__PURE__ */ React.createElement("div", { style: { width: 40, height: 40, background: "#185FA5", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 } }, "📄"),
+          /* @__PURE__ */ React.createElement("div", null,
+            /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#1B2430", marginBottom: 2 } }, "방법 2 — 복사 후 직접 입력"),
+            /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A", lineHeight: 1.6 } }, "주문 내용 ", /* @__PURE__ */ React.createElement("b", null, "길게 눌러 복사"), " → 아래 버튼 클릭")
+          )
+        )
+      ),
+      /* @__PURE__ */ React.createElement("button", {
+        onClick: async () => {
+          try {
+            const text = await navigator.clipboard.readText();
+            if (text && text.trim().length > 10) {
+              setSharedText(text.trim());
+              setStep("sender");
+            } else {
+              setStep("sender");
+            }
+          } catch (e) {
+            setStep("sender");
+          }
+        },
+        style: { width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 800, fontSize: 16, cursor: "pointer", marginBottom: 8 }
+      }, "복사한 주문 내용 불러오기"),
+      /* @__PURE__ */ React.createElement("button", {
+        onClick: () => setStep(null),
+        style: { width: "100%", padding: "12px 0", borderRadius: 14, border: "1px solid #E2E4DD", background: "#fff", color: "#5F5E5A", fontWeight: 600, fontSize: 14, cursor: "pointer" }
+      }, "닫기")
+    )
+  );
+
+  // 보내는분 선택 팝업
+  const senderPopup = step === "sender" && /* @__PURE__ */ React.createElement(
+    "div", { style: { position: "fixed", inset: 0, background: "rgba(27,36,48,0.7)", zIndex: 9001, display: "flex", alignItems: "flex-end" }, onClick: () => setStep(null) },
+    /* @__PURE__ */ React.createElement("div", { onClick: (e) => e.stopPropagation(), style: { width: "100%", background: "#fff", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "24px 20px", paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))" } },
+      /* @__PURE__ */ React.createElement("div", { style: { fontSize: 17, fontWeight: 800, color: "#1B2430", marginBottom: 4 } }, "보내는분(주문자) 선택"),
+      /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, color: "#5F5E5A", marginBottom: 16, lineHeight: 1.6 } },
+        sharedText ? `주문 내용 ${(sharedText.match(/01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/g) || []).length}명 감지됨. 보내는분(발신자) 이름을 입력하세요.` : "보내는분(발신자) 이름을 입력하세요."
+      ),
+      /* @__PURE__ */ React.createElement("input", {
+        placeholder: "보내는분 이름 (예: 김종옥고객)",
+        value: senderName,
+        onChange: (e) => setSenderName(e.target.value),
+        onKeyDown: (e) => e.key === "Enter" && handleSenderConfirm(),
+        autoFocus: true,
+        style: { width: "100%", padding: "14px 16px", borderRadius: 12, border: "2px solid #2F6F4E", fontSize: 15, marginBottom: 12, boxSizing: "border-box", outline: "none", fontWeight: 600 }
+      }),
+      /* @__PURE__ */ React.createElement("button", {
+        onClick: handleSenderConfirm,
+        style: { width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 800, fontSize: 16, cursor: "pointer", marginBottom: 8 }
+      }, "주문 등록 화면으로 →"),
+      /* @__PURE__ */ React.createElement("button", {
+        onClick: handleSkip,
+        style: { width: "100%", padding: "12px 0", borderRadius: 14, border: "1px solid #E2E4DD", background: "#fff", color: "#5F5E5A", fontWeight: 600, fontSize: 14, cursor: "pointer" }
+      }, "건너뛰기")
+    )
+  );
+
   return /* @__PURE__ */ React.createElement(React.Fragment, null,
-    showPopup && /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", zIndex: 9000, display: "flex", alignItems: "flex-end" }, onClick: () => setShowPopup(false) },
-      /* @__PURE__ */ React.createElement("div", { onClick: (e) => e.stopPropagation(), style: { width: "100%", background: "#fff", borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 16px", paddingBottom: "calc(20px + env(safe-area-inset-bottom, 0px))" } },
-        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 16, fontWeight: 700, marginBottom: 4 } }, "\uBCF4\uB0B4\uB294\uBD84 \uC120\uD0DD"),
-        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#888780", marginBottom: 14 } }, "\uCE74\uCE74\uC624/\uBB38\uC790 \uACF5\uC720 \uC8FC\uBB38\uC5D0\uC11C \uBCF4\uB0B4\uB294\uBD84 \uC774\uB984\uC744 \uBA3C\uC800 \uC785\uB825\uD558\uC138\uC694."),
-        /* @__PURE__ */ React.createElement("input", {
-          placeholder: "\uBCF4\uB0B4\uB294\uBD84 \uC774\uB984 (\uC608: \uAE40\uC885\uC6B1\uACE0\uAC1D)",
-          value: senderName,
-          onChange: (e) => setSenderName(e.target.value),
-          onKeyDown: (e) => e.key === "Enter" && handleStart(),
-          autoFocus: true,
-          style: { width: "100%", padding: "13px 14px", borderRadius: 10, border: "1px solid #E2E4DD", fontSize: 15, marginBottom: 10, boxSizing: "border-box", outline: "none" }
-        }),
-        /* @__PURE__ */ React.createElement("button", {
-          onClick: handleStart,
-          style: { width: "100%", padding: "14px 0", borderRadius: 12, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 15, cursor: "pointer", marginBottom: 8 }
-        }, "\uC8FC\uBB38 \uB4F1\uB85D \uD654\uBA74\uC73C\uB85C \u2192"),
-        /* @__PURE__ */ React.createElement("button", {
-          onClick: () => { setShowPopup(false); setTab("new"); },
-          style: { width: "100%", padding: "12px 0", borderRadius: 12, border: "1px solid #E2E4DD", background: "#fff", color: "#5F5E5A", fontWeight: 600, fontSize: 14, cursor: "pointer" }
-        }, "\uAC74\uB108\uB6F0\uAE30 (\uBCF4\uB0B4\uB294\uBD84 \uC5C6\uC774 \uB4F1\uB85D)")
-      )
-    ),
+    guidePopup,
+    senderPopup,
     /* @__PURE__ */ React.createElement("button", {
-      onClick: () => { setSenderName(""); setShowPopup(true); },
+      onClick: () => { setSenderName(""); setSharedText(""); setStep("guide"); },
       style: { position: "fixed", bottom: "calc(70px + env(safe-area-inset-bottom, 0px))", right: 20, width: 52, height: 52, borderRadius: "50%", background: "#2F6F4E", color: "#fff", border: "none", fontSize: 26, fontWeight: 700, boxShadow: "0 4px 12px rgba(0,0,0,0.25)", cursor: "pointer", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center" }
     }, "\uFF0B")
   );
