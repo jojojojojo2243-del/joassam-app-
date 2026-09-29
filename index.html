@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 194;
+const APP_VERSION = 195;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2045,7 +2045,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v194 (fix: HomeStatTile restored + MultiRegModal arrange-style popup)";
+const APP_BUILD = "v195 (fix: syntax error removed duplicate HomeStatTile return)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -17020,8 +17020,6 @@ function MultiRegModal({ modal, products, couriers, vendors, onClose, onSubmit }
       )
     )
   );
-}
-  return /* @__PURE__ */ React.createElement("button", { onClick, style: { background: bg, border: "none", borderRadius: 12, padding: "12px 4px", textAlign: "center", cursor: "pointer" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 21, fontWeight: 700, color } }, value), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 700, color, marginTop: 2 } }, label));
 }
 const homeTileStyle = {
   flex: 1,
