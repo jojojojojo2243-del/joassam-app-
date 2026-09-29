@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 184;
+const APP_VERSION = 185;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2001,7 +2001,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v184 (saveGuard 3-bug fix: chunk-load timing + lastGoodRef customers/orders + threshold)";
+const APP_BUILD = "v185 (STT fix: 케일매일소풍→매일소풍 + 주문할때→주문할게 + question intent fix)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -3530,8 +3530,15 @@ const FARM_AI_ALIASES = {
   "\uCE58\uCEE4": "\uCE58\uCEE4\uB9AC",
   "\uBE44\uD0C0\uBBFC": "\uBE44\uD0C0\uBBFC\uCC44",
   "\uACA8\uC790\uCC44": "\uACA8\uC790\uCC44",
-  "\uC308\uCC44": "\uBAA8\uB4EC\uC308\uCC44\uC18C"
+  "\uC308\uCC44": "\uBAA8\uB4EC\uC308\uCC44\uC18C",
+  "\uCF00\uC77C\uC18C\uD48D": "\uB9E4\uC77C\uC18C\uD48D"
 };
+// 문장 단위 STT 오인식 보정
+const STT_SENTENCE_FIXES = [
+  [/케일\s*(매일소풍)/g, "$1"],
+  [/(\S+)\s*주문\s*할\s*때\b/g, "$1 주문할게"],
+  [/주문\s*할\s*때\b/g, "주문할게"],
+];
 const FARM_AI_TERMS = ["EC", "pH", "\uC591\uC561", "\uC218\uACBD\uC7AC\uBC30", "\uBCD1\uD574", "\uCD9C\uACE0", "\uD3EC\uC7A5", "\uD0DD\uBC30", "\uB8E8\uAF34\uB77C", "\uBC84\uD130\uD5E4\uB4DC", "\uCCAD\uACA8\uC790", "\uC801\uACA8\uC790", "\uAF43\uC0C1\uCD94", "\uB2E4\uCCAD\uCC44", "\uBAA8\uB4EC\uC308\uCC44\uC18C", "\uC815\uC2DD", "\uC721\uBB18"];
 function farmAliasCanonical(word) {
   const w = String(word || "").replace(/\s/g, "");
@@ -3976,6 +3983,10 @@ function aiClassifyIntent(text, ctx, appData) {
   if (/(재고|남았|모자|부족|떨어)/.test(t)) return { intent: "\uC7AC\uACE0", confidence: 0.85, reason: "\uC7AC\uACE0 \uD45C\uD604" };
   if (/(이름|상품명|품목명).{0,5}(바꾸|바꿔|변경|수정|고쳐|고치)/.test(t)) return { intent: "\uC7AC\uACE0", confidence: 0.6, reason: "\uC0C1\uD488 \uC774\uB984 \uAD00\uB9AC" };
   if (/(업체|거래처|납품|명세서|정산)/.test(t)) return { intent: "\uC5C5\uCCB4", confidence: 0.8, reason: "\uAC70\uB798\uCC98/\uC815\uC0B0 \uD45C\uD604" };
+  // 의문문/설명문 패턴 — 주문 의도 아님
+  const isQuestion = /(왜|어떻게|어떤|무슨|뭐가|뭔가|인지|는데|다는데|분위기|느낌|같은데|같아|이상해|그런가|일까|인가|나요|건가요|까요|할때|할 때)$/.test(t) ||
+    /(주문한다는데|주문하는데|주문이라는데|주문이라고|주문이라며|주문이었는데)/.test(t);
+  if (isQuestion) return { intent: "\uC77C\uBC18\uB300\uD654", confidence: 0.7, reason: "\uC758\uBB38\uBB38/\uC124\uBA85\uBB38 \uD328\uD134" };
   if (/(주문|담아|등록|보내|지난번처럼|저번처럼|평소처럼|추가|빼줘|예약|출고|묶음)/.test(t)) return { intent: "\uC8FC\uBB38", confidence: 0.8, reason: "\uC8FC\uBB38/\uCD9C\uACE0 \uD45C\uD604" };
   if (/(할일|우선순위|뭐부터|뭐먼저|해야할|해야될|해야돼|오늘뭐)/.test(t)) return { intent: "\uC8FC\uBB38", confidence: 0.7, reason: "\uC624\uB298 \uC5C5\uBB34/\uC6B0\uC120\uC21C\uC704" };
   if (/(배송|출고|송장|일정)/.test(t)) return { intent: "\uC8FC\uBB38", confidence: 0.65, reason: "\uBC30\uC1A1/\uCD9C\uACE0/\uC77C\uC815" };
@@ -4711,6 +4722,16 @@ function aiVoiceRepairPartial(text, appData) {
 function aiVoiceNormalize(rawText, userId, appData) {
   let t = String(rawText || "").trim();
   const applied = [];
+  // 문장 단위 STT 오인식 보정 먼저 적용
+  if (typeof STT_SENTENCE_FIXES !== "undefined") {
+    for (const [pattern, replacement] of STT_SENTENCE_FIXES) {
+      const fixed = t.replace(pattern, replacement);
+      if (fixed !== t) {
+        applied.push({ from: t, to: fixed, by: "stt_fix" });
+        t = fixed;
+      }
+    }
+  }
   const v = aiVoiceMemGet(userId);
   t = t.split(/(\s+)/).map((tok) => {
     const w = aiVoiceNS(tok);
@@ -8396,7 +8417,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   }
   function hasOrderActionVerb(text) {
     const t = (text || "").replace(/\s/g, "");
-    return /주문(을|를)?(등록|접수|받아|받을|받자|작성|넣어|만들|하려|할게|하자|해줘|하겠|넣을)|음성주문|음성으로주문|주문받아줘|주문접수|새주문|주문등록|주문추가|주문넣|주문작성/.test(t) || /(등록해|접수해|넣어줘|작성해|추가해|주문할게|주문하자|주문해줘)/.test(t);
+    return /주문(을|를)?(등록|접수|받아|받을|받자|작성|넣어|만들|하려|할게|하자|해줘|하겠|넣을)|음성주문|음성으로주문|주문받아줘|주문접수|새주문|주문등록|주문추가|주문넣|주문작성/.test(t) && !/주문할때|주문할 때/.test(t) || /(등록해|접수해|넣어줘|작성해|추가해|주문할게|주문하자|주문해줘)/.test(t);
   }
   function utteranceHasProductOrQty(text) {
     const t = (text || "").replace(/\s/g, "");
