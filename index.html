@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 187;
+const APP_VERSION = 188;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1556,6 +1556,7 @@ function parseMultipleRecipients(text, products) {
   }
   return results;
 }
+function parseOrderMessage(text, products) {
   const result = { senderName: "", senderPhone: "", recipName: "", recipPhone: "", address: "", reserveDate: "", deliveryMessage: "", items: [] };
   if (!text) return result;
   const normText = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
@@ -2042,7 +2043,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v187 (multi-recipient parse: kakao/sms share → auto split multiple addresses)";
+const APP_BUILD = "v188 (fix: parseOrderMessage declaration restored + multi-recipient parse)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
