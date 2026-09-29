@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 181;
+const APP_VERSION = 182;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1988,7 +1988,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v181 (excel color fix: biz=yellow FAEEDA, regular=white FFFFFF, re-detect by addr/product/vol)";
+const APP_BUILD = "v182 (vendor order fix: no auto-suggest last order for vendors, ask product directly)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8538,10 +8538,14 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     }
     if (!d.name) return "\uB204\uAD6C \uC8FC\uBB38\uC778\uAC00\uC694?";
     if (!d.items || !d.items.length) {
-      const last = lastOrderForName(d.name, orders, customers);
-      if (last && (last.items || []).length) {
-        const sm = (last.items || []).map((i) => `${i.name} ${i.qty}\uAC1C`).join(", ");
-        return `${d.name} \uB2D8, \uC5B4\uB5A4 \uC0C1\uD488 \uBA87 \uAC1C \uB4DC\uB9B4\uAE4C\uC694? \uC9C0\uB09C \uC8FC\uBB38\uC740 ${sm}\uC600\uC5B4\uC694. "\uC800\uBC88\uCC98\uB7FC"\uC774\uB77C\uACE0 \uD558\uC2DC\uBA74 \uADF8\uB300\uB85C \uB2F4\uC744\uAC8C\uC694.`;
+      // 업체 주문은 매번 다를 수 있으므로 이전 주문 제안 없이 바로 상품 질문
+      const isVendorOrder = !!(d.vendorId || (vendors && vendors.some((v) => v.name && d.name && v.name.replace(/\s/g,"") === d.name.replace(/\s/g,""))));
+      if (!isVendorOrder) {
+        const last = lastOrderForName(d.name, orders, customers);
+        if (last && (last.items || []).length) {
+          const sm = (last.items || []).map((i) => `${i.name} ${i.qty}\uAC1C`).join(", ");
+          return `${d.name} \uB2D8, \uC5B4\uB5A4 \uC0C1\uD488 \uBA87 \uAC1C \uB4DC\uB9B4\uAE4C\uC694? \uC9C0\uB09C \uC8FC\uBB38\uC740 ${sm}\uC600\uC5B4\uC694. "\uC800\uBC88\uCC98\uB7FC"\uC774\uB77C\uACE0 \uD558\uC2DC\uBA74 \uADF8\uB300\uB85C \uB2F4\uC744\uAC8C\uC694.`;
+        }
       }
       return `${d.name} \uB2D8, \uC5B4\uB5A4 \uC0C1\uD488 \uBA87 \uAC1C \uB4DC\uB9B4\uAE4C\uC694?`;
     }
