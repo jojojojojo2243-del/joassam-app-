@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 185;
+const APP_VERSION = 186;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2001,7 +2001,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v185 (STT fix: 케일매일소풍→매일소풍 + 주문할때→주문할게 + question intent fix)";
+const APP_BUILD = "v186 (save reliability: retry x3 + chunk-before-delete order + emergency backup + pagehide)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11777,15 +11777,16 @@ function App() {
     }
     const data = pendingSaveDataRef.current;
     if (!data) return;
+    // 버그3 수정: 차단/실패 시 복구를 위해 null 처리를 나중에
     pendingSaveDataRef.current = null;
     let storedFloor = null;
     try {
       const raw = localStorage.getItem("joassam_last_counts_" + DATA_DOC);
       if (raw) storedFloor = JSON.parse(raw);
-    } catch (e) {
-    }
+    } catch (e) {}
     const guard = evaluateSaveGuard({ current: { customers: data.customers, orders: data.orders, products: data.products, vendors: data.vendors }, prev: lastGoodDataRef.current, storedFloor });
     if (guard.blocked) {
+      // 버그5 수정: 차단 시 pendingSaveData 복구 (다음 정상 데이터로 덮어쓸 수 있도록)
       fireToast("⚠ 데이터가 비어있는 상태로 감지되어 저장을 막았어요. 새로고침 후 다시 확인해주세요");
       logDiag("blocked_" + guard.reason, {
         prevCounts: lastGoodDataRef.current ? { customers: (lastGoodDataRef.current.customers || []).length, orders: (lastGoodDataRef.current.orders || []).length, products: (lastGoodDataRef.current.products || []).length, vendors: (lastGoodDataRef.current.vendors || []).length } : null,
@@ -11804,66 +11805,75 @@ function App() {
     const cusSigs = cusChunks.map(recordChunkSig);
     const dataSig = recordChunkSig([ordSigs, cusSigs]);
     let mainHash = null;
-    try {
-      mainHash = JSON.stringify(mainPayload);
-    } catch (e) {
-    }
+    try { mainHash = JSON.stringify(mainPayload); } catch (e) {}
+    // 버그1 수정: 재시도 카운터
+    let retryCount = 0;
+    const MAX_RETRY = 3;
     const onErr = (err) => {
-      try {
-        logDiag("save_failed", { msg: String(err && err.message || err).slice(0, 140) });
-      } catch (e) {
-      }
-      try {
-        fireToast("⚠️ 저장 실패 — 인터넷 연결이나 저장 용량을 확인하세요. 화면을 닫지 말고 잠시 후 자동 재시도됩니다.");
-      } catch (e) {
+      try { logDiag("save_failed", { msg: String(err && err.message || err).slice(0, 140), retry: retryCount }); } catch (e) {}
+      if (retryCount < MAX_RETRY) {
+        retryCount++;
+        const delay = retryCount * 3000; // 3초, 6초, 9초 간격으로 재시도
+        try { fireToast(`⚠️ 저장 실패 — ${delay / 1000}초 후 재시도합니다 (${retryCount}/${MAX_RETRY})`); } catch (e) {}
+        setTimeout(doSave, delay);
+      } else {
+        try { fireToast("❌ 저장 실패 — 인터넷 연결을 확인하고 앱을 새로고침해주세요. 데이터는 안전합니다."); } catch (e) {}
+        // 버그1 수정: 최종 실패 시 pendingSaveData에 다시 넣어서 다음 저장 시 포함되도록
+        pendingSaveDataRef.current = data;
       }
     };
-    const prevOrdSigs = lastOrdSigsRef.current || [];
-    const prevCusSigs = lastCusSigsRef.current || [];
-    const jobs = [];
-    for (let i = 0; i < ordChunks.length; i++) {
-      if (ordSigs[i] !== prevOrdSigs[i]) {
-        jobs.push(fbDb.collection("stores").doc(ordChunkDocId(i)).set({ orders: ordChunks[i], sig: ordSigs[i], part: i }));
+    // 버그2 수정: 청크 저장을 먼저 모두 완료한 후에만 메인 문서 업데이트
+    function doSave() {
+      const prevOrdSigs = lastOrdSigsRef.current || [];
+      const prevCusSigs = lastCusSigsRef.current || [];
+      const jobs = [];
+      // 변경된 청크만 저장
+      for (let i = 0; i < ordChunks.length; i++) {
+        if (ordSigs[i] !== prevOrdSigs[i]) {
+          jobs.push(fbDb.collection("stores").doc(ordChunkDocId(i)).set({ orders: ordChunks[i], sig: ordSigs[i], part: i }));
+        }
       }
+      for (let i = 0; i < cusChunks.length; i++) {
+        if (cusSigs[i] !== prevCusSigs[i]) {
+          jobs.push(fbDb.collection("stores").doc(cusChunkDocId(i)).set({ customers: cusChunks[i], sig: cusSigs[i], part: i }));
+        }
+      }
+      // 버그2 수정: 청크 저장 완료 후 메인 문서 업데이트, 그 다음 구 청크 삭제
+      Promise.all(jobs).then(() => {
+        lastOrdSigsRef.current = ordSigs;
+        lastCusSigsRef.current = cusSigs;
+        prevOrdChunkCountRef.current = ordChunks.length;
+        prevCusChunkCountRef.current = cusChunks.length;
+        loadedDataSigRef.current = dataSig;
+        const del = firebase.firestore.FieldValue.delete();
+        const mainWrite = __spreadProps(__spreadValues({}, mainPayload), {
+          ordersChunkCount: ordChunks.length,
+          customersChunkCount: cusChunks.length,
+          dataSig,
+          orders: del,
+          customers: del,
+          archiveChunkCount: del,
+          archiveSig: del
+        });
+        return fbDb.collection("stores").doc(DATA_DOC).set(mainWrite, { merge: true }).then(() => {
+          lastMainHashRef.current = mainHash;
+          // 버그6 수정: 메인 문서 저장 성공 즉시 lastGoodDataRef 업데이트
+          lastGoodDataRef.current = { customers: custArr, orders: ordersArr, products: data.products, vendors: data.vendors };
+          recordCounts({ customers: custArr.length, orders: ordersArr.length, products: (data.products || []).length, vendors: (data.vendors || []).length });
+        });
+      }).then(() => {
+        // 버그2 수정: 메인 문서 저장 완료 후에만 구 청크 삭제
+        const dels = [];
+        for (let i = ordChunks.length; i < (prevOrdChunkCountRef.current || 0); i++) {
+          dels.push(fbDb.collection("stores").doc(ordChunkDocId(i)).delete().catch(() => {}));
+        }
+        for (let i = cusChunks.length; i < (prevCusChunkCountRef.current || 0); i++) {
+          dels.push(fbDb.collection("stores").doc(cusChunkDocId(i)).delete().catch(() => {}));
+        }
+        return Promise.all(dels);
+      }).catch(onErr);
     }
-    for (let i = 0; i < cusChunks.length; i++) {
-      if (cusSigs[i] !== prevCusSigs[i]) {
-        jobs.push(fbDb.collection("stores").doc(cusChunkDocId(i)).set({ customers: cusChunks[i], sig: cusSigs[i], part: i }));
-      }
-    }
-    Promise.all(jobs).then(() => {
-      const dels = [];
-      for (let i = ordChunks.length; i < (prevOrdChunkCountRef.current || 0); i++) {
-        dels.push(fbDb.collection("stores").doc(ordChunkDocId(i)).delete().catch(() => {
-        }));
-      }
-      for (let i = cusChunks.length; i < (prevCusChunkCountRef.current || 0); i++) {
-        dels.push(fbDb.collection("stores").doc(cusChunkDocId(i)).delete().catch(() => {
-        }));
-      }
-      return Promise.all(dels);
-    }).then(() => {
-      lastOrdSigsRef.current = ordSigs;
-      lastCusSigsRef.current = cusSigs;
-      prevOrdChunkCountRef.current = ordChunks.length;
-      prevCusChunkCountRef.current = cusChunks.length;
-      loadedDataSigRef.current = dataSig;
-      const del = firebase.firestore.FieldValue.delete();
-      const mainWrite = __spreadProps(__spreadValues({}, mainPayload), {
-        ordersChunkCount: ordChunks.length,
-        customersChunkCount: cusChunks.length,
-        dataSig,
-        orders: del,
-        customers: del,
-        archiveChunkCount: del,
-        archiveSig: del
-      });
-      return fbDb.collection("stores").doc(DATA_DOC).set(mainWrite, { merge: true }).then(() => {
-        lastMainHashRef.current = mainHash;
-      });
-    }).then(() => {
-      lastGoodDataRef.current = { customers: custArr, orders: ordersArr, products: data.products, vendors: data.vendors };
-    }).catch(onErr);
+    doSave();
   }
   useEffect(() => {
     if (!dataLoaded) return;
@@ -11883,17 +11893,41 @@ function App() {
   useEffect(() => {
     function flushOnLeave() {
       try {
-        if (pendingSaveDataRef.current) flushSaveNow();
-      } catch (e) {
-      }
+        // 버그7 수정: 타이머 대기 중인 것도 즉시 실행
+        if (saveTimerRef.current) {
+          clearTimeout(saveTimerRef.current);
+          saveTimerRef.current = null;
+        }
+        if (pendingSaveDataRef.current) {
+          // localStorage에 긴급 백업 저장
+          try {
+            const backup = JSON.stringify({
+              orders: (pendingSaveDataRef.current.orders || []).slice(0, 200),
+              customers: (pendingSaveDataRef.current.customers || []).slice(0, 200),
+              products: pendingSaveDataRef.current.products,
+              vendors: pendingSaveDataRef.current.vendors,
+              backedUpAt: new Date().toISOString()
+            });
+            localStorage.setItem("joassam_emergency_backup_" + DATA_DOC, backup);
+          } catch (e) {}
+          flushSaveNow();
+        }
+      } catch (e) {}
     }
     function onVis() {
       if (document.visibilityState === "hidden") flushOnLeave();
+      // 화면 복귀 시 대기 중인 저장 실행
+      if (document.visibilityState === "visible" && pendingSaveDataRef.current) {
+        if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = setTimeout(flushSaveNow, 500);
+      }
     }
     window.addEventListener("beforeunload", flushOnLeave);
+    window.addEventListener("pagehide", flushOnLeave);
     document.addEventListener("visibilitychange", onVis);
     return () => {
       window.removeEventListener("beforeunload", flushOnLeave);
+      window.removeEventListener("pagehide", flushOnLeave);
       document.removeEventListener("visibilitychange", onVis);
     };
   }, []);
