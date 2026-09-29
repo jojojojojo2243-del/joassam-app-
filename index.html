@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 192;
+const APP_VERSION = 193;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2045,7 +2045,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v192 (multi-recipient fix: exclude intro blocks + keep pre-set sender + correct flow)";
+const APP_BUILD = "v193 (MultiRegModal: arrange-style order registration popup with product select)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -12706,6 +12706,7 @@ function App() {
   const [invoicePreview, setInvoicePreview] = useState(null);
   const [smsBatch, setSmsBatch] = useState(null);
   const [bulkOrderModal, setBulkOrderModal] = useState(null);
+  const [multiRegModal, setMultiRegModal] = useState(null); // 어레인지식 주문등록 팝업
   const [ambiguousReview, setAmbiguousReview] = useState(null);
   function deleteAmbiguousEntry(item) {
     if (item.type === "vendor") {
@@ -14015,7 +14016,13 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
           sender: (prev.sender && prev.sender.name) ? prev.sender : { name: "", phone: "" },
           deliveries
         }));
-        fireToast(`\uC218\uC2E0\uC790 ${deliveries.length}\uBA85\uC744 \uC778\uC2DD\uD588\uC5B4\uC694. \uBCF4\uB0B4\uB294\uBD84 \uC774\uB984\uACFC \uC0C1\uD488\uC744 \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.`);
+        // 어레인지식 주문등록 팝업 열기
+        setMultiRegModal({
+          sender: { name: "", phone: "" },
+          deliveries,
+          courier: couriers && couriers[0] || "\uC6B0\uCCB4\uAD6D\uD0DD\uBC30"
+        });
+        fireToast(`\uC218\uC2E0\uC790 ${deliveries.length}\uBA85\uC744 \uC778\uC2DD\uD588\uC5B4\uC694.`);
         return { ...parsed, multiCount: deliveries.length };
       }
     }
@@ -16077,6 +16084,44 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         onDownloadTemplate: downloadOrderTemplate
       }
     ),
+    multiRegModal && /* @__PURE__ */ React.createElement(
+      MultiRegModal,
+      {
+        modal: multiRegModal,
+        products,
+        couriers,
+        vendors,
+        onClose: () => setMultiRegModal(null),
+        onSubmit: ({ sender, courier, deliveries }) => {
+          justSubmittedRef.current = true;
+          const today = todayStr();
+          const newOrders = deliveries.map((d) => {
+            const cart = d.cart || {};
+            const items = Object.entries(cart).map(([pid, qty]) => {
+              const p = productMap[pid];
+              return { productId: pid, name: p ? p.name : pid, qty };
+            }).filter((it) => it.qty > 0);
+            return {
+              id: uid("o"),
+              orderDate: today,
+              status: "pending",
+              isBusiness: false,
+              vendorId: "",
+              recipient: { name: d.name || "", phone: d.phone || "", address: d.address || "", postalCode: estimatePostalCode(d.address || "") },
+              sender: { name: sender.name || "", phone: sender.phone || "" },
+              items,
+              courier: courier || "",
+              createdAt: nowStamp()
+            };
+          }).filter((o) => o.recipient.name || o.recipient.phone);
+          if (newOrders.length > 0) {
+            setOrders((prev) => [...newOrders, ...prev]);
+            fireToast(`\uC8FC\uBB38 ${newOrders.length}\uAC74 \uC77C\uAD04 \uB4F1\uB85D\uB418\uC5C8\uC5B4\uC694!`);
+            setTab("orders");
+          }
+        }
+      }
+    ),
     sideMenuOpen && /* @__PURE__ */ React.createElement(
       SideMenuDrawer,
       {
@@ -16859,7 +16904,120 @@ function FabOrderButton({ setTab, onSetSender }) {
     }, "\uFF0B")
   );
 }
-function HomeStatTile({ label, value, color, bg, onClick }) {
+function MultiRegModal({ modal, products, couriers, vendors, onClose, onSubmit }) {
+  const [sender, setSender] = React.useState(modal.sender || { name: "", phone: "" });
+  const [courier, setCourier] = React.useState(modal.courier || "\uC6B0\uCCB4\uAD6D\uD0DD\uBC30");
+  const [deliveries, setDeliveries] = React.useState(modal.deliveries || []);
+  const [productModal, setProductModal] = React.useState(null); // 상품선택 중인 배송지 인덱스
+  const [tempCart, setTempCart] = React.useState({});
+
+  function updateDelivery(idx, key, val) {
+    setDeliveries((prev) => prev.map((d, i) => i === idx ? { ...d, [key]: val } : d));
+  }
+
+  function openProductSelect(idx) {
+    setTempCart({ ...(deliveries[idx].cart || {}) });
+    setProductModal(idx);
+  }
+
+  function confirmProduct() {
+    setDeliveries((prev) => prev.map((d, i) => i === productModal ? { ...d, cart: { ...tempCart } } : d));
+    setProductModal(null);
+  }
+
+  function handleSubmit() {
+    onSubmit({ sender, courier, deliveries });
+    onClose();
+  }
+
+  const cartSummary = (cart) => {
+    const items = Object.entries(cart || {});
+    if (!items.length) return null;
+    return items.map(([pid, qty]) => {
+      const p = (products || []).find((x) => x.id === pid);
+      return p ? `${p.name} ${qty}개` : `상품 ${qty}개`;
+    }).join(", ");
+  };
+
+  return /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, background: "#fff", zIndex: 99999, display: "flex", flexDirection: "column" } },
+    // 헤더
+    /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "16px 16px 12px", borderBottom: "1px solid #E2E4DD", flexShrink: 0 } },
+      /* @__PURE__ */ React.createElement("div", { style: { fontSize: 17, fontWeight: 800, color: "#1B2430" } }, "\uC8FC\uBB38\uB4F1\uB85D"),
+      /* @__PURE__ */ React.createElement("button", { onClick: onClose, style: { border: "none", background: "none", fontSize: 15, fontWeight: 700, color: "#5F5E5A", cursor: "pointer" } }, "\uB2EB\uAE30")
+    ),
+    // 스크롤 영역
+    /* @__PURE__ */ React.createElement("div", { style: { flex: 1, overflowY: "auto", padding: "14px 16px" } },
+      // 택배사
+      /* @__PURE__ */ React.createElement("select", {
+        value: courier,
+        onChange: (e) => setCourier(e.target.value),
+        style: { width: "100%", padding: "11px 14px", borderRadius: 10, border: "1px solid #E2E4DD", fontSize: 14, marginBottom: 14, background: "#F7F8F4", fontWeight: 600 }
+      }, (couriers && couriers.length ? couriers : ["\uC6B0\uCCB4\uAD6D\uD0DD\uBC30", "\uCCF8\uB2E4\uD0DD\uBC30", "CJ\uB300\uD55C\uD1B5\uC6B4"]).map((c) =>
+        /* @__PURE__ */ React.createElement("option", { key: c, value: c }, c)
+      )),
+      // 주문자
+      /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 16 } },
+        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#1B2430", marginBottom: 8 } }, "\uC8FC\uBB38\uC790"),
+        /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8 } },
+          /* @__PURE__ */ React.createElement("input", { placeholder: "\uBCF4\uB0B4\uB294\uBD84(\uC8FC\uBB38\uC790)", value: sender.name, onChange: (e) => setSender((s) => ({ ...s, name: e.target.value })), style: { flex: 1, padding: "11px 12px", borderRadius: 9, border: "1px solid #E2E4DD", fontSize: 13 } }),
+          /* @__PURE__ */ React.createElement("input", { placeholder: "\uC8FC\uBB38\uC790 \uC5F0\uB77D\uCC98", value: sender.phone, onChange: (e) => setSender((s) => ({ ...s, phone: e.target.value })), style: { flex: 1, padding: "11px 12px", borderRadius: 9, border: "1px solid #E2E4DD", fontSize: 13 } })
+        )
+      ),
+      // 배송지 목록
+      deliveries.map((d, idx) =>
+        /* @__PURE__ */ React.createElement("div", { key: d.id || idx, style: { background: "#F7F8F4", borderRadius: 12, padding: "12px 14px", marginBottom: 10, border: "1px solid #E2E4DD" } },
+          /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 } },
+            /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#2F6F4E" } }, "\uBC30\uC1A1\uC9C0 ", idx + 1),
+            /* @__PURE__ */ React.createElement("button", { onClick: () => setDeliveries((prev) => prev.filter((_, i) => i !== idx)), style: { border: "none", background: "none", color: "#A32D2D", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, "\uC0AD\uC81C")
+          ),
+          /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 8 } },
+            /* @__PURE__ */ React.createElement("input", { placeholder: "\uBC1B\uB294\uBD84", value: d.name || "", onChange: (e) => updateDelivery(idx, "name", e.target.value), style: { flex: 1, padding: "10px 12px", borderRadius: 9, border: "1px solid #E2E4DD", fontSize: 13, background: "#fff" } }),
+            /* @__PURE__ */ React.createElement("input", { placeholder: "\uBC1B\uB294\uBD84 \uC5F0\uB77D\uCC98", value: d.phone || "", onChange: (e) => updateDelivery(idx, "phone", e.target.value), style: { flex: 1, padding: "10px 12px", borderRadius: 9, border: "1px solid #E2E4DD", fontSize: 13, background: "#fff" } })
+          ),
+          /* @__PURE__ */ React.createElement("input", { placeholder: "\uC8FC\uC18C", value: d.address || "", onChange: (e) => updateDelivery(idx, "address", e.target.value), style: { width: "100%", padding: "10px 12px", borderRadius: 9, border: "1px solid #E2E4DD", fontSize: 13, background: "#fff", boxSizing: "border-box", marginBottom: 8 } }),
+          /* @__PURE__ */ React.createElement("button", {
+            onClick: () => openProductSelect(idx),
+            style: { width: "100%", padding: "10px 0", borderRadius: 9, border: cartSummary(d.cart) ? "1px solid #2F6F4E" : "1px dashed #C0DD97", background: cartSummary(d.cart) ? "#EAF5EC" : "#fff", color: cartSummary(d.cart) ? "#1B6B3A" : "#27500A", fontWeight: 700, fontSize: 13, cursor: "pointer" }
+          }, cartSummary(d.cart) ? `✓ ${cartSummary(d.cart)}` : "\uC0C1\uD488 \uC120\uD0DD")
+        )
+      )
+    ),
+    // 완료 버튼
+    /* @__PURE__ */ React.createElement("div", { style: { padding: "12px 16px", paddingBottom: "calc(12px + env(safe-area-inset-bottom, 0px))", borderTop: "1px solid #E2E4DD", flexShrink: 0 } },
+      /* @__PURE__ */ React.createElement("button", {
+        onClick: handleSubmit,
+        style: { width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 800, fontSize: 16, cursor: "pointer" }
+      }, "\uC644\uB8CC")
+    ),
+    // 상품 선택 팝업
+    productModal !== null && /* @__PURE__ */ React.createElement("div", { style: { position: "absolute", inset: 0, background: "rgba(27,36,48,0.5)", display: "flex", alignItems: "flex-end", zIndex: 10 } },
+      /* @__PURE__ */ React.createElement("div", { style: { width: "100%", background: "#fff", borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: "75vh", display: "flex", flexDirection: "column" } },
+        /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", padding: "14px 16px", borderBottom: "1px solid #E2E4DD" } },
+          /* @__PURE__ */ React.createElement("div", { style: { fontSize: 15, fontWeight: 700 } }, "\uC0C1\uD488 \uC120\uD0DD"),
+          /* @__PURE__ */ React.createElement("button", { onClick: () => setProductModal(null), style: { border: "none", background: "none", fontSize: 18, cursor: "pointer" } }, "\xD7")
+        ),
+        /* @__PURE__ */ React.createElement("div", { style: { overflowY: "auto", flex: 1, padding: "12px 16px" } },
+          (products || []).map((p) =>
+            /* @__PURE__ */ React.createElement("div", { key: p.id, style: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 0", borderBottom: "1px solid #F1F2EC" } },
+              /* @__PURE__ */ React.createElement("div", null,
+                /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 600 } }, p.name),
+                /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#888780" } }, p.price ? `${p.price.toLocaleString()}\uC6D0` : "")
+              ),
+              /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
+                /* @__PURE__ */ React.createElement("button", { onClick: () => setTempCart((c) => { const n = { ...c }; if ((n[p.id] || 0) > 0) n[p.id] = (n[p.id] || 0) - 1; if (n[p.id] === 0) delete n[p.id]; return n; }), style: { width: 28, height: 28, borderRadius: "50%", border: "1px solid #E2E4DD", background: "#fff", fontSize: 16, cursor: "pointer" } }, "\u2212"),
+                /* @__PURE__ */ React.createElement("span", { style: { minWidth: 20, textAlign: "center", fontWeight: 700 } }, tempCart[p.id] || 0),
+                /* @__PURE__ */ React.createElement("button", { onClick: () => setTempCart((c) => ({ ...c, [p.id]: (c[p.id] || 0) + 1 })), style: { width: 28, height: 28, borderRadius: "50%", border: "none", background: "#2F6F4E", color: "#fff", fontSize: 16, cursor: "pointer" } }, "+")
+              )
+            )
+          )
+        ),
+        /* @__PURE__ */ React.createElement("div", { style: { padding: "12px 16px", borderTop: "1px solid #E2E4DD" } },
+          /* @__PURE__ */ React.createElement("button", { onClick: confirmProduct, style: { width: "100%", padding: "13px 0", borderRadius: 12, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 15, cursor: "pointer" } }, "\uC644\uB8CC")
+        )
+      )
+    )
+  );
+}
   return /* @__PURE__ */ React.createElement("button", { onClick, style: { background: bg, border: "none", borderRadius: 12, padding: "12px 4px", textAlign: "center", cursor: "pointer" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 21, fontWeight: 700, color } }, value), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 700, color, marginTop: 2 } }, label));
 }
 const homeTileStyle = {
