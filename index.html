@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 195;
+const APP_VERSION = 196;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2045,7 +2045,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v195 (fix: syntax error removed duplicate HomeStatTile return)";
+const APP_BUILD = "v196 (bugfix: expandOrderToBoxes null guard + paste direct analyzeMessage + MultiRegModal stamp)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -14418,22 +14418,23 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     return splitIntoBoxes(o && o.items || [], productMap);
   }
   function expandOrderToBoxes(o) {
+    if (!o) return [];
     const boxes = getOrderBoxes(o);
-    if (boxes.length <= 1) {
-      const vol = boxes[0] ? boxes[0].volume : o.boxVolume;
+    if (!boxes || boxes.length <= 1) {
+      const vol = boxes && boxes[0] ? boxes[0].volume : o.boxVolume;
       return [__spreadProps(__spreadValues({}, o), { boxVolume: o.boxVolume || (vol !== void 0 ? String(vol) : ""), boxInfo: o.boxInfo || "" })];
     }
     const total = boxes.length;
     return boxes.map((box, i) => __spreadProps(__spreadValues({}, o), {
       id: `${o.id}-b${i + 1}`,
-      items: box.items.map((it) => {
+      items: (box.items || []).map((it) => {
         const p = productMap[it.productId];
         const price = it.price != null ? it.price : p ? p.wholesalePrice || p.price : 0;
         return { productId: it.productId, name: it.name || (p ? p.name : ""), qty: it.qty, price };
       }),
-      boxVolume: String(box.volume),
+      boxVolume: String(box.volume || ""),
       boxInfo: `${i + 1}/${total}\uBC15\uC2A4`,
-      paymentAmount: box.items.reduce((s, it) => {
+      paymentAmount: (box.items || []).reduce((s, it) => {
         const p = productMap[it.productId];
         const price = it.price != null ? it.price : p ? p.wholesalePrice || p.price : 0;
         return s + price * it.qty;
@@ -16095,6 +16096,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         onSubmit: ({ sender, courier, deliveries }) => {
           justSubmittedRef.current = true;
           const today = todayStr();
+          const stamp = nowStamp();
           const newOrders = deliveries.map((d) => {
             const cart = d.cart || {};
             const items = Object.entries(cart).map(([pid, qty]) => {
@@ -16111,7 +16113,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
               sender: { name: sender.name || "", phone: sender.phone || "" },
               items,
               courier: courier || "",
-              createdAt: nowStamp()
+              createdAt: stamp,
             };
           }).filter((o) => o.recipient.name || o.recipient.phone);
           if (newOrders.length > 0) {
@@ -19528,10 +19530,8 @@ function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, ch
       text = "";
     }
     if (text && text.trim()) {
-      // draft.message에 먼저 설정 후 분석
-      setDraft((prev) => __spreadProps(__spreadValues({}, prev), { message: text }));
-      // 다음 렌더 후 분석 실행
-      setTimeout(() => analyzeMessage(text), 50);
+      // draft.message 설정과 동시에 분석 실행 (setTimeout 제거 - 상태 미반영 문제 해결)
+      analyzeMessage(text.trim());
     } else {
       try {
         const ta = document.getElementById("orderMsgTextarea");
