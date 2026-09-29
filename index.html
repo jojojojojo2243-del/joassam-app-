@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 189;
+const APP_VERSION = 190;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2043,7 +2043,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v189 (multi-recipient fix: analyzeMessage+pasteFromClipboard handle multiCount correctly)";
+const APP_BUILD = "v190 (arrange-style: FAB + sender select popup + order registration flow)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -15543,7 +15543,10 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
     /* @__PURE__ */ React.createElement("div", { style: { padding: "16px 16px 16px", maxWidth: "none", flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch" } }, tab === "home" && /* @__PURE__ */ React.createElement(HomeTab, { appName, orders, counts, customerMap, productMap, orderTotal, exportBackup, importBackup, backupInputRef, fireToast, setTab, members, nickname, onSelectOrder: (id) => {
       setTab("orders");
       setSelectedOrderId(id);
-    }, couriers, customerCount: customers.length, vendorCount: vendors.length, overdueCount: overdueDeliveries.length, pendingApprovalCount: isCurrentUserAdmin ? Object.values(accounts).filter((a) => a && a.pending).length : 0, isAdmin: isCurrentUserAdmin, accounts, newRegularCount: findNewMonthlyRegularCandidates(customers, orders).length, aiBrief }), tab === "orders" && !selectedOrder && !invoicePreview && /* @__PURE__ */ React.createElement(
+    }, couriers, customerCount: customers.length, vendorCount: vendors.length, overdueCount: overdueDeliveries.length, pendingApprovalCount: isCurrentUserAdmin ? Object.values(accounts).filter((a) => a && a.pending).length : 0, isAdmin: isCurrentUserAdmin, accounts, newRegularCount: findNewMonthlyRegularCandidates(customers, orders).length, aiBrief,
+    onSetSender: (name, phone) => {
+      setDraft((prev) => __spreadProps(__spreadValues({}, prev), { sender: { name: name || "", phone: phone || "" } }));
+    } }), tab === "orders" && !selectedOrder && !invoicePreview && /* @__PURE__ */ React.createElement(
       OrdersTab,
       {
         statusFilter,
@@ -16620,7 +16623,7 @@ function AiBriefingCard({ brief, setTab }) {
     return /* @__PURE__ */ React.createElement("button", { key: i, onClick: () => setTab(tabFor), style: { width: "100%", display: "flex", alignItems: "center", gap: 8, textAlign: "left", background: "#fff", border: "1px solid #DDEBE0", borderRadius: 8, padding: "8px 10px", marginBottom: 5, cursor: "pointer" } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, fontWeight: 800, color: "#2F6F4E", minWidth: 16 } }, i + 1), /* @__PURE__ */ React.createElement("span", { style: { flex: 1 } }, /* @__PURE__ */ React.createElement("span", { style: { display: "block", fontSize: 13, fontWeight: 700, color: "#243b2e" } }, p.task, " ", /* @__PURE__ */ React.createElement("span", { style: { color: "#2F6F4E" } }, p.count, "\uAC74")), /* @__PURE__ */ React.createElement("span", { style: { display: "block", fontSize: 11, color: "#7B8A80", marginTop: 1 } }, p.reason)), /* @__PURE__ */ React.createElement("span", { style: { color: "#8FA895", fontSize: 14 } }, "\u203A"));
   })), recs.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 10 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 5 } }, "\u{1F4A1} \uC81C\uC548 (\uADFC\uAC70 \uD3EC\uD568)"), recs.slice(0, 4).map((r, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { fontSize: 12.5, color: "#31473a", background: "#fff", border: "1px solid #E3EEE6", borderRadius: 8, padding: "7px 10px", marginBottom: 5 } }, /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 600 } }, r.text), r.reason && /* @__PURE__ */ React.createElement("span", { style: { display: "block", fontSize: 11, color: "#8A968D", marginTop: 1 } }, "\uADFC\uAC70: ", r.reason)))), stockPred.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 10 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "#8A5A1C", marginBottom: 5 } }, "\u{1F4C9} \uC7AC\uACE0 \uC18C\uC9C4 \uC608\uCE21"), stockPred.slice(0, 3).map((s, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { fontSize: 12.5, color: "#6E4A16", background: "#FFF9EF", border: "1px solid #F0E0C4", borderRadius: 8, padding: "7px 10px", marginBottom: 5 } }, /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 700 } }, s.name), " \uC57D ", /* @__PURE__ */ React.createElement("b", null, s.daysLeft, "\uC77C"), " \uB4A4 \uC18C\uC9C4 \uC608\uC0C1", /* @__PURE__ */ React.createElement("span", { style: { display: "block", fontSize: 11, color: "#A98B52", marginTop: 1 } }, "\uADFC\uAC70: ", s.evidence, " \xB7 ", s.confidence)))), (salesPred || season) && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "#5B7A63", borderTop: "1px dashed #CDE6D3", paddingTop: 8, marginTop: 4 } }, salesPred && /* @__PURE__ */ React.createElement("div", null, "\u{1F4C8} \uCD5C\uADFC \uD310\uB9E4 ", /* @__PURE__ */ React.createElement("b", null, salesPred.direction), " (7\uC77C ", salesPred.recent7, "\uAC1C \xB7 \uC774\uC804 ", salesPred.prev7, "\uAC1C)", salesPred.top && salesPred.top.length ? ` \xB7 \uC778\uAE30 ${salesPred.top.join(", ")}` : ""), season && season.hints && season.hints.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { marginTop: 3 } }, "\u{1F5D3}\uFE0F ", season.month, "\uC6D4 \uCC38\uACE0: ", season.hints.join(", "))), mon && (mon.health === "\uC8FC\uC758" || mon.warnings && mon.warnings.length > 0) && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "#9A4A2A", background: "#FDF2EC", border: "1px solid #F0CDB8", borderRadius: 8, padding: "7px 10px", marginTop: 8 } }, "\u2699\uFE0F \uC2DC\uC2A4\uD15C \uC810\uAC80: ", mon.warnings.map((w) => w.text).join(" "), " ", /* @__PURE__ */ React.createElement("span", { style: { color: "#B98A72" } }, "(\uC790\uB3D9\uC73C\uB85C \uBC14\uAFB8\uC9C0 \uC54A\uACE0 \uC0AC\uC7A5\uB2D8\uAED8 \uBA3C\uC800 \uC54C\uB824\uB4DC\uB824\uC694)")), brief.perf && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#5A6B7A", background: "#F2F5F8", border: "1px solid #DCE4EC", borderRadius: 8, padding: "7px 10px", marginTop: 8 } }, "\u26A1 AI \uC131\uB2A5: \uD3C9\uADE0\uC751\uB2F5 ", brief.perf.avgMs, "ms \xB7 \uCE90\uC2DC\uC801\uC911 ", brief.perf.cacheHitRate, "% \xB7 \uC624\uB958 ", brief.perf.errors, "\uAC74", brief.perf.recoveries ? ` (\uC790\uB3D9\uBCF5\uAD6C ${brief.perf.recoveries})` : "", " \xB7 \uAE30\uC5B5 ", brief.perf.memoryKB, "KB \xB7 \uB450\uB1CC ", brief.perf.activeProvider)));
 }
-function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal, exportBackup, importBackup, backupInputRef, fireToast, setTab, members, nickname, onSelectOrder, couriers, customerCount, vendorCount, overdueCount, pendingApprovalCount, isAdmin, accounts, newRegularCount, aiBrief }) {
+function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal, exportBackup, importBackup, backupInputRef, fireToast, setTab, members, nickname, onSelectOrder, couriers, customerCount, vendorCount, overdueCount, pendingApprovalCount, isAdmin, accounts, newRegularCount, aiBrief, onSetSender }) {
   const recentOrders = [...orders].sort((a, b) => a.createdAt < b.createdAt ? 1 : -1).slice(0, 5);
   return /* @__PURE__ */ React.createElement("div", { style: { position: "relative" } }, /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 18, fontWeight: 700, color: "#1B2430" } }, appName), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A", marginTop: 2 } }, nickname ? `${(accounts == null ? void 0 : accounts[nickname]) && accounts[nickname].displayName || nickname}\uB2D8 \uD658\uC601\uD569\uB2C8\uB2E4` : "\uC2E0\uC120\uD55C \uB18D\uC0B0\uBB3C\uC744 \uBBFF\uACE0 \uC8FC\uBB38\uD574 \uC8FC\uC138\uC694!")), aiBrief && /* @__PURE__ */ React.createElement(AiBriefingCard, { brief: aiBrief, setTab }), pendingApprovalCount > 0 && /* @__PURE__ */ React.createElement(
     "button",
@@ -16715,32 +16718,47 @@ function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal,
       style: { width: "100%", marginTop: 12, padding: "9px 0", borderRadius: 8, border: "1px solid #2F6F4E", background: "#fff", color: "#27500A", fontWeight: 700, fontSize: 12, cursor: "pointer" }
     },
     "\uACC4\uC815 \uAD00\uB9AC (\uBE44\uBC00\uBC88\uD638\xB7\uC544\uC774\uB514 \uBCC0\uACBD, \uCD94\uAC00/\uC0AD\uC81C)"
-  )), /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid #E2E4DD", borderRadius: 14, padding: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, marginBottom: 12 } }, "\uD0DD\uBC30\uC811\uC218 \uC591\uC2DD"), couriers.slice(0, 3).map((c) => /* @__PURE__ */ React.createElement("div", { key: c, style: { display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderTop: "1px solid #F1F2EC" } }, /* @__PURE__ */ React.createElement("span", { style: { width: 14, height: 14, borderRadius: "50%", background: "#2F6F4E", display: "inline-block" } }), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 13, fontWeight: 700 } }, c))), couriers.length > 3 && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#888780", padding: "4px 0 0" } }, "\uC678 ", couriers.length - 3, "\uAC1C"), /* @__PURE__ */ React.createElement("button", { onClick: () => setTab("couriersettings"), style: { width: "100%", textAlign: "left", marginTop: 6, background: "none", border: "none", color: "#185FA5", fontSize: 12, fontWeight: 700, cursor: "pointer", padding: "8px 0 0" } }, "\uD0DD\uBC30\uC811\uC218 \uC591\uC2DD \uC124\uC815\uD558\uAE30 \u2192")), /* @__PURE__ */ React.createElement(
-    "button",
-    {
-      onClick: () => setTab("new"),
-      style: {
-        position: "fixed",
-        bottom: "calc(70px + env(safe-area-inset-bottom, 0px))",
-        right: 20,
-        width: 52,
-        height: 52,
-        borderRadius: "50%",
-        background: "#2F6F4E",
-        color: "#fff",
-        border: "none",
-        fontSize: 26,
-        fontWeight: 700,
-        boxShadow: "0 4px 12px rgba(0,0,0,0.25)",
-        cursor: "pointer",
-        zIndex: 50,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center"
-      }
-    },
-    "\uFF0B"
-  ));
+  )), /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid #E2E4DD", borderRadius: 14, padding: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, marginBottom: 12 } }, "\uD0DD\uBC30\uC811\uC218 \uC591\uC2DD"), couriers.slice(0, 3).map((c) => /* @__PURE__ */ React.createElement("div", { key: c, style: { display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderTop: "1px solid #F1F2EC" } }, /* @__PURE__ */ React.createElement("span", { style: { width: 14, height: 14, borderRadius: "50%", background: "#2F6F4E", display: "inline-block" } }), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 13, fontWeight: 700 } }, c))), couriers.length > 3 && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#888780", padding: "4px 0 0" } }, "\uC678 ", couriers.length - 3, "\uAC1C"), /* @__PURE__ */ React.createElement("button", { onClick: () => setTab("couriersettings"), style: { width: "100%", textAlign: "left", marginTop: 6, background: "none", border: "none", color: "#185FA5", fontSize: 12, fontWeight: 700, cursor: "pointer", padding: "8px 0 0" } }, "\uD0DD\uBC30\uC811\uC218 \uC591\uC2DD \uC124\uC815\uD558\uAE30 \u2192")),
+  /* @__PURE__ */ React.createElement(FabOrderButton, { setTab, onSetSender }));
+}
+function FabOrderButton({ setTab, onSetSender }) {
+  const [showPopup, setShowPopup] = React.useState(false);
+  const [senderName, setSenderName] = React.useState("");
+  function handleStart() {
+    if (senderName.trim() && typeof onSetSender === "function") {
+      onSetSender(senderName.trim(), "");
+    }
+    setShowPopup(false);
+    setTab("new");
+  }
+  return /* @__PURE__ */ React.createElement(React.Fragment, null,
+    showPopup && /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", zIndex: 9000, display: "flex", alignItems: "flex-end" }, onClick: () => setShowPopup(false) },
+      /* @__PURE__ */ React.createElement("div", { onClick: (e) => e.stopPropagation(), style: { width: "100%", background: "#fff", borderTopLeftRadius: 20, borderTopRightRadius: 20, padding: "20px 16px", paddingBottom: "calc(20px + env(safe-area-inset-bottom, 0px))" } },
+        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 16, fontWeight: 700, marginBottom: 4 } }, "\uBCF4\uB0B4\uB294\uBD84 \uC120\uD0DD"),
+        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#888780", marginBottom: 14 } }, "\uCE74\uCE74\uC624/\uBB38\uC790 \uACF5\uC720 \uC8FC\uBB38\uC5D0\uC11C \uBCF4\uB0B4\uB294\uBD84 \uC774\uB984\uC744 \uBA3C\uC800 \uC785\uB825\uD558\uC138\uC694."),
+        /* @__PURE__ */ React.createElement("input", {
+          placeholder: "\uBCF4\uB0B4\uB294\uBD84 \uC774\uB984 (\uC608: \uAE40\uC885\uC6B1\uACE0\uAC1D)",
+          value: senderName,
+          onChange: (e) => setSenderName(e.target.value),
+          onKeyDown: (e) => e.key === "Enter" && handleStart(),
+          autoFocus: true,
+          style: { width: "100%", padding: "13px 14px", borderRadius: 10, border: "1px solid #E2E4DD", fontSize: 15, marginBottom: 10, boxSizing: "border-box", outline: "none" }
+        }),
+        /* @__PURE__ */ React.createElement("button", {
+          onClick: handleStart,
+          style: { width: "100%", padding: "14px 0", borderRadius: 12, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 15, cursor: "pointer", marginBottom: 8 }
+        }, "\uC8FC\uBB38 \uB4F1\uB85D \uD654\uBA74\uC73C\uB85C \u2192"),
+        /* @__PURE__ */ React.createElement("button", {
+          onClick: () => { setShowPopup(false); setTab("new"); },
+          style: { width: "100%", padding: "12px 0", borderRadius: 12, border: "1px solid #E2E4DD", background: "#fff", color: "#5F5E5A", fontWeight: 600, fontSize: 14, cursor: "pointer" }
+        }, "\uAC74\uB108\uB6F0\uAE30 (\uBCF4\uB0B4\uB294\uBD84 \uC5C6\uC774 \uB4F1\uB85D)")
+      )
+    ),
+    /* @__PURE__ */ React.createElement("button", {
+      onClick: () => { setSenderName(""); setShowPopup(true); },
+      style: { position: "fixed", bottom: "calc(70px + env(safe-area-inset-bottom, 0px))", right: 20, width: 52, height: 52, borderRadius: "50%", background: "#2F6F4E", color: "#fff", border: "none", fontSize: 26, fontWeight: 700, boxShadow: "0 4px 12px rgba(0,0,0,0.25)", cursor: "pointer", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center" }
+    }, "\uFF0B")
+  );
 }
 function HomeStatTile({ label, value, color, bg, onClick }) {
   return /* @__PURE__ */ React.createElement("button", { onClick, style: { background: bg, border: "none", borderRadius: 12, padding: "12px 4px", textAlign: "center", cursor: "pointer" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 21, fontWeight: 700, color } }, value), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 700, color, marginTop: 2 } }, label));
