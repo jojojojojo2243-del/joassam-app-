@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 191;
+const APP_VERSION = 192;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1540,10 +1540,12 @@ function parseMultipleRecipients(text, products) {
     }
   }
   if (current.length > 0) blocks.push(current);
-  // 각 블록에서 이름/전화/주소 추출
+  // 각 블록에서 이름/전화/주소 추출 (전화번호 없는 블록 제외)
   const results = [];
   for (const block of blocks) {
     const blockText = block.join("\n");
+    // 전화번호 없는 블록은 안내문구 → 제외
+    if (!PHONE_RE.test(blockText)) continue;
     const parsed = parseOrderMessage(blockText, products);
     if (!parsed.recipName && !parsed.recipPhone && !parsed.address) continue;
     results.push({
@@ -2043,7 +2045,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v191 (FAB: guide popup + clipboard read + sender popup → arrange-style order flow)";
+const APP_BUILD = "v192 (multi-recipient fix: exclude intro blocks + keep pre-set sender + correct flow)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -14007,15 +14009,13 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
             deliveryMessage: r.deliveryMessage || ""
           };
         });
-        // 보내는분은 첫 번째 파싱 결과 또는 기존 draft
+        // 보내는분: FabOrderButton에서 이미 설정된 경우 유지, 없으면 빈칸
         setDraft((prev) => __spreadProps(__spreadValues({}, prev), {
           message: text,
-          sender: parsed.senderName || parsed.senderPhone
-            ? { name: parsed.senderName, phone: parsed.senderPhone }
-            : prev.sender,
+          sender: (prev.sender && prev.sender.name) ? prev.sender : { name: "", phone: "" },
           deliveries
         }));
-        fireToast(`\uC218\uC2E0\uC790 ${deliveries.length}\uBA85\uC744 \uC778\uC2DD\uD588\uC5B4\uC694. \uC0C1\uD488\uC744 \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.`);
+        fireToast(`\uC218\uC2E0\uC790 ${deliveries.length}\uBA85\uC744 \uC778\uC2DD\uD588\uC5B4\uC694. \uBCF4\uB0B4\uB294\uBD84 \uC774\uB984\uACFC \uC0C1\uD488\uC744 \uC120\uD0DD\uD574 \uC8FC\uC138\uC694.`);
         return { ...parsed, multiCount: deliveries.length };
       }
     }
