@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 196;
+const APP_VERSION = 197;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1423,9 +1423,21 @@ const ADDR_REGIONS = new Set("\uC11C\uC6B8 \uBD80\uC0B0 \uB300\uAD6C \uC778\uCC9
 const NAME_PHONE_RE = /01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/g;
 function isAddrToken(tk) {
   if (ADDR_REGIONS.has(tk)) return true;
-  if (tk.length >= 2 && /(시|도|군|구|읍|면|동|리|로|길|가|번지|번길|아파트|빌라|빌딩|타워|오피스텔|원룸|단지|상가)$/.test(tk)) return true;
-  if (/^\d/.test(tk)) return true;
-  if (/\d(동|호|층|가|번지|번|통|반)$/.test(tk)) return true;
+  // 숫자 포함 토큰은 항상 주소 관련
+  if (/\d/.test(tk) && /[가-힣]/.test(tk)) return true;
+  if (/^\d+$/.test(tk)) return true;
+  // 주소 키워드로 끝나는 경우
+  if (tk.length >= 2 && /(시|도|군|구|읍|면|동|리|로|길|가|번지|번길|아파트|빌라|빌딩|타워|오피스텔|원룸|단지|상가)$/.test(tk)) {
+    // 단, 순수 한글 2~5자이고 성씨로 시작하면 이름으로 우선 처리
+    // 예외: "동"으로 끝나더라도 이름이 아닌 경우 (길동, 정동 등은 이름이 아님 - 제외 불가)
+    // → 2~4자 순수한글 + 성씨시작 + 마지막이 "동" 아닌 경우만 이름
+    if (/^[가-힣]{2,4}$/.test(tk) && KO_SURNAMES.has(tk[0])) {
+      // "동"으로 끝나면 애매하므로 그냥 주소로 처리
+      if (/(로|길|구|시|도|군|읍|면|리|상가|아파트|빌라)$/.test(tk)) return true;
+      return false; // "동"으로 끝나도 이름 우선 (홍길동, 임꺽정 등)
+    }
+    return true;
+  }
   if (/(아파트|빌라|오피스텔|맨션|하우스|타워|빌딩|단지)/.test(tk)) return true;
   return false;
 }
@@ -2045,7 +2057,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v196 (bugfix: expandOrderToBoxes null guard + paste direct analyzeMessage + MultiRegModal stamp)";
+const APP_BUILD = "v197 (isAddrToken fix: name not addr + AI toast + paste direct analyze)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -19546,11 +19558,11 @@ function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, ch
   async function handleAiAnalyze() {
     const text = draft.message || "";
     if (!text.trim()) {
-      alert("\uBA3C\uC800 \uC8FC\uBB38 \uBB38\uC790\uB97C \uBD99\uC5EC\uB123\uC5B4 \uC8FC\uC138\uC694.");
+      fireToast("\uBA3C\uC800 \uC8FC\uBB38 \uBB38\uC790\uB97C \uBD99\uC5EC\uB123\uC5B4 \uC8FC\uC138\uC694.");
       return;
     }
     if (!geminiKey) {
-      alert("\uC124\uC815\uC5D0\uC11C Gemini API \uD0A4\uB97C \uBA3C\uC800 \uC785\uB825\uD574 \uC8FC\uC138\uC694.");
+      fireToast("\u2699\uFE0F \uC124\uC815 \u2192 AI \uC124\uC815\uC5D0\uC11C Gemini API \uD0A4\uB97C \uBA3C\uC800 \uC785\uB825\uD574 \uC8FC\uC138\uC694.");
       return;
     }
     setAiLoading(true);
@@ -19559,7 +19571,7 @@ function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, ch
       setAiResult(result);
       setAiModalOpen(true);
     } catch (e) {
-      alert("AI \uBD84\uC11D \uC624\uB958: " + e.message);
+      fireToast("AI \uBD84\uC11D \uC624\uB958: " + e.message);
     } finally {
       setAiLoading(false);
     }
