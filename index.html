@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 198;
+const APP_VERSION = 199;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2066,7 +2066,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v198 (data loss fix: onSnapshot empty-array guard + 50% drop block + lastGoodRef safe)";
+const APP_BUILD = "v199 (critical: customer data loss fix - empty array guard in applyCustomersArray + fetchChunks null)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11631,7 +11631,8 @@ function App() {
   const loadedDataSigRef = useRef(null);
   function fetchRecordChunks(idFn, count, key) {
     const n = count || 0;
-    if (!n) return Promise.resolve([]);
+    // count가 0이면 null 반환 (빈 배열로 덮어쓰는 것 방지)
+    if (!n) return Promise.resolve(null);
     const gets = [];
     for (let i = 0; i < n; i++) {
       gets.push(fbDb.collection("stores").doc(idFn(i)).get().then((s) => s.exists && s.data() && Array.isArray(s.data()[key]) ? s.data()[key] : []).catch(() => []));
@@ -11656,6 +11657,16 @@ function App() {
     const prevCount = prevOrderCountRef.current;
     const wasJustSubmitted = justSubmittedRef.current;
     justSubmittedRef.current = false;
+    // 빈 배열이면 기존 주문 보호
+    if (list.length === 0) {
+      const prevGood = lastGoodDataRef.current;
+      const prevGoodCount = prevGood && prevGood.orders ? prevGood.orders.length : 0;
+      if (prevGoodCount > 5) {
+        // 이전에 주문이 있었는데 빈 배열이 오면 무시
+        prevOrderCountRef.current = prevGoodCount;
+        return;
+      }
+    }
     if (prevCount !== null && newCount > prevCount && newCount - prevCount <= 50 && !wasJustSubmitted) {
       setNewOrderAlert((n) => n + (newCount - prevCount));
       playAlertSound();
@@ -11667,6 +11678,15 @@ function App() {
   }
   function applyCustomersArray(arr) {
     const list = Array.isArray(arr) ? arr : [];
+    // 빈 배열이면 기존 데이터 보호 (lastGoodDataRef에 고객이 있으면 덮어쓰지 않음)
+    if (list.length === 0) {
+      const prevGood = lastGoodDataRef.current;
+      const prevCount = prevGood && prevGood.customers ? prevGood.customers.length : 0;
+      if (prevCount > 0) {
+        // 이전에 고객이 있었는데 빈 배열이 오면 무시
+        return;
+      }
+    }
     setCustomers(list);
     lastGoodDataRef.current = __spreadProps(__spreadValues({}, lastGoodDataRef.current || {}), { customers: list });
     recordCounts({ customers: list.length });
@@ -11707,21 +11727,22 @@ function App() {
                   fetchRecordChunks(ordChunkDocId, data.ordersChunkCount || 0, "orders"),
                   fetchRecordChunks(cusChunkDocId, data.customersChunkCount || 0, "customers")
                 ]).then((res) => {
-                  applyOrdersArray(res[0]);
-                  applyCustomersArray(res[1]);
-                  // 버그1 수정: 청크 로드 완료 후 fbFirstLoadRef 설정
+                  // null이면 count=0 → 기존 데이터 유지 (빈배열로 덮어쓰지 않음)
+                  if (res[0] !== null) applyOrdersArray(res[0]);
+                  if (res[1] !== null) applyCustomersArray(res[1]);
                   fbFirstLoadRef.current = true;
-                }).catch(() => {
+                }).catch((err) => {
                   loadedDataSigRef.current = null;
                   fbFirstLoadRef.current = true;
+                  try { fireToast("⚠️ 데이터 로드 오류 — 기존 데이터를 유지합니다. 새로고침해 주세요."); } catch(e) {}
                 });
               } else {
                 // 이미 로드된 sig → 바로 설정
                 fbFirstLoadRef.current = true;
               }
             } else {
-              if (data.orders) applyOrdersArray(data.orders);
-              if (data.customers) applyCustomersArray(data.customers);
+              if (data.orders && data.orders.length > 0) applyOrdersArray(data.orders);
+              if (data.customers && data.customers.length > 0) applyCustomersArray(data.customers);
               fbFirstLoadRef.current = true;
             }
             if (data.integrations) setIntegrations(data.integrations);
