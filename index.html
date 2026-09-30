@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 197;
+const APP_VERSION = 198;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -545,7 +545,7 @@ function coreStr(s) {
 }
 function evaluateSaveGuard({ current, prev, storedFloor }) {
   const arr = (obj, key) => obj && obj[key] || [];
-  // products와 vendors만 엄격하게 체크 (고객/주문은 실제로 0일 수 있음)
+  // products와 vendors: 0이 되면 차단 (엄격)
   const strictKeys = ["products", "vendors"];
   for (const key of strictKeys) {
     const curLen = arr(current, key).length;
@@ -556,14 +556,23 @@ function evaluateSaveGuard({ current, prev, storedFloor }) {
       return { blocked: true, reason: key + "_dropped_to_empty" };
     }
   }
-  // 고객/주문은 이전에 많았는데 갑자기 0이 되면 차단 (단, storedFloor 기준 높게 설정)
+  // products/vendors가 50% 이상 급감하면 차단
+  for (const key of strictKeys) {
+    const curLen = arr(current, key).length;
+    const prevLen = prev ? arr(prev, key).length : 0;
+    const storedLen = storedFloor ? storedFloor[key] || 0 : 0;
+    const refLen = Math.max(prevLen, storedLen);
+    if (refLen >= 10 && curLen < refLen * 0.5) {
+      return { blocked: true, reason: key + "_dropped_by_half" };
+    }
+  }
+  // 고객/주문은 이전에 많았는데 갑자기 0이 되면 차단
   const softKeys = ["customers", "orders"];
   for (const key of softKeys) {
     const curLen = arr(current, key).length;
     if (curLen > 0) continue;
     const prevLen = prev ? arr(prev, key).length : 0;
     const storedLen = storedFloor ? storedFloor[key] || 0 : 0;
-    // 이전에 10건 이상 있었는데 갑자기 0이 되면 차단
     if (prevLen > 10 || storedLen > 10) {
       return { blocked: true, reason: key + "_dropped_to_empty" };
     }
@@ -2057,7 +2066,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v197 (isAddrToken fix: name not addr + AI toast + paste direct analyze)";
+const APP_BUILD = "v198 (data loss fix: onSnapshot empty-array guard + 50% drop block + lastGoodRef safe)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11683,8 +11692,10 @@ function App() {
             const data = snap.data();
             if (data.appName) setAppName(data.appName);
             if (data.appLogo) setAppLogo(data.appLogo);
-            if (data.products) setProducts(data.products);
-            if (data.vendors) setVendors(data.vendors);
+            if (data.products && data.products.length > 0) setProducts(data.products);
+            else if (data.products && data.products.length === 0 && !lastGoodDataRef.current) setProducts([]);
+            if (data.vendors && data.vendors.length > 0) setVendors(data.vendors);
+            else if (data.vendors && data.vendors.length === 0 && !lastGoodDataRef.current) setVendors([]);
             if (data.invoices) setInvoices(data.invoices);
             if (data.supplier) setSupplier(data.supplier);
             const hasManifest = typeof data.ordersChunkCount === "number" || typeof data.customersChunkCount === "number";
@@ -11724,8 +11735,8 @@ function App() {
             // fbFirstLoadRef는 hasManifest 분기에서 이미 설정됨 — 여기서 중복 설정 제거
             const prevGood = lastGoodDataRef.current || {};
             lastGoodDataRef.current = __spreadProps(__spreadValues({}, prevGood), {
-              products: data.products || prevGood.products,
-              vendors: data.vendors || prevGood.vendors,
+              products: (data.products && data.products.length > 0) ? data.products : prevGood.products,
+              vendors: (data.vendors && data.vendors.length > 0) ? data.vendors : prevGood.vendors,
               orders: prevGood.orders,
               customers: prevGood.customers
             });
