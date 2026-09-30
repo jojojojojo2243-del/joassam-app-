@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 200;
+const APP_VERSION = 201;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2066,7 +2066,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v200 (restore fix: immediate save + justSubmittedRef + empty backup warn + data guard)";
+const APP_BUILD = "v201 (auto daily backup restored + oarch chunks loaded + customer data guard)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11723,12 +11723,18 @@ function App() {
               const sig = String(data.dataSig || "");
               if (sig !== loadedDataSigRef.current) {
                 loadedDataSigRef.current = sig;
+                const archiveCount = typeof data.archiveChunkCount === "number" ? data.archiveChunkCount : 0;
                 Promise.all([
                   fetchRecordChunks(ordChunkDocId, data.ordersChunkCount || 0, "orders"),
-                  fetchRecordChunks(cusChunkDocId, data.customersChunkCount || 0, "customers")
+                  fetchRecordChunks(cusChunkDocId, data.customersChunkCount || 0, "customers"),
+                  archiveCount > 0 ? loadArchiveChunks(archiveCount) : Promise.resolve([])
                 ]).then((res) => {
-                  // null이면 count=0 → 기존 데이터 유지 (빈배열로 덮어쓰지 않음)
-                  if (res[0] !== null) applyOrdersArray(res[0]);
+                  const ordOrders = res[0] !== null ? res[0] : [];
+                  const archOrders = Array.isArray(res[2]) ? res[2] : [];
+                  const allOrders = [...ordOrders, ...archOrders];
+                  if (res[0] !== null || archOrders.length > 0) {
+                    applyOrdersArray(allOrders.length > 0 ? allOrders : ordOrders);
+                  }
                   if (res[1] !== null) applyCustomersArray(res[1]);
                   fbFirstLoadRef.current = true;
                 }).catch((err) => {
@@ -11869,7 +11875,6 @@ function App() {
     }
     const data = pendingSaveDataRef.current;
     if (!data) return;
-    // 버그3 수정: 차단/실패 시 복구를 위해 null 처리를 나중에
     pendingSaveDataRef.current = null;
     let storedFloor = null;
     try {
@@ -11878,7 +11883,6 @@ function App() {
     } catch (e) {}
     const guard = evaluateSaveGuard({ current: { customers: data.customers, orders: data.orders, products: data.products, vendors: data.vendors }, prev: lastGoodDataRef.current, storedFloor });
     if (guard.blocked) {
-      // 버그5 수정: 차단 시 pendingSaveData 복구 (다음 정상 데이터로 덮어쓸 수 있도록)
       fireToast("⚠ 데이터가 비어있는 상태로 감지되어 저장을 막았어요. 새로고침 후 다시 확인해주세요");
       logDiag("blocked_" + guard.reason, {
         prevCounts: lastGoodDataRef.current ? { customers: (lastGoodDataRef.current.customers || []).length, orders: (lastGoodDataRef.current.orders || []).length, products: (lastGoodDataRef.current.products || []).length, vendors: (lastGoodDataRef.current.vendors || []).length } : null,
@@ -11886,6 +11890,32 @@ function App() {
       });
       return;
     }
+    // ===== 일별 자동 백업 =====
+    try {
+      const today = todayStr(); // "2026-09-30"
+      const backupKey = "joassam_last_backup_date_" + DATA_DOC;
+      const lastBackupDate = localStorage.getItem(backupKey) || "";
+      if (lastBackupDate !== today) {
+        const custArr2 = data.customers || [];
+        const ordArr2 = data.orders || [];
+        const prodArr2 = data.products || [];
+        const vendArr2 = data.vendors || [];
+        // 데이터가 있을 때만 백업
+        if (custArr2.length > 0 || ordArr2.length > 0 || prodArr2.length > 0) {
+          const backupDocId = (IS_TEST ? "test_backup_" : "backup_") + today;
+          fbDb.collection("stores").doc(backupDocId).set({
+            customers: custArr2,
+            orders: ordArr2.slice(0, 400), // 최근 400건만 (용량 절약)
+            products: prodArr2,
+            vendors: vendArr2,
+            invoices: data.invoices || [],
+            backedUpAt: nowStamp()
+          }).then(() => {
+            localStorage.setItem(backupKey, today);
+          }).catch(() => {});
+        }
+      }
+    } catch (e) {}
     const ordersArr = data.orders || [];
     const custArr = data.customers || [];
     const mainPayload = __spreadValues({}, data);
