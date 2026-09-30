@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 199;
+const APP_VERSION = 200;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2066,7 +2066,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v199 (critical: customer data loss fix - empty array guard in applyCustomersArray + fetchChunks null)";
+const APP_BUILD = "v200 (restore fix: immediate save + justSubmittedRef + empty backup warn + data guard)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -15426,10 +15426,21 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         return;
       }
       const data = snap.data();
-      if (data.customers) setCustomers(data.customers);
-      if (data.products) setProducts(data.products);
-      if (data.vendors) setVendors(data.vendors);
-      if (data.orders) setOrders(data.orders);
+      const custList = Array.isArray(data.customers) ? data.customers : [];
+      const vendList = Array.isArray(data.vendors) ? data.vendors : [];
+      const prodList = Array.isArray(data.products) ? data.products : [];
+      const ordList = Array.isArray(data.orders) ? data.orders : [];
+      // 복구 전 확인
+      if (custList.length === 0 && vendList.length === 0 && prodList.length === 0) {
+        fireToast(`\uC774 \uBC31\uC5C5(${dateStr})\uC5D0\uB294 \uACE0\uAC1D/\uC5C5\uCCB4/\uC0C1\uD488 \uB370\uC774\uD130\uAC00 \uC5C6\uC5B4\uC694. \uB2E4\uB978 \uB0A0\uC9DC\uB97C \uC120\uD0DD\uD574\uC8FC\uC138\uC694`);
+        return;
+      }
+      // 복구 적용
+      justSubmittedRef.current = true;
+      if (custList.length > 0) setCustomers(custList);
+      if (prodList.length > 0) setProducts(prodList);
+      if (vendList.length > 0) setVendors(vendList);
+      if (ordList.length > 0) setOrders(ordList);
       if (data.invoices) setInvoices(data.invoices);
       if (data.supplier) setSupplier(data.supplier);
       if (data.subscriptions) setSubscriptions(data.subscriptions);
@@ -15441,10 +15452,22 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
       if (data.customerTemplate) setCustomerTemplate(data.customerTemplate);
       if (data.productTemplate) setProductTemplate(data.productTemplate);
       if (data.courierTemplates) setCourierTemplates(data.courierTemplates);
-      lastGoodDataRef.current = { customers: data.customers, orders: data.orders, products: data.products, vendors: data.vendors };
-      fireToast(`${dateStr} \uBC31\uC5C5\uC73C\uB85C \uBCF5\uC6D0\uD588\uC5B4\uC694. \uC7A0\uC2DC \uD6C4 \uBAA9\uB85D\uC744 \uD655\uC778\uD574\uC8FC\uC138\uC694`);
+      // lastGoodDataRef 업데이트 (저장 guard 통과 보장)
+      lastGoodDataRef.current = {
+        customers: custList,
+        orders: ordList,
+        products: prodList,
+        vendors: vendList
+      };
+      // 복구 데이터를 Firebase에 즉시 저장 (onSnapshot이 다시 덮어씌우기 전에)
+      setTimeout(() => {
+        if (pendingSaveDataRef.current) {
+          flushSaveNow();
+        }
+      }, 1500);
+      fireToast(`✅ ${dateStr} \uBC31\uC5C5\uC73C\uB85C \uBCF5\uC6D0\uD588\uC5B4\uC694 (\uACE0\uAC1D ${custList.length}\uBA85 \uB4F1 \uC800\uC7A5 \uC911...)`);
     } catch (e) {
-      fireToast("\uBCF5\uC6D0 \uC911 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD588\uC5B4\uC694. \uC7A0\uC2DC \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD574\uC8FC\uC138\uC694");
+      fireToast("\uBCF5\uC6D0 \uC911 \uC624\uB958\uAC00 \uBC1C\uC0DD\uD588\uC5B4\uC694: " + (e && e.message || e));
     }
   }
   function exportBackup() {
