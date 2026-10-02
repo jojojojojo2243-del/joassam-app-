@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 201;
+const APP_VERSION = 202;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2066,7 +2066,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v201 (auto daily backup restored + oarch chunks loaded + customer data guard)";
+const APP_BUILD = "v202 (applyVendorsArray+applyProductsArray added + all load paths use apply fns + data guard)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11592,12 +11592,12 @@ function App() {
         if (data) {
           if (data.appName) setAppName(data.appName);
           if (data.appLogo) setAppLogo(data.appLogo);
-          if (data.customers) setCustomers(data.customers);
-          if (data.products) setProducts(data.products);
-          if (data.vendors) setVendors(data.vendors);
+          if (data.customers && data.customers.length > 0) applyCustomersArray(data.customers);
+          if (data.products && data.products.length > 0) applyProductsArray(data.products);
+          if (data.vendors && data.vendors.length > 0) applyVendorsArray(data.vendors);
           if (data.invoices) setInvoices(data.invoices);
           if (data.supplier) setSupplier(data.supplier);
-          if (data.orders) setOrders(data.orders);
+          if (data.orders && data.orders.length > 0) applyOrdersArray(data.orders);
           if (data.subscriptions) setSubscriptions(data.subscriptions);
         }
         const mem = await sharedGet("store-members");
@@ -11607,12 +11607,12 @@ function App() {
         if (local) {
           if (local.appName) setAppName(local.appName);
           if (local.appLogo) setAppLogo(local.appLogo);
-          if (local.customers) setCustomers(local.customers);
-          if (local.products) setProducts(local.products);
-          if (local.vendors) setVendors(local.vendors);
+          if (local.customers && local.customers.length > 0) applyCustomersArray(local.customers);
+          if (local.products && local.products.length > 0) applyProductsArray(local.products);
+          if (local.vendors && local.vendors.length > 0) applyVendorsArray(local.vendors);
           if (local.invoices) setInvoices(local.invoices);
           if (local.supplier) setSupplier(local.supplier);
-          if (local.orders) setOrders(local.orders);
+          if (local.orders && local.orders.length > 0) applyOrdersArray(local.orders);
           if (local.members) setMembers(local.members);
           if (local.subscriptions) setSubscriptions(local.subscriptions);
           if (local.integrations) setIntegrations(local.integrations);
@@ -11678,18 +11678,36 @@ function App() {
   }
   function applyCustomersArray(arr) {
     const list = Array.isArray(arr) ? arr : [];
-    // 빈 배열이면 기존 데이터 보호 (lastGoodDataRef에 고객이 있으면 덮어쓰지 않음)
     if (list.length === 0) {
       const prevGood = lastGoodDataRef.current;
       const prevCount = prevGood && prevGood.customers ? prevGood.customers.length : 0;
-      if (prevCount > 0) {
-        // 이전에 고객이 있었는데 빈 배열이 오면 무시
-        return;
-      }
+      if (prevCount > 0) return; // 이전에 고객 있었으면 빈배열 무시
     }
     setCustomers(list);
     lastGoodDataRef.current = __spreadProps(__spreadValues({}, lastGoodDataRef.current || {}), { customers: list });
     recordCounts({ customers: list.length });
+  }
+  function applyVendorsArray(arr) {
+    const list = Array.isArray(arr) ? arr : [];
+    if (list.length === 0) {
+      const prevGood = lastGoodDataRef.current;
+      const prevCount = prevGood && prevGood.vendors ? prevGood.vendors.length : 0;
+      if (prevCount > 0) return; // 이전에 업체 있었으면 빈배열 무시
+    }
+    setVendors(list);
+    lastGoodDataRef.current = __spreadProps(__spreadValues({}, lastGoodDataRef.current || {}), { vendors: list });
+    recordCounts({ vendors: list.length });
+  }
+  function applyProductsArray(arr) {
+    const list = Array.isArray(arr) ? arr : [];
+    if (list.length === 0) {
+      const prevGood = lastGoodDataRef.current;
+      const prevCount = prevGood && prevGood.products ? prevGood.products.length : 0;
+      if (prevCount > 5) return; // 5건 이상이면 빈배열 무시
+    }
+    setProducts(list);
+    lastGoodDataRef.current = __spreadProps(__spreadValues({}, lastGoodDataRef.current || {}), { products: list });
+    recordCounts({ products: list.length });
   }
   useEffect(() => {
     if (!firebaseReady) return;
@@ -11712,10 +11730,8 @@ function App() {
             const data = snap.data();
             if (data.appName) setAppName(data.appName);
             if (data.appLogo) setAppLogo(data.appLogo);
-            if (data.products && data.products.length > 0) setProducts(data.products);
-            else if (data.products && data.products.length === 0 && !lastGoodDataRef.current) setProducts([]);
-            if (data.vendors && data.vendors.length > 0) setVendors(data.vendors);
-            else if (data.vendors && data.vendors.length === 0 && !lastGoodDataRef.current) setVendors([]);
+            if (data.products) applyProductsArray(data.products);
+            if (data.vendors) applyVendorsArray(data.vendors);
             if (data.invoices) setInvoices(data.invoices);
             if (data.supplier) setSupplier(data.supplier);
             const hasManifest = typeof data.ordersChunkCount === "number" || typeof data.customersChunkCount === "number";
@@ -11760,13 +11776,7 @@ function App() {
             if (data.productTemplate) setProductTemplate(data.productTemplate);
             if (data.courierTemplates) setCourierTemplates(data.courierTemplates);
             // fbFirstLoadRef는 hasManifest 분기에서 이미 설정됨 — 여기서 중복 설정 제거
-            const prevGood = lastGoodDataRef.current || {};
-            lastGoodDataRef.current = __spreadProps(__spreadValues({}, prevGood), {
-              products: (data.products && data.products.length > 0) ? data.products : prevGood.products,
-              vendors: (data.vendors && data.vendors.length > 0) ? data.vendors : prevGood.vendors,
-              orders: prevGood.orders,
-              customers: prevGood.customers
-            });
+            // products/vendors는 applyProductsArray/applyVendorsArray에서 lastGoodDataRef 갱신됨
             recordCounts({ products: (data.products || []).length, vendors: (data.vendors || []).length });
             try {
               const storedMinVersion = data.appMinVersion || 0;
