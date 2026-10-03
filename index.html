@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 203;
+const APP_VERSION = 204;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2066,7 +2066,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v203 (save alert system: bell badge + alert panel + firebase error + data block notifications)";
+const APP_BUILD = "v204 (mergeDuplicateCustomers: 3-tier safe/review/skip + name normalize + best name select)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -14245,58 +14245,104 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
   }
   function mergeDuplicateCustomers() {
     const digitsOf = (p) => String(p || "").replace(/[^0-9]/g, "");
-    const keyOf = (c) => {
-      const nm = (c.name || "").replace(/\s/g, "");
-      const ph = digitsOf(c.phone);
-      if (nm && ph.length >= 4) return "K|" + nm + "|" + ph.slice(-4);
-      if (ph.length >= 9) return "P|" + ph;
-      return "U|" + c.id;
-    };
-    const groups = {};
+    // 이름 정규화: 마스킹·호칭·별명·괄호 제거
+    const normName = (n) => String(n || "").replace(/\s/g, "").replace(/[\*△▲◆◇○●□■]/g, "").replace(/\(.*?\)/g, "").replace(/(님|씨|형|누나|오빠|언니|대표|사장|선생|회장|고객)$/g, "").trim();
+
+    // 전화번호 기준 그룹핑
+    const phoneGroups = {};
+    const noPhoneList = [];
     customers.forEach((c) => {
-      const k = keyOf(c);
-      (groups[k] = groups[k] || []).push(c);
+      const ph = digitsOf(c.phone);
+      if (ph.length >= 10) {
+        (phoneGroups[ph] = phoneGroups[ph] || []).push(c);
+      } else {
+        noPhoneList.push(c);
+      }
     });
-    const allGroups = Object.keys(groups).map((k) => groups[k]);
-    const dupGroups = allGroups.filter((g) => g.length > 1);
-    if (dupGroups.length === 0) {
-      fireToast("\uC911\uBCF5\uB41C \uACE0\uAC1D\uC774 \uC5C6\uC5B4\uC694. \uC774\uBBF8 \uAE54\uB054\uD574\uC694");
+
+    // 그룹 분류: ①같은이름 ②비슷한이름 ③다른이름
+    const safeGroups = [];    // 자동 합치기 가능
+    const reviewGroups = [];  // 확인 후 합치기
+    const skipGroups = [];    // 건너뜀 (다른 사람일 수 있음)
+    const singleGroups = [];  // 중복 없음
+
+    Object.values(phoneGroups).forEach((g) => {
+      if (g.length === 1) { singleGroups.push(g); return; }
+      const norms = g.map((c) => normName(c.name));
+      const uniqueNorms = new Set(norms.filter(Boolean));
+      if (uniqueNorms.size <= 1) {
+        safeGroups.push(g);
+      } else if (uniqueNorms.size === 2) {
+        reviewGroups.push(g);
+      } else {
+        skipGroups.push(g);
+      }
+    });
+
+    const safeRemove = safeGroups.reduce((s, g) => s + g.length - 1, 0);
+    const reviewRemove = reviewGroups.reduce((s, g) => s + g.length - 1, 0);
+    const skipRemove = skipGroups.reduce((s, g) => s + g.length - 1, 0);
+    const totalRemove = safeRemove + reviewRemove;
+    const afterCount = customers.length - totalRemove;
+
+    if (safeGroups.length === 0 && reviewGroups.length === 0) {
+      fireToast("\uC911\uBCF5\uB41C \uACE0\uAC1D\uC774 \uC5C6\uC5B4\uC694 \u2014 \uC774\uBBF8 \uAE54\uB054\uD558\uAC8C \uC815\uB9AC\uB418\uC5B4 \uC788\uC5B4\uC694");
       return;
     }
-    let removedCount = 0;
-    dupGroups.forEach((g) => {
-      removedCount += g.length - 1;
-    });
-    const afterCount = customers.length - removedCount;
-    askConfirm(`\uC911\uBCF5 \uACE0\uAC1D ${dupGroups.length}\uBB36\uC74C\uC744 \uC815\uB9AC\uD574\uC11C ${customers.length}\uBA85 \u2192 ${afterCount}\uBA85\uC73C\uB85C \uD569\uCE60\uAE4C\uC694?
-(\uAC19\uC740 \uC774\uB984+\uC804\uD654 \uB4B74\uC790\uB9AC, \uB610\uB294 \uAC19\uC740 \uBC88\uD638\uB07C\uB9AC \uD569\uCCD0\uC694. \uC8FC\uBB38\uC740 \uB300\uD45C \uACE0\uAC1D\uC73C\uB85C \uC790\uB3D9 \uC5F0\uACB0\uB3FC\uC694. \uBA3C\uC800 "\uC8FC\uBB38\uBC31\uC5C5 \uB2E4\uC6B4\uB85C\uB4DC"\uB85C \uBC31\uC5C5\uD574\uB450\uC2DC\uAE38 \uAD8C\uD574\uC694)`, () => {
-      const idRemap = {};
-      const keepList = [];
-      allGroups.forEach((g) => {
-        if (g.length === 1) {
-          keepList.push(g[0]);
-          return;
+
+    askConfirm(
+      `\uC911\uBCF5 \uACE0\uAC1D \uC815\uB9AC\n\n` +
+      `\u2460 \uC548\uC804 (\uAC19\uC740 \uC774\uB984): ${safeGroups.length}\uADF8\uB8F9 ${safeRemove}\uBA85 \uC81C\uAC70\n` +
+      `\u2461 \uD655\uC778 \uD6C4 (\uBE44\uC2B7\uD55C \uC774\uB984): ${reviewGroups.length}\uADF8\uB8F9 ${reviewRemove}\uBA85 \uC81C\uAC70\n` +
+      `\u2462 \uAC74\uB108\uB700 (\uB2E4\uB978 \uC774\uB984 \uACF5\uC720\uD3F0): ${skipGroups.length}\uADF8\uB8F9\n\n` +
+      `${customers.length}\uBA85 \u2192 ${afterCount}\uBA85\uC73C\uB85C \uC815\uB9AC\uD569\uB2C8\uB2E4.\n` +
+      `(\uBA3C\uC800 \uBC31\uC5C5\uC744 \uAD8C\uC7A5\uD569\uB2C8\uB2E4)`,
+      () => {
+        const idRemap = {};
+        const keepList = [];
+
+        // 합치기 함수
+        const mergeGroup = (g) => {
+          const scored = g.map((c) => ({ c, n: customerOrderCounts(c, orders).d365, hasAddr: (c.address || "").trim() ? 1 : 0, nameLen: normName(c.name).length }));
+          scored.sort((a, b) => b.n - a.n || b.hasAddr - a.hasAddr || b.nameLen - a.nameLen);
+          const primary = __spreadValues({}, scored[0].c);
+          // 가장 깔끔한 이름으로 교체 (마스킹 없는 것 우선)
+          const bestName = scored.map((s) => s.c.name || "").filter((nm) => nm && !nm.includes("*") && !nm.includes("△")).sort((a, b) => a.length - b.length)[0];
+          if (bestName) primary.name = bestName;
+          for (let i = 1; i < scored.length; i++) {
+            const dup = scored[i].c;
+            idRemap[dup.id] = primary.id;
+            if (!(primary.address || "").trim() && (dup.address || "").trim()) primary.address = dup.address;
+            if (!(primary.postalCode || "").trim() && (dup.postalCode || "").trim()) primary.postalCode = dup.postalCode;
+            if (!(primary.phone || "").trim() && (dup.phone || "").trim()) primary.phone = dup.phone;
+            const pm = (primary.memo || "").trim();
+            const dm = (dup.memo || "").trim();
+            if (dm && pm.indexOf(dm) === -1) primary.memo = pm ? pm + " / " + dm : dm;
+          }
+          keepList.push(primary);
+        };
+
+        // 안전 그룹 + 확인 그룹 합치기
+        [...safeGroups, ...reviewGroups].forEach(mergeGroup);
+
+        // 단일 + 건너뜀 그룹은 그대로
+        singleGroups.forEach((g) => keepList.push(g[0]));
+        skipGroups.forEach((g) => g.forEach((c) => keepList.push(c)));
+        noPhoneList.forEach((c) => keepList.push(c));
+
+        const newOrders = orders.map((o) => o && o.customerId && idRemap[o.customerId] ? __spreadProps(__spreadValues({}, o), { customerId: idRemap[o.customerId] }) : o);
+        justSubmittedRef.current = true;
+        setCustomers(keepList);
+        setOrders(newOrders);
+        fireToast(`\u2705 \uC911\uBCF5 \uC815\uB9AC \uC644\uB8CC \u2014 ${totalRemove}\uBA85 \uC81C\uAC70 (${afterCount}\uBA85 \uB0A8\uC74C). \uACF5\uC720\uD3F0 \uC758\uC2EC ${skipGroups.length}\uADF8\uB8F9\uC740 \uBCF4\uC874\uB418\uC5C8\uC5B4\uC694.`);
+        if (skipGroups.length > 0) {
+          pushSaveAlert("info", `\uACF5\uC720\uD3F0/\uAC00\uC871 ${skipGroups.length}\uADF8\uB8F9\uC740 \uC790\uB3D9 \uD569\uCE58\uB97C \uAC74\uB108\uB700\uC5B4\uC694`,
+            skipGroups.slice(0, 5).map((g) => g.map((c) => c.name).join(" / ")).join("\n")
+          );
         }
-        const scored = g.map((c) => ({ c, n: customerOrderCounts(c, orders).d365, hasAddr: (c.address || "").trim() ? 1 : 0 }));
-        scored.sort((a, b) => b.n - a.n || b.hasAddr - a.hasAddr || String(b.c.phone || "").length - String(a.c.phone || "").length);
-        const primary = __spreadValues({}, scored[0].c);
-        for (let i = 1; i < scored.length; i++) {
-          const dup = scored[i].c;
-          idRemap[dup.id] = primary.id;
-          if (!(primary.address || "").trim() && (dup.address || "").trim()) primary.address = dup.address;
-          if (!(primary.postalCode || "").trim() && (dup.postalCode || "").trim()) primary.postalCode = dup.postalCode;
-          if (!(primary.phone || "").trim() && (dup.phone || "").trim()) primary.phone = dup.phone;
-          const pm = (primary.memo || "").trim();
-          const dm = (dup.memo || "").trim();
-          if (dm && pm.indexOf(dm) === -1) primary.memo = pm ? pm + " / " + dm : dm;
-        }
-        keepList.push(primary);
-      });
-      const newOrders = orders.map((o) => o && o.customerId && idRemap[o.customerId] ? __spreadProps(__spreadValues({}, o), { customerId: idRemap[o.customerId] }) : o);
-      setCustomers(keepList);
-      setOrders(newOrders);
-      fireToast(`\uC911\uBCF5 \uC815\uB9AC \uC644\uB8CC \u2014 ${removedCount}\uBA85\uC744 \uD569\uCCE4\uC5B4\uC694 (${afterCount}\uBA85 \uB0A8\uC74C)`);
-    }, "\uD569\uCE58\uAE30");
+      },
+      "\uD569\uCE58\uAE30"
+    );
   }
   function createVoiceOrder(vo) {
     if (!vo || !vo.name || !vo.items || !vo.items.length) return null;
