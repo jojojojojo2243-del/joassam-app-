@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 202;
+const APP_VERSION = 203;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2066,7 +2066,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v202 (applyVendorsArray+applyProductsArray added + all load paths use apply fns + data guard)";
+const APP_BUILD = "v203 (save alert system: bell badge + alert panel + firebase error + data block notifications)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -10904,6 +10904,21 @@ function App() {
   const lastUndoRef = useRef(null);
   const lastCreatedRef = useRef(null);
   const [newOrderAlert, setNewOrderAlert] = useState(0);
+  const [saveAlerts, setSaveAlerts] = useState([]); // 저장 오류 알림 목록
+  const [showSaveAlerts, setShowSaveAlerts] = useState(false);
+  function pushSaveAlert(type, msg, detail) {
+    const alert = {
+      id: Date.now() + Math.random(),
+      type, // 'error'|'warn'|'info'
+      msg,
+      detail: detail || "",
+      at: new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+      read: false
+    };
+    setSaveAlerts(prev => [alert, ...prev].slice(0, 50)); // 최대 50개
+    // 오류 타입은 진단 로그에도 기록
+    if (type === "error") logDiag("save_alert_" + type, { msg, detail: String(detail || "").slice(0, 200) });
+  }
   const sessionIdRef = useRef("s_" + Math.random().toString(36).slice(2, 10));
   const sessionStartRef = useRef(Date.now());
   const [diagLog, setDiagLog] = useState(null);
@@ -11681,7 +11696,10 @@ function App() {
     if (list.length === 0) {
       const prevGood = lastGoodDataRef.current;
       const prevCount = prevGood && prevGood.customers ? prevGood.customers.length : 0;
-      if (prevCount > 0) return; // 이전에 고객 있었으면 빈배열 무시
+      if (prevCount > 0) {
+        pushSaveAlert("warn", "⚠️ 고객 데이터 빈배열 차단", `Firebase에서 고객 0건이 왔지만 기존 ${prevCount}명을 보호했어요`);
+        return;
+      }
     }
     setCustomers(list);
     lastGoodDataRef.current = __spreadProps(__spreadValues({}, lastGoodDataRef.current || {}), { customers: list });
@@ -11692,7 +11710,10 @@ function App() {
     if (list.length === 0) {
       const prevGood = lastGoodDataRef.current;
       const prevCount = prevGood && prevGood.vendors ? prevGood.vendors.length : 0;
-      if (prevCount > 0) return; // 이전에 업체 있었으면 빈배열 무시
+      if (prevCount > 0) {
+        pushSaveAlert("warn", "⚠️ 업체 데이터 빈배열 차단", `Firebase에서 업체 0건이 왔지만 기존 ${prevCount}개를 보호했어요`);
+        return;
+      }
     }
     setVendors(list);
     lastGoodDataRef.current = __spreadProps(__spreadValues({}, lastGoodDataRef.current || {}), { vendors: list });
@@ -11703,7 +11724,10 @@ function App() {
     if (list.length === 0) {
       const prevGood = lastGoodDataRef.current;
       const prevCount = prevGood && prevGood.products ? prevGood.products.length : 0;
-      if (prevCount > 5) return; // 5건 이상이면 빈배열 무시
+      if (prevCount > 5) {
+        pushSaveAlert("warn", "⚠️ 상품 데이터 빈배열 차단", `Firebase에서 상품 0건이 왔지만 기존 ${prevCount}개를 보호했어요`);
+        return;
+      }
     }
     setProducts(list);
     lastGoodDataRef.current = __spreadProps(__spreadValues({}, lastGoodDataRef.current || {}), { products: list });
@@ -11806,8 +11830,13 @@ function App() {
           }
           setDataLoaded(true);
         },
-        () => {
+        (err) => {
           setDataLoaded(true);
+          pushSaveAlert("error",
+            "🚨 Firebase 연결 오류 — 데이터를 불러오지 못했습니다",
+            `오류: ${String(err && err.message || err).slice(0, 150)}\n→ 인터넷 연결을 확인해주세요\n→ 저장된 데이터는 기기 내에 안전합니다\n→ 새로고침하면 다시 연결을 시도합니다`
+          );
+          fireToast("🚨 Firebase 연결 오류 — 벨 아이콘을 눌러 상세 확인");
         }
       );
       const memRef = fbDb.collection("stores").doc(MEMBERS_DOC);
@@ -11893,9 +11922,17 @@ function App() {
     } catch (e) {}
     const guard = evaluateSaveGuard({ current: { customers: data.customers, orders: data.orders, products: data.products, vendors: data.vendors }, prev: lastGoodDataRef.current, storedFloor });
     if (guard.blocked) {
-      fireToast("⚠ 데이터가 비어있는 상태로 감지되어 저장을 막았어요. 새로고침 후 다시 확인해주세요");
+      fireToast("⚠ 데이터 소실 위험 감지 — 저장을 막았어요. 알림창을 확인해주세요");
+      const cur = { 고객: (data.customers||[]).length, 주문: (data.orders||[]).length, 상품: (data.products||[]).length, 업체: (data.vendors||[]).length };
+      const prev2 = lastGoodDataRef.current || {};
+      const prevC = { 고객: (prev2.customers||[]).length, 주문: (prev2.orders||[]).length, 상품: (prev2.products||[]).length, 업체: (prev2.vendors||[]).length };
+      pushSaveAlert("error",
+        "🚨 데이터 소실 위험으로 저장 차단됨",
+        `원인: ${guard.reason}\n현재: 고객${cur.고객}명 주문${cur.주문}건 상품${cur.상품}개 업체${cur.업체}개\n직전: 고객${prevC.고객}명 주문${prevC.주문}건 상품${prevC.상품}개 업체${prevC.업체}개\n→ 앱을 새로고침하거나 ☰메뉴 → 전체 백업 목록에서 복구하세요`
+      );
       logDiag("blocked_" + guard.reason, {
-        prevCounts: lastGoodDataRef.current ? { customers: (lastGoodDataRef.current.customers || []).length, orders: (lastGoodDataRef.current.orders || []).length, products: (lastGoodDataRef.current.products || []).length, vendors: (lastGoodDataRef.current.vendors || []).length } : null,
+        prevCounts: prevC,
+        curCounts: cur,
         storedCounts: storedFloor
       });
       return;
@@ -11945,12 +11982,15 @@ function App() {
       try { logDiag("save_failed", { msg: String(err && err.message || err).slice(0, 140), retry: retryCount }); } catch (e) {}
       if (retryCount < MAX_RETRY) {
         retryCount++;
-        const delay = retryCount * 3000; // 3초, 6초, 9초 간격으로 재시도
-        try { fireToast(`⚠️ 저장 실패 — ${delay / 1000}초 후 재시도합니다 (${retryCount}/${MAX_RETRY})`); } catch (e) {}
+        const delay = retryCount * 3000;
+        try { fireToast(`⚠️ 저장 실패 — ${delay / 1000}초 후 재시도 (${retryCount}/${MAX_RETRY})`); } catch (e) {}
+        pushSaveAlert("warn", `⚠️ 저장 실패 재시도 중 (${retryCount}/${MAX_RETRY})`, String(err && err.message || err).slice(0, 150));
         setTimeout(doSave, delay);
       } else {
-        try { fireToast("❌ 저장 실패 — 인터넷 연결을 확인하고 앱을 새로고침해주세요. 데이터는 안전합니다."); } catch (e) {}
-        // 버그1 수정: 최종 실패 시 pendingSaveData에 다시 넣어서 다음 저장 시 포함되도록
+        try { fireToast("❌ 저장 최종 실패 — 인터넷 연결 확인 후 새로고침해주세요"); } catch (e) {}
+        pushSaveAlert("error", "❌ 저장 최종 실패 — 데이터가 저장되지 않았습니다",
+          `오류: ${String(err && err.message || err).slice(0, 150)}\n→ 인터넷 연결을 확인하고 앱을 새로고침해주세요\n→ 데이터는 기기 내에 임시 보관됩니다`
+        );
         pendingSaveDataRef.current = data;
       }
     };
@@ -11989,9 +12029,12 @@ function App() {
         });
         return fbDb.collection("stores").doc(DATA_DOC).set(mainWrite, { merge: true }).then(() => {
           lastMainHashRef.current = mainHash;
-          // 버그6 수정: 메인 문서 저장 성공 즉시 lastGoodDataRef 업데이트
           lastGoodDataRef.current = { customers: custArr, orders: ordersArr, products: data.products, vendors: data.vendors };
           recordCounts({ customers: custArr.length, orders: ordersArr.length, products: (data.products || []).length, vendors: (data.vendors || []).length });
+          // 저장 성공 알림 (최초 1회 또는 이전에 오류가 있었을 때만)
+          if (retryCount > 0) {
+            pushSaveAlert("info", `✅ 저장 성공 (재시도 ${retryCount}회 후)`, `고객 ${custArr.length}명 · 주문 ${ordersArr.length}건 · 상품 ${(data.products||[]).length}개 · 업체 ${(data.vendors||[]).length}개`);
+          }
         });
       }).then(() => {
         // 버그2 수정: 메인 문서 저장 완료 후에만 구 청크 삭제
@@ -15603,7 +15646,39 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
     return /* @__PURE__ */ React.createElement(PendingApprovalScreen, { nickname, onLogout: handleLogout, appName });
   }
   const mobileTabTitle = { home: "HOME", orders: "\uC8FC\uBB38", products: "\uC0C1\uD488", integrations: "\uC1FC\uD551\uBAB0 \uC5F0\uB3D9", new: "\uC8FC\uBB38 \uC785\uB825" }[tab];
-  return /* @__PURE__ */ React.createElement("div", { style: { minHeight: "100vh", background: isDesktop ? "#E2E4DD" : "#EDEEE8", display: "flex", justifyContent: "center", alignItems: isDesktop ? "flex-start" : "stretch", padding: isDesktop ? "32px 0" : "24px 0", boxSizing: "border-box", fontFamily: FONT } }, newOrderAlert > 0 && /* @__PURE__ */ React.createElement(
+  const unreadAlerts = saveAlerts.filter(a => !a.read).length;
+  const errorAlerts = saveAlerts.filter(a => a.type === "error" && !a.read).length;
+  return /* @__PURE__ */ React.createElement("div", { style: { minHeight: "100vh", background: isDesktop ? "#E2E4DD" : "#EDEEE8", display: "flex", justifyContent: "center", alignItems: isDesktop ? "flex-start" : "stretch", padding: isDesktop ? "32px 0" : "24px 0", boxSizing: "border-box", fontFamily: FONT } },
+  /* 저장 알림 패널 */
+  showSaveAlerts && /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, zIndex: 99999, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "flex-end" }, onClick: () => setShowSaveAlerts(false) },
+    /* @__PURE__ */ React.createElement("div", { onClick: e => e.stopPropagation(), style: { width: "100%", maxWidth: 480, margin: "0 auto", background: "#fff", borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: "75vh", display: "flex", flexDirection: "column" } },
+      /* 헤더 */
+      /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 18px 12px", borderBottom: "1px solid #E2E4DD" } },
+        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 16, fontWeight: 800 } }, "🔔 저장 오류 알림"),
+        /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8 } },
+          /* @__PURE__ */ React.createElement("button", { onClick: () => setSaveAlerts(prev => prev.map(a => ({...a, read: true}))), style: { fontSize: 12, color: "#5F5E5A", background: "none", border: "1px solid #E2E4DD", borderRadius: 6, padding: "4px 8px", cursor: "pointer" } }, "모두 읽음"),
+          /* @__PURE__ */ React.createElement("button", { onClick: () => { setSaveAlerts([]); setShowSaveAlerts(false); }, style: { fontSize: 12, color: "#A32D2D", background: "none", border: "1px solid #F5C2C2", borderRadius: 6, padding: "4px 8px", cursor: "pointer" } }, "전체 삭제"),
+          /* @__PURE__ */ React.createElement("button", { onClick: () => setShowSaveAlerts(false), style: { fontSize: 18, background: "none", border: "none", cursor: "pointer", color: "#5F5E5A" } }, "×")
+        )
+      ),
+      /* 알림 목록 */
+      /* @__PURE__ */ React.createElement("div", { style: { overflowY: "auto", flex: 1, padding: "8px 0" } },
+        saveAlerts.length === 0
+          ? /* @__PURE__ */ React.createElement("div", { style: { padding: "32px 0", textAlign: "center", color: "#888780", fontSize: 14 } }, "✅ 저장 오류가 없습니다")
+          : saveAlerts.map(alert =>
+            /* @__PURE__ */ React.createElement("div", { key: alert.id, onClick: () => setSaveAlerts(prev => prev.map(a => a.id === alert.id ? {...a, read: true} : a)),
+              style: { padding: "12px 18px", borderBottom: "1px solid #F1F2EC", background: alert.read ? "#fff" : alert.type === "error" ? "#FFF5F5" : "#FFFBF0", cursor: "pointer" } },
+              /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 4 } },
+                /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: alert.type === "error" ? "#A32D2D" : alert.type === "warn" ? "#8B6914" : "#2F6F4E" } }, alert.msg),
+                /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#888780", flexShrink: 0, marginLeft: 8 } }, alert.at)
+              ),
+              alert.detail && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A", whiteSpace: "pre-line", lineHeight: 1.6, background: "#F7F8F4", borderRadius: 6, padding: "6px 8px", marginTop: 4 } }, alert.detail)
+            )
+          )
+      )
+    )
+  ),
+  newOrderAlert > 0 && /* @__PURE__ */ React.createElement(
     "div",
     {
       onClick: () => {
@@ -15654,7 +15729,10 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
     /* @__PURE__ */ React.createElement("div", { style: { padding: "14px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", background: "#2F6F4E" } }, /* @__PURE__ */ React.createElement("button", { onClick: () => {
       refreshProblemNote();
       setSideMenuOpen(true);
-    }, style: iconBtnStyle }, "\u2630"), /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 700, fontSize: 16, color: "#fff" } }, mobileTabTitle), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 10 } }, tab === "orders" && /* @__PURE__ */ React.createElement("button", { onClick: () => setTab("new"), style: iconBtnStyle }, "\uFF0B"), /* @__PURE__ */ React.createElement("button", { onClick: () => fireToast("\uC0C8 \uC54C\uB9BC\uC774 \uC5C6\uC2B5\uB2C8\uB2E4"), style: iconBtnStyle }, "\u{1F514}"))),
+    }, style: iconBtnStyle }, "\u2630"), /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 700, fontSize: 16, color: "#fff" } }, mobileTabTitle), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 10 } }, tab === "orders" && /* @__PURE__ */ React.createElement("button", { onClick: () => setTab("new"), style: iconBtnStyle }, "\uFF0B"), /* @__PURE__ */ React.createElement("button", { onClick: () => { setShowSaveAlerts(true); setSaveAlerts(prev => prev.map(a => ({...a, read: true}))); }, style: { ...iconBtnStyle, position: "relative" } },
+  "\u{1F514}",
+  unreadAlerts > 0 && /* @__PURE__ */ React.createElement("span", { style: { position: "absolute", top: -4, right: -4, minWidth: 16, height: 16, borderRadius: 8, background: errorAlerts > 0 ? "#D14343" : "#E8A020", color: "#fff", fontSize: 10, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px" } }, unreadAlerts > 9 ? "9+" : unreadAlerts)
+))),
     /* @__PURE__ */ React.createElement("div", { style: { padding: "16px 16px 16px", maxWidth: "none", flex: 1, overflowY: "auto", WebkitOverflowScrolling: "touch" } }, tab === "home" && /* @__PURE__ */ React.createElement(HomeTab, { appName, orders, counts, customerMap, productMap, orderTotal, exportBackup, importBackup, backupInputRef, fireToast, setTab, members, nickname, onSelectOrder: (id) => {
       setTab("orders");
       setSelectedOrderId(id);
