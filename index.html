@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 209;
+const APP_VERSION = 210;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2070,7 +2070,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v209 (fix React#310 useMemo in JSX + storage bar on orders tab + storageInfo as state)";
+const APP_BUILD = "v210 (fix ReferenceError: storageInfo useMemo moved after orders/customers/vendors/products)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -10910,28 +10910,6 @@ function App() {
   const [newOrderAlert, setNewOrderAlert] = useState(0);
   const [saveAlerts, setSaveAlerts] = useState([]); // 저장 오류 알림 목록
   const [showSaveAlerts, setShowSaveAlerts] = useState(false);
-  const storageInfo = useMemo(() => {
-    try {
-      const sz = (obj) => new Blob([JSON.stringify(obj || [])]).size;
-      const ordSz = sz(orders);
-      const cusSz = sz(customers);
-      const vendSz = sz(vendors);
-      const prodSz = sz(products);
-      const totalBytes = ordSz + cusSz + vendSz + prodSz;
-      const FREE_LIMIT = 1024 * 1024 * 1024;
-      const pct = Math.min(100, Math.round(totalBytes / FREE_LIMIT * 100));
-      return {
-        totalMB: (totalBytes / 1024 / 1024).toFixed(1),
-        pct,
-        items: [
-          { label: "\uC8FC\uBB38", mb: (ordSz/1024/1024).toFixed(1), count: orders.length },
-          { label: "\uACE0\uAC1D", mb: (cusSz/1024/1024).toFixed(1), count: customers.length },
-          { label: "\uC5C5\uCCB4", mb: (vendSz/1024/1024).toFixed(1), count: vendors.length },
-          { label: "\uC0C1\uD488", mb: (prodSz/1024/1024).toFixed(1), count: products.length },
-        ]
-      };
-    } catch(e) { return null; }
-  }, [orders.length, customers.length, vendors.length, products.length]);
   function pushSaveAlert(type, msg, detail) {
     const alert = {
       id: Date.now() + Math.random(),
@@ -11614,6 +11592,28 @@ function App() {
   const [products, setProducts] = useState(firebaseReady ? [] : seedProducts);
   const [orders, setOrders] = useState(firebaseReady ? [] : seedOrders);
   const [vendors, setVendors] = useState(firebaseReady ? [] : seedVendors);
+  const storageInfo = useMemo(() => {
+    try {
+      const sz = (obj) => new Blob([JSON.stringify(obj || [])]).size;
+      const ordSz = sz(orders);
+      const cusSz = sz(customers);
+      const vendSz = sz(vendors);
+      const prodSz = sz(products);
+      const totalBytes = ordSz + cusSz + vendSz + prodSz;
+      const FREE_LIMIT = 1024 * 1024 * 1024;
+      const pct = Math.min(100, Math.round(totalBytes / FREE_LIMIT * 100));
+      return {
+        totalMB: (totalBytes / 1024 / 1024).toFixed(1),
+        pct,
+        items: [
+          { label: "\uC8FC\uBB38", mb: (ordSz/1024/1024).toFixed(1), count: orders.length },
+          { label: "\uACE0\uAC1D", mb: (cusSz/1024/1024).toFixed(1), count: customers.length },
+          { label: "\uC5C5\uCCB4", mb: (vendSz/1024/1024).toFixed(1), count: vendors.length },
+          { label: "\uC0C1\uD488", mb: (prodSz/1024/1024).toFixed(1), count: products.length },
+        ]
+      };
+    } catch(e) { return null; }
+  }, [orders.length, customers.length, vendors.length, products.length]);
   const [supplier, setSupplier] = useState(DEFAULT_SUPPLIER);
   const [invoices, setInvoices] = useState([]);
   const [subscriptions, setSubscriptions] = useState([]);
