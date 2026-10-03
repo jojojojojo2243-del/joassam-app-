@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 208;
+const APP_VERSION = 209;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2070,7 +2070,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v208 (realtime storage bar on home: MB usage + color coded progress bar + click for detail)";
+const APP_BUILD = "v209 (fix React#310 useMemo in JSX + storage bar on orders tab + storageInfo as state)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -10910,6 +10910,28 @@ function App() {
   const [newOrderAlert, setNewOrderAlert] = useState(0);
   const [saveAlerts, setSaveAlerts] = useState([]); // 저장 오류 알림 목록
   const [showSaveAlerts, setShowSaveAlerts] = useState(false);
+  const storageInfo = useMemo(() => {
+    try {
+      const sz = (obj) => new Blob([JSON.stringify(obj || [])]).size;
+      const ordSz = sz(orders);
+      const cusSz = sz(customers);
+      const vendSz = sz(vendors);
+      const prodSz = sz(products);
+      const totalBytes = ordSz + cusSz + vendSz + prodSz;
+      const FREE_LIMIT = 1024 * 1024 * 1024;
+      const pct = Math.min(100, Math.round(totalBytes / FREE_LIMIT * 100));
+      return {
+        totalMB: (totalBytes / 1024 / 1024).toFixed(1),
+        pct,
+        items: [
+          { label: "\uC8FC\uBB38", mb: (ordSz/1024/1024).toFixed(1), count: orders.length },
+          { label: "\uACE0\uAC1D", mb: (cusSz/1024/1024).toFixed(1), count: customers.length },
+          { label: "\uC5C5\uCCB4", mb: (vendSz/1024/1024).toFixed(1), count: vendors.length },
+          { label: "\uC0C1\uD488", mb: (prodSz/1024/1024).toFixed(1), count: products.length },
+        ]
+      };
+    } catch(e) { return null; }
+  }, [orders.length, customers.length, vendors.length, products.length]);
   function pushSaveAlert(type, msg, detail) {
     const alert = {
       id: Date.now() + Math.random(),
@@ -16049,28 +16071,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
     onSetSender: (name, phone) => {
       setDraft((prev) => __spreadProps(__spreadValues({}, prev), { sender: { name: name || "", phone: phone || "" } }));
     },
-    storageInfo: React.useMemo(() => {
-      try {
-        const sz = (obj) => new Blob([JSON.stringify(obj || [])]).size;
-        const ordSz = sz(orders);
-        const cusSz = sz(customers);
-        const vendSz = sz(vendors);
-        const prodSz = sz(products);
-        const totalBytes = ordSz + cusSz + vendSz + prodSz;
-        const FREE_LIMIT = 1024 * 1024 * 1024; // 1GB
-        const pct = Math.min(100, Math.round(totalBytes / FREE_LIMIT * 100));
-        return {
-          totalMB: (totalBytes / 1024 / 1024).toFixed(1),
-          pct,
-          items: [
-            { label: "\uC8FC\uBB38", mb: (ordSz/1024/1024).toFixed(1), count: orders.length },
-            { label: "\uACE0\uAC1D", mb: (cusSz/1024/1024).toFixed(1), count: customers.length },
-            { label: "\uC5C5\uCCB4", mb: (vendSz/1024/1024).toFixed(1), count: vendors.length },
-            { label: "\uC0C1\uD488", mb: (prodSz/1024/1024).toFixed(1), count: products.length },
-          ]
-        };
-      } catch(e) { return null; }
-    }, [orders.length, customers.length, vendors.length, products.length]),
+    storageInfo: storageInfo,
     checkFirestoreQuota
     }), tab === "orders" && !selectedOrder && !invoicePreview && /* @__PURE__ */ React.createElement(
       OrdersTab,
@@ -16166,7 +16167,9 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
           setSearchQuery("");
           setTab("new");
           fireToast(`"${name}"(\uC73C)\uB85C \uC0C8 \uC8FC\uBB38\uC744 \uC2DC\uC791\uD574\uC694. \uC800\uC7A5\uD558\uBA74 \uACE0\uAC1D\xB7\uC5C5\uCCB4\uB85C \uC790\uB3D9 \uB4F1\uB85D\uB3FC\uC694`);
-        }
+        },
+        storageInfo,
+        checkFirestoreQuota
       }
     ), tab === "orders" && !selectedOrder && invoicePreview && /* @__PURE__ */ React.createElement(InvoicePreview, { preview: invoicePreview, toggleRow: toggleInvoiceRow, onApply: applyInvoicePreview, onCancel: () => setInvoicePreview(null) }), tab === "orders" && selectedOrder && /* @__PURE__ */ React.createElement(
       OrderDetail,
@@ -18618,7 +18621,9 @@ function OrdersTab({
   onSetCheckedStatus,
   onExportVendorChecked,
   onSetCheckedBusiness,
-  onExportFiltered
+  onExportFiltered,
+  storageInfo,
+  checkFirestoreQuota
 }) {
   const allChecked = orders.length > 0 && orders.every((o) => checkedIds.has(o.id));
   const _dlFilterLabel = statusFilter && STATUS[statusFilter] ? STATUS[statusFilter].label : "\uC804\uCCB4";
@@ -18669,7 +18674,29 @@ function OrdersTab({
       }
     },
     "\uFF0B \uC0C8 \uC8FC\uBB38 \uC785\uB825"
-  ), /* @__PURE__ */ React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, marginBottom: 12 } }, /* @__PURE__ */ React.createElement(StatTile, { label: "\uC785\uAE08\uB300\uAE30", value: counts.waiting, color: "#993C1D", bg: "#FAECE7", active: statusFilter === "waiting", onClick: () => setStatusFilter(statusFilter === "waiting" ? "all" : "waiting") }), /* @__PURE__ */ React.createElement(StatTile, { label: "\uACB0\uC81C\uC644\uB8CC", value: counts.pending, color: "#854F0B", bg: "#FAEEDA", active: statusFilter === "pending", onClick: () => setStatusFilter(statusFilter === "pending" ? "all" : "pending") }), /* @__PURE__ */ React.createElement(StatTile, { label: "\uBC1C\uC1A1\uC900\uBE44", value: counts.ready, color: "#185FA5", bg: "#E6F1FB", active: statusFilter === "ready", onClick: () => setStatusFilter(statusFilter === "ready" ? "all" : "ready") }), /* @__PURE__ */ React.createElement(StatTile, { label: "\uBC1C\uC1A1\uC644\uB8CC", value: counts.shipped, color: "#27500A", bg: "#EAF3DE", active: statusFilter === "shipped", onClick: () => setStatusFilter(statusFilter === "shipped" ? "all" : "shipped") }), /* @__PURE__ */ React.createElement(StatTile, { label: "\uC804\uCCB4\uC8FC\uBB38", value: counts.all, color: "#5F5E5A", bg: "#EDEEE8", active: statusFilter === "all", onClick: () => setStatusFilter("all") })), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, background: "#fff", border: "1px solid #E2E4DD", borderRadius: 10, padding: "8px 12px", marginBottom: 10 } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#888780" } }, "\u{1F50D}"), /* @__PURE__ */ React.createElement(
+  ),
+  storageInfo && /* @__PURE__ */ React.createElement("div", {
+    onClick: checkFirestoreQuota,
+    style: { background: "#fff", border: "1px solid #E2E4DD", borderRadius: 10, padding: "8px 12px", marginBottom: 10, cursor: "pointer" }
+  },
+    /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 } },
+      /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: "#5F5E5A" } }, "\uD83D\uDCCA Firebase \uC6A9\uB7C9"),
+      /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11, fontWeight: 800, color: storageInfo.pct >= 95 ? "#D14343" : storageInfo.pct >= 85 ? "#E8A020" : "#2F6F4E" } },
+        `${storageInfo.totalMB}MB / 1,024MB (${storageInfo.pct}%)`
+      )
+    ),
+    /* @__PURE__ */ React.createElement("div", { style: { height: 6, background: "#F1F2EC", borderRadius: 3, overflow: "hidden" } },
+      /* @__PURE__ */ React.createElement("div", { style: {
+        height: "100%",
+        width: `${storageInfo.pct}%`,
+        minWidth: storageInfo.pct > 0 ? 4 : 0,
+        background: storageInfo.pct >= 95 ? "#D14343" : storageInfo.pct >= 85 ? "#E8A020" : "#2F6F4E",
+        borderRadius: 3,
+        transition: "width 0.5s"
+      } })
+    )
+  ),
+  /* @__PURE__ */ React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 6, marginBottom: 12 } }, /* @__PURE__ */ React.createElement(StatTile, { label: "\uC785\uAE08\uB300\uAE30", value: counts.waiting, color: "#993C1D", bg: "#FAECE7", active: statusFilter === "waiting", onClick: () => setStatusFilter(statusFilter === "waiting" ? "all" : "waiting") }), /* @__PURE__ */ React.createElement(StatTile, { label: "\uACB0\uC81C\uC644\uB8CC", value: counts.pending, color: "#854F0B", bg: "#FAEEDA", active: statusFilter === "pending", onClick: () => setStatusFilter(statusFilter === "pending" ? "all" : "pending") }), /* @__PURE__ */ React.createElement(StatTile, { label: "\uBC1C\uC1A1\uC900\uBE44", value: counts.ready, color: "#185FA5", bg: "#E6F1FB", active: statusFilter === "ready", onClick: () => setStatusFilter(statusFilter === "ready" ? "all" : "ready") }), /* @__PURE__ */ React.createElement(StatTile, { label: "\uBC1C\uC1A1\uC644\uB8CC", value: counts.shipped, color: "#27500A", bg: "#EAF3DE", active: statusFilter === "shipped", onClick: () => setStatusFilter(statusFilter === "shipped" ? "all" : "shipped") }), /* @__PURE__ */ React.createElement(StatTile, { label: "\uC804\uCCB4\uC8FC\uBB38", value: counts.all, color: "#5F5E5A", bg: "#EDEEE8", active: statusFilter === "all", onClick: () => setStatusFilter("all") })), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, background: "#fff", border: "1px solid #E2E4DD", borderRadius: 10, padding: "8px 12px", marginBottom: 10 } }, /* @__PURE__ */ React.createElement("span", { style: { color: "#888780" } }, "\u{1F50D}"), /* @__PURE__ */ React.createElement(
     "input",
     {
       value: searchQuery,
