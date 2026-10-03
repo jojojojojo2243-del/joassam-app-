@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 207;
+const APP_VERSION = 208;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2070,7 +2070,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v207 (removeInactive customers/vendors + checkFirestoreQuota 85%/95% alerts)";
+const APP_BUILD = "v208 (realtime storage bar on home: MB usage + color coded progress bar + click for detail)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -16048,7 +16048,31 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
     }, couriers, customerCount: customers.length, vendorCount: vendors.length, overdueCount: overdueDeliveries.length, pendingApprovalCount: isCurrentUserAdmin ? Object.values(accounts).filter((a) => a && a.pending).length : 0, isAdmin: isCurrentUserAdmin, accounts, newRegularCount: findNewMonthlyRegularCandidates(customers, orders).length, aiBrief,
     onSetSender: (name, phone) => {
       setDraft((prev) => __spreadProps(__spreadValues({}, prev), { sender: { name: name || "", phone: phone || "" } }));
-    } }), tab === "orders" && !selectedOrder && !invoicePreview && /* @__PURE__ */ React.createElement(
+    },
+    storageInfo: React.useMemo(() => {
+      try {
+        const sz = (obj) => new Blob([JSON.stringify(obj || [])]).size;
+        const ordSz = sz(orders);
+        const cusSz = sz(customers);
+        const vendSz = sz(vendors);
+        const prodSz = sz(products);
+        const totalBytes = ordSz + cusSz + vendSz + prodSz;
+        const FREE_LIMIT = 1024 * 1024 * 1024; // 1GB
+        const pct = Math.min(100, Math.round(totalBytes / FREE_LIMIT * 100));
+        return {
+          totalMB: (totalBytes / 1024 / 1024).toFixed(1),
+          pct,
+          items: [
+            { label: "\uC8FC\uBB38", mb: (ordSz/1024/1024).toFixed(1), count: orders.length },
+            { label: "\uACE0\uAC1D", mb: (cusSz/1024/1024).toFixed(1), count: customers.length },
+            { label: "\uC5C5\uCCB4", mb: (vendSz/1024/1024).toFixed(1), count: vendors.length },
+            { label: "\uC0C1\uD488", mb: (prodSz/1024/1024).toFixed(1), count: products.length },
+          ]
+        };
+      } catch(e) { return null; }
+    }, [orders.length, customers.length, vendors.length, products.length]),
+    checkFirestoreQuota
+    }), tab === "orders" && !selectedOrder && !invoicePreview && /* @__PURE__ */ React.createElement(
       OrdersTab,
       {
         statusFilter,
@@ -17168,7 +17192,7 @@ function AiBriefingCard({ brief, setTab }) {
     return /* @__PURE__ */ React.createElement("button", { key: i, onClick: () => setTab(tabFor), style: { width: "100%", display: "flex", alignItems: "center", gap: 8, textAlign: "left", background: "#fff", border: "1px solid #DDEBE0", borderRadius: 8, padding: "8px 10px", marginBottom: 5, cursor: "pointer" } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, fontWeight: 800, color: "#2F6F4E", minWidth: 16 } }, i + 1), /* @__PURE__ */ React.createElement("span", { style: { flex: 1 } }, /* @__PURE__ */ React.createElement("span", { style: { display: "block", fontSize: 13, fontWeight: 700, color: "#243b2e" } }, p.task, " ", /* @__PURE__ */ React.createElement("span", { style: { color: "#2F6F4E" } }, p.count, "\uAC74")), /* @__PURE__ */ React.createElement("span", { style: { display: "block", fontSize: 11, color: "#7B8A80", marginTop: 1 } }, p.reason)), /* @__PURE__ */ React.createElement("span", { style: { color: "#8FA895", fontSize: 14 } }, "\u203A"));
   })), recs.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 10 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "#2C5A3B", marginBottom: 5 } }, "\u{1F4A1} \uC81C\uC548 (\uADFC\uAC70 \uD3EC\uD568)"), recs.slice(0, 4).map((r, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { fontSize: 12.5, color: "#31473a", background: "#fff", border: "1px solid #E3EEE6", borderRadius: 8, padding: "7px 10px", marginBottom: 5 } }, /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 600 } }, r.text), r.reason && /* @__PURE__ */ React.createElement("span", { style: { display: "block", fontSize: 11, color: "#8A968D", marginTop: 1 } }, "\uADFC\uAC70: ", r.reason)))), stockPred.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 10 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "#8A5A1C", marginBottom: 5 } }, "\u{1F4C9} \uC7AC\uACE0 \uC18C\uC9C4 \uC608\uCE21"), stockPred.slice(0, 3).map((s, i) => /* @__PURE__ */ React.createElement("div", { key: i, style: { fontSize: 12.5, color: "#6E4A16", background: "#FFF9EF", border: "1px solid #F0E0C4", borderRadius: 8, padding: "7px 10px", marginBottom: 5 } }, /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 700 } }, s.name), " \uC57D ", /* @__PURE__ */ React.createElement("b", null, s.daysLeft, "\uC77C"), " \uB4A4 \uC18C\uC9C4 \uC608\uC0C1", /* @__PURE__ */ React.createElement("span", { style: { display: "block", fontSize: 11, color: "#A98B52", marginTop: 1 } }, "\uADFC\uAC70: ", s.evidence, " \xB7 ", s.confidence)))), (salesPred || season) && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "#5B7A63", borderTop: "1px dashed #CDE6D3", paddingTop: 8, marginTop: 4 } }, salesPred && /* @__PURE__ */ React.createElement("div", null, "\u{1F4C8} \uCD5C\uADFC \uD310\uB9E4 ", /* @__PURE__ */ React.createElement("b", null, salesPred.direction), " (7\uC77C ", salesPred.recent7, "\uAC1C \xB7 \uC774\uC804 ", salesPred.prev7, "\uAC1C)", salesPred.top && salesPred.top.length ? ` \xB7 \uC778\uAE30 ${salesPred.top.join(", ")}` : ""), season && season.hints && season.hints.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { marginTop: 3 } }, "\u{1F5D3}\uFE0F ", season.month, "\uC6D4 \uCC38\uACE0: ", season.hints.join(", "))), mon && (mon.health === "\uC8FC\uC758" || mon.warnings && mon.warnings.length > 0) && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, color: "#9A4A2A", background: "#FDF2EC", border: "1px solid #F0CDB8", borderRadius: 8, padding: "7px 10px", marginTop: 8 } }, "\u2699\uFE0F \uC2DC\uC2A4\uD15C \uC810\uAC80: ", mon.warnings.map((w) => w.text).join(" "), " ", /* @__PURE__ */ React.createElement("span", { style: { color: "#B98A72" } }, "(\uC790\uB3D9\uC73C\uB85C \uBC14\uAFB8\uC9C0 \uC54A\uACE0 \uC0AC\uC7A5\uB2D8\uAED8 \uBA3C\uC800 \uC54C\uB824\uB4DC\uB824\uC694)")), brief.perf && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#5A6B7A", background: "#F2F5F8", border: "1px solid #DCE4EC", borderRadius: 8, padding: "7px 10px", marginTop: 8 } }, "\u26A1 AI \uC131\uB2A5: \uD3C9\uADE0\uC751\uB2F5 ", brief.perf.avgMs, "ms \xB7 \uCE90\uC2DC\uC801\uC911 ", brief.perf.cacheHitRate, "% \xB7 \uC624\uB958 ", brief.perf.errors, "\uAC74", brief.perf.recoveries ? ` (\uC790\uB3D9\uBCF5\uAD6C ${brief.perf.recoveries})` : "", " \xB7 \uAE30\uC5B5 ", brief.perf.memoryKB, "KB \xB7 \uB450\uB1CC ", brief.perf.activeProvider)));
 }
-function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal, exportBackup, importBackup, backupInputRef, fireToast, setTab, members, nickname, onSelectOrder, couriers, customerCount, vendorCount, overdueCount, pendingApprovalCount, isAdmin, accounts, newRegularCount, aiBrief, onSetSender }) {
+function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal, exportBackup, importBackup, backupInputRef, fireToast, setTab, members, nickname, onSelectOrder, couriers, customerCount, vendorCount, overdueCount, pendingApprovalCount, isAdmin, accounts, newRegularCount, aiBrief, onSetSender, storageInfo, checkFirestoreQuota }) {
   const recentOrders = [...orders].sort((a, b) => a.createdAt < b.createdAt ? 1 : -1).slice(0, 5);
   return /* @__PURE__ */ React.createElement("div", { style: { position: "relative" } }, /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 16 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 18, fontWeight: 700, color: "#1B2430" } }, appName), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A", marginTop: 2 } }, nickname ? `${(accounts == null ? void 0 : accounts[nickname]) && accounts[nickname].displayName || nickname}\uB2D8 \uD658\uC601\uD569\uB2C8\uB2E4` : "\uC2E0\uC120\uD55C \uB18D\uC0B0\uBB3C\uC744 \uBBFF\uACE0 \uC8FC\uBB38\uD574 \uC8FC\uC138\uC694!")), aiBrief && /* @__PURE__ */ React.createElement(AiBriefingCard, { brief: aiBrief, setTab }), pendingApprovalCount > 0 && /* @__PURE__ */ React.createElement(
     "button",
@@ -17233,7 +17257,40 @@ function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal,
     /* @__PURE__ */ React.createElement("span", { style: { fontSize: 20 } }, "\u{1F69A}\u26A0\uFE0F"),
     /* @__PURE__ */ React.createElement("span", { style: { flex: 1 } }, /* @__PURE__ */ React.createElement("span", { style: { display: "block", fontSize: 13, fontWeight: 700, color: "#A32D2D" } }, "\uB3C4\uCC29 \uD655\uC778\uC774 \uD544\uC694\uD55C \uBC30\uC1A1\uC774 ", overdueCount, "\uAC74 \uC788\uC5B4\uC694"), /* @__PURE__ */ React.createElement("span", { style: { display: "block", fontSize: 11, color: "#888780", marginTop: 2 } }, "\uBC1C\uC1A1 \uD6C4 \uC815\uC0C1 \uB3C4\uCC29\uC77C\uC774 \uC9C0\uB0AC\uB294\uB370 \uC544\uC9C1 \uD655\uC778 \uC548 \uB410\uC5B4\uC694. \uB20C\uB7EC\uC11C \uD655\uC778\uD558\uC138\uC694")),
     /* @__PURE__ */ React.createElement("span", { style: { color: "#A32D2D", fontSize: 16 } }, "\u203A")
-  ), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#1B2430", marginBottom: 8 } }, "\uC8FC\uBB38 \uD604\uD669 (\uC804\uCCB4)"), /* @__PURE__ */ React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 18 } }, /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uC785\uAE08\uB300\uAE30", value: counts.waiting, color: "#993C1D", bg: "#FAECE7", onClick: () => setTab("orders") }), /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uACB0\uC81C\uC644\uB8CC", value: counts.pending, color: "#854F0B", bg: "#FAEEDA", onClick: () => setTab("orders") }), /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uBC1C\uC1A1\uC900\uBE44", value: counts.ready, color: "#185FA5", bg: "#E6F1FB", onClick: () => setTab("orders") }), /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uBC1C\uC1A1\uC644\uB8CC", value: counts.shipped, color: "#27500A", bg: "#EAF3DE", onClick: () => setTab("orders") }), /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uACE0\uAC1D\uC218", value: customerCount, color: "#6B4EA6", bg: "#EFE9F7", onClick: () => setTab("customers") }), /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uC5C5\uCCB4\uC218", value: vendorCount, color: "#0F7B7B", bg: "#E3F3F3", onClick: () => setTab("vendorhub") })), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 13, fontWeight: 700, color: "#1B2430" } }, "\uCD5C\uADFC \uC8FC\uBB38"), /* @__PURE__ */ React.createElement("button", { onClick: () => setTab("orders"), style: { border: "none", background: "none", color: "#185FA5", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, "\uB354\uBCF4\uAE30 \u203A")), recentOrders.length === 0 ? /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid #E2E4DD", borderRadius: 12, padding: "28px 0", textAlign: "center", color: "#888780", fontSize: 13, marginBottom: 18 } }, "\uC544\uC9C1 \uB4F1\uB85D\uB41C \uC8FC\uBB38\uC774 \uC5C6\uC5B4\uC694.") : /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8, marginBottom: 18 } }, recentOrders.map((o) => {
+  ), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#1B2430", marginBottom: 8 } }, "\uC8FC\uBB38 \uD604\uD669 (\uC804\uCCB4)"), /* @__PURE__ */ React.createElement("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 18 } }, /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uC785\uAE08\uB300\uAE30", value: counts.waiting, color: "#993C1D", bg: "#FAECE7", onClick: () => setTab("orders") }), /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uACB0\uC81C\uC644\uB8CC", value: counts.pending, color: "#854F0B", bg: "#FAEEDA", onClick: () => setTab("orders") }), /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uBC1C\uC1A1\uC900\uBE44", value: counts.ready, color: "#185FA5", bg: "#E6F1FB", onClick: () => setTab("orders") }), /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uBC1C\uC1A1\uC644\uB8CC", value: counts.shipped, color: "#27500A", bg: "#EAF3DE", onClick: () => setTab("orders") }), /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uACE0\uAC1D\uC218", value: customerCount, color: "#6B4EA6", bg: "#EFE9F7", onClick: () => setTab("customers") }), /* @__PURE__ */ React.createElement(HomeStatTile, { label: "\uC5C5\uCCB4\uC218", value: vendorCount, color: "#0F7B7B", bg: "#E3F3F3", onClick: () => setTab("vendorhub") })), storageInfo && /* @__PURE__ */ React.createElement("div", {
+  onClick: checkFirestoreQuota,
+  style: { background: "#fff", border: "1px solid #E2E4DD", borderRadius: 12, padding: "12px 14px", marginBottom: 16, cursor: "pointer" }
+},
+  /* 헤더 */
+  /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 } },
+    /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: "#1B2430" } }, "\uD83D\uDCCA Firebase \uC800\uC7A5 \uC6A9\uB7C9"),
+    /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: storageInfo.pct >= 95 ? "#D14343" : storageInfo.pct >= 85 ? "#E8A020" : "#2F6F4E" } },
+      `${storageInfo.totalMB}MB / 1,024MB (${storageInfo.pct}%)`
+    )
+  ),
+  /* 용량 바 */
+  /* @__PURE__ */ React.createElement("div", { style: { height: 8, background: "#F1F2EC", borderRadius: 4, overflow: "hidden", marginBottom: 8 } },
+    /* @__PURE__ */ React.createElement("div", { style: {
+      height: "100%",
+      width: `${storageInfo.pct}%`,
+      background: storageInfo.pct >= 95 ? "#D14343" : storageInfo.pct >= 85 ? "#E8A020" : "#2F6F4E",
+      borderRadius: 4,
+      transition: "width 0.5s ease"
+    } })
+  ),
+  /* 항목별 표시 */
+  /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" } },
+    storageInfo.items.map((item) =>
+      /* @__PURE__ */ React.createElement("div", { key: item.label, style: { fontSize: 11, color: "#5F5E5A" } },
+        `${item.label} ${item.count.toLocaleString()}\uAC74 (${item.mb}MB)`
+      )
+    )
+  ),
+  storageInfo.pct >= 85 && /* @__PURE__ */ React.createElement("div", { style: { marginTop: 6, fontSize: 11, color: storageInfo.pct >= 95 ? "#D14343" : "#E8A020", fontWeight: 700 } },
+    storageInfo.pct >= 95 ? "\uD83D\uDEA8 \uC6A9\uB7C9 \uCD08\uACFC! \uC5C5\uCCB4 \uD0ED\uC5D0\uC11C \uC870\uCE58\uD558\uC138\uC694" : "\u26A0\uFE0F \uC6A9\uB7C9 \uBD80\uC871 \uC608\uC0C1 \u2014 1\uB144 \uBBF8\uC8FC\uBB38 \uACE0\uAC1D \uC0AD\uC81C\uB97C \uAD8C\uC7A5\uD569\uB2C8\uB2E4"
+  )
+),
+/* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 13, fontWeight: 700, color: "#1B2430" } }, "\uCD5C\uADFC \uC8FC\uBB38"), /* @__PURE__ */ React.createElement("button", { onClick: () => setTab("orders"), style: { border: "none", background: "none", color: "#185FA5", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, "\uB354\uBCF4\uAE30 \u203A")), recentOrders.length === 0 ? /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid #E2E4DD", borderRadius: 12, padding: "28px 0", textAlign: "center", color: "#888780", fontSize: 13, marginBottom: 18 } }, "\uC544\uC9C1 \uB4F1\uB85D\uB41C \uC8FC\uBB38\uC774 \uC5C6\uC5B4\uC694.") : /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8, marginBottom: 18 } }, recentOrders.map((o) => {
     var _a;
     const c = customerMap[o.customerId];
     const st = STATUS[o.status] || STATUS.pending;
