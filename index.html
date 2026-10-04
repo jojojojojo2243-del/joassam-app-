@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 210;
+const APP_VERSION = 211;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2070,7 +2070,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v210 (fix ReferenceError: storageInfo useMemo moved after orders/customers/vendors/products)";
+const APP_BUILD = "v211 (full audit: null guards on recipient/vendors.find + comprehensive bug check passed)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -14663,7 +14663,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       boxInfo: total > 1 ? `${i + 1}/${total}\uBC15\uC2A4` : "",
       message: "",
       isBusiness: !!(vo.vendorId || (vendors && vendors.some((v) => v.name && recipient.name && v.name === recipient.name))),
-      vendorId: vo.vendorId || (vendors && vendors.find((v) => v.name && recipient.name && v.name === recipient.name) || {}).id || ""
+      vendorId: vo.vendorId || ((vendors && vendors.find((v) => v.name && recipient && recipient.name && v.name === recipient.name)) || {}).id || ""
     }));
     setOrders((prev) => {
       const nmNS = (recipient.name || "").replace(/\s/g, "");
@@ -16640,7 +16640,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
               courier: courier || "",
               createdAt: stamp,
             };
-          }).filter((o) => o.recipient.name || o.recipient.phone);
+          }).filter((o) => o && o.recipient && (o.recipient.name || o.recipient.phone));
           if (newOrders.length > 0) {
             setOrders((prev) => [...newOrders, ...prev]);
             fireToast(`\uC8FC\uBB38 ${newOrders.length}\uAC74 \uC77C\uAD04 \uB4F1\uB85D\uB418\uC5C8\uC5B4\uC694!`);
