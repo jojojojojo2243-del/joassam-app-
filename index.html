@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 216;
+const APP_VERSION = 217;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2070,7 +2070,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v216 (OrdersTab: KakaoTalk + SMS deeplink buttons for share flow)";
+const APP_BUILD = "v217 (FAB+: app picker popup → KakaoTalk/SMS/Line deeplink → return → SenderPredictModal)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11924,12 +11924,21 @@ function App() {
       const params = new URLSearchParams(window.location.search);
       const shared = (params.get("text") || params.get("title") || "").trim();
       if (shared) {
-        // 공유로 진입: 주문자 예측 팝업 먼저 표시
         const guessed = guessSharedSender(shared, customers);
         setSenderPredictModal({ sharedText: shared, guessed });
         window.history.replaceState({}, "", window.location.pathname + window.location.hash);
       }
     } catch (e) {}
+    // FAB에서 클립보드 복귀 이벤트 수신
+    const onFabShared = (e) => {
+      const text = (e.detail && e.detail.text) || "";
+      if (text && text.length > 10) {
+        const guessed = guessSharedSender(text, customers);
+        setSenderPredictModal({ sharedText: text, guessed });
+      }
+    };
+    window.addEventListener("fab-shared", onFabShared);
+    return () => window.removeEventListener("fab-shared", onFabShared);
   }, [dataLoaded]);
   const saveTimerRef = useRef(null);
   const pendingSaveDataRef = useRef(null);
@@ -17370,141 +17379,78 @@ function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal,
   /* @__PURE__ */ React.createElement(FabOrderButton, { setTab, onSetSender }));
 }
 function FabOrderButton({ setTab, onSetSender }) {
-  const [step, setStep] = React.useState(null); // null | 'guide' | 'sender'
-  const [senderName, setSenderName] = React.useState("");
-  const [sharedText, setSharedText] = React.useState("");
+  const [showPicker, setShowPicker] = React.useState(false); // 앱 선택 팝업
 
-  // 공유로 들어온 텍스트가 있으면 바로 sender 팝업
+  // 앱에서 돌아왔을 때 클립보드 자동 감지
   React.useEffect(() => {
-    const onFocus = () => {
-      // 앱으로 돌아왔을 때 클립보드 확인
-      if (step === "guide") {
-        setTimeout(async () => {
-          try {
-            const text = await navigator.clipboard.readText();
-            if (text && text.trim().length > 10) {
-              setSharedText(text.trim());
-              setStep("sender");
-            }
-          } catch (e) {}
-        }, 500);
-      }
+    const onFocus = async () => {
+      if (!showPicker) return;
+      setShowPicker(false);
+      await new Promise(r => setTimeout(r, 600));
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text && text.trim().length > 10) {
+          // 클립보드에 텍스트 있으면 senderPredictModal 열기 (App에서 처리)
+          window._fabSharedText = text.trim();
+          window.dispatchEvent(new CustomEvent("fab-shared", { detail: { text: text.trim() } }));
+        }
+      } catch(e) {}
     };
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
-  }, [step]);
+  }, [showPicker]);
 
-  function handleSenderConfirm() {
-    if (senderName.trim() && typeof onSetSender === "function") {
-      onSetSender(senderName.trim(), "");
-    }
-    setStep(null);
-    setTab("new");
-    // 클립보드 텍스트가 있으면 자동 분석
-    if (sharedText) {
-      setTimeout(() => {
-        const ta = document.getElementById("orderMsgTextarea");
-        if (ta) {
-          const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
-          nativeInputValueSetter && nativeInputValueSetter.call(ta, sharedText);
-          ta.dispatchEvent(new Event("input", { bubbles: true }));
-        }
-      }, 300);
-    }
-  }
-
-  function handleSkip() {
-    setStep(null);
-    setTab("new");
-    if (sharedText && typeof onSetSender === "function") onSetSender("", "");
-  }
-
-  // 안내 팝업 (카카오/문자 공유 안내)
-  const guidePopup = step === "guide" && /* @__PURE__ */ React.createElement(
-    "div", { style: { position: "fixed", inset: 0, background: "rgba(27,36,48,0.85)", zIndex: 9000, display: "flex", alignItems: "flex-end" }, onClick: () => setStep(null) },
-    /* @__PURE__ */ React.createElement("div", { onClick: (e) => e.stopPropagation(), style: { width: "100%", background: "#fff", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "24px 20px", paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))" } },
-      /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", marginBottom: 20 } },
-        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 40, marginBottom: 8 } }, "📋"),
-        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 17, fontWeight: 800, color: "#1B2430", marginBottom: 6 } }, "카카오/문자 주문 등록"),
-        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, color: "#5F5E5A", lineHeight: 1.7 } }, "카카오톡이나 문자에서 주문 내용을 복사하거나", /* @__PURE__ */ React.createElement("br"), "공유 버튼으로 이 앱을 선택하세요.")
-      ),
-      // 방법 1 - 공유 버튼
-      /* @__PURE__ */ React.createElement("div", { style: { background: "#F1F5F1", borderRadius: 14, padding: "14px 16px", marginBottom: 10 } },
-        /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12 } },
-          /* @__PURE__ */ React.createElement("div", { style: { width: 40, height: 40, background: "#2F6F4E", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 } }, "↑"),
-          /* @__PURE__ */ React.createElement("div", null,
-            /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#1B2430", marginBottom: 2 } }, "방법 1 — 공유 버튼 (추천)"),
-            /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A", lineHeight: 1.6 } }, "카카오/문자 앱 → 주문 내용 화면 → ", /* @__PURE__ */ React.createElement("b", null, "공유 아이콘"), " → ", /* @__PURE__ */ React.createElement("b", null, "조아저씨쌈"), " 선택")
-          )
-        )
-      ),
-      // 방법 2 - 복사 붙여넣기
-      /* @__PURE__ */ React.createElement("div", { style: { background: "#F1F5F1", borderRadius: 14, padding: "14px 16px", marginBottom: 20 } },
-        /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 12 } },
-          /* @__PURE__ */ React.createElement("div", { style: { width: 40, height: 40, background: "#185FA5", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 } }, "📄"),
-          /* @__PURE__ */ React.createElement("div", null,
-            /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#1B2430", marginBottom: 2 } }, "방법 2 — 복사 후 직접 입력"),
-            /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A", lineHeight: 1.6 } }, "주문 내용 ", /* @__PURE__ */ React.createElement("b", null, "길게 눌러 복사"), " → 아래 버튼 클릭")
-          )
-        )
-      ),
-      /* @__PURE__ */ React.createElement("button", {
-        onClick: async () => {
-          try {
-            const text = await navigator.clipboard.readText();
-            if (text && text.trim().length > 10) {
-              setSharedText(text.trim());
-              setStep("sender");
-            } else {
-              setStep("sender");
+  // 앱 선택 팝업
+  const picker = showPicker && /* @__PURE__ */ React.createElement(
+    "div", { style: { position: "fixed", inset: 0, background: "rgba(27,36,48,0.75)", zIndex: 9000, display: "flex", alignItems: "flex-end" }, onClick: () => setShowPicker(false) },
+    /* @__PURE__ */ React.createElement("div", { onClick: e => e.stopPropagation(), style: { width: "100%", background: "#fff", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 20px", paddingBottom: "calc(20px + env(safe-area-inset-bottom,0px))" } },
+      /* @__PURE__ */ React.createElement("div", { style: { fontSize: 15, fontWeight: 800, color: "#1B2430", marginBottom: 4 } }, "\uC8FC\uBB38 \uBB38\uC790 \uD655\uC778"),
+      /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A", marginBottom: 18, lineHeight: 1.6 } }, "\uC8FC\uBB38 \uBB38\uC790\uAC00 \uC788\uB294 \uCC44\uD305 \uC571\uC744 \uC120\uD0DD\uD558\uC138\uC694\u2014 \uBB38\uC790\uC5D0\uC11C \uACF5\uC720\uD558\uBA74 \uC790\uB3D9 \uC785\uB825\uB429\uB2C8\uB2E4."),
+      // 앱 목록
+      [
+        { label: "\uCE74\uCE74\uC624\uD1A1", emoji: "\uD83D\uDCAC", bg: "#FAE100", color: "#3A1D1D", url: "kakaolink://", pkg: "com.kakao.talk" },
+        { label: "\uBB38\uC790(\uCC44\uD305+)", emoji: "\u2709\uFE0F", bg: "#4CAF50", color: "#fff", url: "content://sms/", pkg: "com.samsung.android.messaging" },
+        { label: "\uB124\uC774\uBC84 \uB77C\uC778", emoji: "\uD83D\uDCF1", bg: "#00C73C", color: "#fff", url: "line://", pkg: "jp.naver.line.android" },
+        { label: "\uAE30\uD0C0 \uBB38\uC790", emoji: "\uD83D\uDCEC", bg: "#E2E4DD", color: "#1B2430", url: "sms:", pkg: "" },
+      ].map(({ label, emoji, bg, color, url, pkg }) =>
+        /* @__PURE__ */ React.createElement("button", {
+          key: label,
+          onClick: () => {
+            // 앱 열기 시도
+            const a = document.createElement("a");
+            a.href = url;
+            try { a.click(); } catch(e) {}
+            // 열기 실패 시 플레이스토어로
+            if (pkg) {
+              setTimeout(() => {
+                if (document.hasFocus()) {
+                  try { window.location.href = "market://details?id=" + pkg; } catch(e) {}
+                }
+              }, 1800);
             }
-          } catch (e) {
-            setStep("sender");
-          }
+            // 포커스 복귀 감지 유지
+          },
+          style: { display: "flex", alignItems: "center", gap: 14, width: "100%", padding: "13px 16px", borderRadius: 14, border: "none", background: bg, color, fontWeight: 800, fontSize: 15, cursor: "pointer", marginBottom: 8, textAlign: "left" }
         },
-
-        style: { width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 800, fontSize: 16, cursor: "pointer", marginBottom: 8 }
-      }, "복사한 주문 내용 불러오기"),
-      /* @__PURE__ */ React.createElement("button", {
-        onClick: () => setStep(null),
-        style: { width: "100%", padding: "12px 0", borderRadius: 14, border: "1px solid #E2E4DD", background: "#fff", color: "#5F5E5A", fontWeight: 600, fontSize: 14, cursor: "pointer" }
-      }, "닫기")
-    )
-  );
-
-  // 보내는분 선택 팝업
-  const senderPopup = step === "sender" && /* @__PURE__ */ React.createElement(
-    "div", { style: { position: "fixed", inset: 0, background: "rgba(27,36,48,0.7)", zIndex: 9001, display: "flex", alignItems: "flex-end" }, onClick: () => setStep(null) },
-    /* @__PURE__ */ React.createElement("div", { onClick: (e) => e.stopPropagation(), style: { width: "100%", background: "#fff", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "24px 20px", paddingBottom: "calc(24px + env(safe-area-inset-bottom, 0px))" } },
-      /* @__PURE__ */ React.createElement("div", { style: { fontSize: 17, fontWeight: 800, color: "#1B2430", marginBottom: 4 } }, "보내는분(주문자) 선택"),
-      /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, color: "#5F5E5A", marginBottom: 16, lineHeight: 1.6 } },
-        sharedText ? `주문 내용 ${(sharedText.match(/01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/g) || []).length}명 감지됨. 보내는분(발신자) 이름을 입력하세요.` : "보내는분(발신자) 이름을 입력하세요."
+          /* @__PURE__ */ React.createElement("span", { style: { fontSize: 26, lineHeight: 1 } }, emoji),
+          /* @__PURE__ */ React.createElement("div", null,
+            /* @__PURE__ */ React.createElement("div", null, label),
+            /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 400, opacity: 0.75, marginTop: 1 } }, "\uD0ED\uD558\uBA74 \uC571 \uC5F4\uAE30 \u2192 \uBB38\uC790 \uACF5\uC720 \u2192 \uC790\uB3D9 \uC785\uB825")
+          )
+        )
       ),
-      /* @__PURE__ */ React.createElement("input", {
-        placeholder: "보내는분 이름 (예: 김종옥고객)",
-        value: senderName,
-        onChange: (e) => setSenderName(e.target.value),
-        onKeyDown: (e) => e.key === "Enter" && handleSenderConfirm(),
-        autoFocus: true,
-        style: { width: "100%", padding: "14px 16px", borderRadius: 12, border: "2px solid #2F6F4E", fontSize: 15, marginBottom: 12, boxSizing: "border-box", outline: "none", fontWeight: 600 }
-      }),
       /* @__PURE__ */ React.createElement("button", {
-        onClick: handleSenderConfirm,
-        style: { width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 800, fontSize: 16, cursor: "pointer", marginBottom: 8 }
-      }, "주문 등록 화면으로 →"),
-      /* @__PURE__ */ React.createElement("button", {
-        onClick: handleSkip,
-        style: { width: "100%", padding: "12px 0", borderRadius: 14, border: "1px solid #E2E4DD", background: "#fff", color: "#5F5E5A", fontWeight: 600, fontSize: 14, cursor: "pointer" }
-      }, "건너뛰기")
+        onClick: () => setShowPicker(false),
+        style: { width: "100%", padding: "12px 0", borderRadius: 14, border: "1px solid #E2E4DD", background: "#fff", color: "#5F5E5A", fontWeight: 600, fontSize: 14, cursor: "pointer", marginTop: 4 }
+      }, "\uB2EB\uAE30")
     )
   );
 
   return /* @__PURE__ */ React.createElement(React.Fragment, null,
-    guidePopup,
-    senderPopup,
+    picker,
     /* @__PURE__ */ React.createElement("button", {
-      onClick: () => { setSenderName(""); setSharedText(""); setStep("guide"); },
-      style: { position: "fixed", bottom: "calc(70px + env(safe-area-inset-bottom, 0px))", right: 20, width: 52, height: 52, borderRadius: "50%", background: "#2F6F4E", color: "#fff", border: "none", fontSize: 26, fontWeight: 700, boxShadow: "0 4px 12px rgba(0,0,0,0.25)", cursor: "pointer", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center" }
+      onClick: () => setShowPicker(true),
+      style: { position: "fixed", bottom: "calc(70px + env(safe-area-inset-bottom, 0px))", right: 20, width: 56, height: 56, borderRadius: "50%", background: "#2F6F4E", color: "#fff", border: "none", fontSize: 28, fontWeight: 700, boxShadow: "0 4px 16px rgba(0,0,0,0.3)", cursor: "pointer", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center" }
     }, "\uFF0B")
   );
 }
@@ -18954,44 +18900,7 @@ function OrdersTab({
     },
     "\uFF0B \uC0C8 \uC8FC\uBB38 \uC785\uB825"
   ),
-  /* 카카오/문자 앱으로 이동 버튼 */
-  /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 10 } },
-    /* @__PURE__ */ React.createElement("button", {
-      onClick: () => {
-        // 카카오톡 딥링크 → 실패 시 플레이스토어
-        const kakao = "intent://kakaolink#Intent;scheme=kakaolink;package=com.kakao.talk;end";
-        try {
-          const a = document.createElement("a");
-          a.href = "kakaolink://";
-          a.click();
-          setTimeout(() => {
-            // 열리지 않았으면 플레이스토어로
-            if (document.hasFocus()) {
-              window.location.href = "market://details?id=com.kakao.talk";
-            }
-          }, 1500);
-        } catch(e) {
-          window.open("https://play.google.com/store/apps/details?id=com.kakao.talk", "_blank");
-        }
-      },
-      style: { flex: 1, padding: "11px 0", borderRadius: 10, border: "1.5px solid #FAE100", background: "#FAE100", color: "#3A1D1D", fontWeight: 800, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }
-    },
-      /* @__PURE__ */ React.createElement("span", { style: { fontSize: 18 } }, "\uD83D\uDCAC"),
-      "\uCE74\uCE74\uC624\uD1A1 \uC5F4\uAE30"
-    ),
-    /* @__PURE__ */ React.createElement("button", {
-      onClick: () => {
-        // 문자(SMS) 앱 열기
-        try {
-          window.location.href = "sms:";
-        } catch(e) {}
-      },
-      style: { flex: 1, padding: "11px 0", borderRadius: 10, border: "1.5px solid #4CAF50", background: "#fff", color: "#2F6F4E", fontWeight: 800, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }
-    },
-      /* @__PURE__ */ React.createElement("span", { style: { fontSize: 18 } }, "\u2709\uFE0F"),
-      "\uBB38\uC790 \uC5F4\uAE30"
-    )
-  ),
+
   storageInfo && /* @__PURE__ */ React.createElement("div", {
     onClick: checkFirestoreQuota,
     style: { background: "#fff", border: "1px solid #E2E4DD", borderRadius: 10, padding: "8px 12px", marginBottom: 10, cursor: "pointer" }
