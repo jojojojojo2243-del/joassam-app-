@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 211;
+const APP_VERSION = 213;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2070,7 +2070,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v211 (full audit: null guards on recipient/vendors.find + comprehensive bug check passed)";
+const APP_BUILD = "v213 (alert fix: dedup within 60s + normal quota no panel + header 시스템알림)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -3600,13 +3600,31 @@ const FARM_AI_ALIASES = {
   "\uBE44\uD0C0\uBBFC": "\uBE44\uD0C0\uBBFC\uCC44",
   "\uACA8\uC790\uCC44": "\uACA8\uC790\uCC44",
   "\uC308\uCC44": "\uBAA8\uB4EC\uC308\uCC44\uC18C",
-  "\uCF00\uC77C\uC18C\uD48D": "\uB9E4\uC77C\uC18C\uD48D"
+  "\uCF00\uC77C\uC18C\uD48D": "\uB9E4\uC77C\uC18C\uD48D",
+  "\uD558\uB808\uD558\uB808\uBCA0\uC774\uCEE4\uB9AC": "\uD558\uB808\uD558\uB808\uBCA0\uC774\uCEE4\uB9AC\uCE74\uD398",
+  "\uD558\uB808\uD558\uB808": "\uD558\uB808\uD558\uB808\uBCA0\uC774\uCEE4\uB9AC\uCE74\uD398",
+  "\uB9E4\uC77C\uC18C\uD48D2": "\uB9E4\uC77C\uC18C\uD48D",
+  "\uB9E4\uC77C\uC18C\uD48D\ub450\uBC88\uC9F8": "\uB9E4\uC77C\uC18C\uD48D",
+  "\uBAA8\uB4E0\uC300": "\uBAA8\uB4EB\uC300",
+  "\uBAA8\uB4E0\uC37C\uCC44": "\uBAA8\uB4EB\uC37C\uCC44\uC18C",
+  "\uB9E8\uC4F0\uB9C8\uC2B9": "\uB9E4\uC77C\uC18C\uD48D",
+  "\uCCAD\uACBD\uCC44\uC790": "\uCCAD\uACBD\uCC44",
+  "\uCCAD\uACA8\uCC44": "\uCCAD\uACA8\uC790",
+  "\uC0BC\uACA9\uC0B4\uC804\uBB38\uC810\uBC30\uC218\uB828": "\uBC30\uC218\uB828"
 };
 // 문장 단위 STT 오인식 보정
 const STT_SENTENCE_FIXES = [
   [/케일\s*(매일소풍)/g, "$1"],
   [/(\S+)\s*주문\s*할\s*때\b/g, "$1 주문할게"],
   [/주문\s*할\s*때\b/g, "주문할게"],
+  // 추가 STT 오인식 보정
+  [/하레\s*하레\s*베이커리(?!카페)/g, "하레하레베이커리카페"],
+  [/메일\s*소풍/g, "매일소풍"],
+  [/모든\s*쌈/g, "모둠쌈"],
+  [/모든\s*채소/g, "모둠채소"],
+  [/청경\s*채자/g, "청경채"],
+  [/루\s*꼴\s*라/g, "루꼴라"],
+  [/(한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\s*개/g, (m, n) => n+"개"],
 ];
 const FARM_AI_TERMS = ["EC", "pH", "\uC591\uC561", "\uC218\uACBD\uC7AC\uBC30", "\uBCD1\uD574", "\uCD9C\uACE0", "\uD3EC\uC7A5", "\uD0DD\uBC30", "\uB8E8\uAF34\uB77C", "\uBC84\uD130\uD5E4\uB4DC", "\uCCAD\uACA8\uC790", "\uC801\uACA8\uC790", "\uAF43\uC0C1\uCD94", "\uB2E4\uCCAD\uCC44", "\uBAA8\uB4EC\uC308\uCC44\uC18C", "\uC815\uC2DD", "\uC721\uBB18"];
 function farmAliasCanonical(word) {
@@ -10911,17 +10929,23 @@ function App() {
   const [saveAlerts, setSaveAlerts] = useState([]); // 저장 오류 알림 목록
   const [showSaveAlerts, setShowSaveAlerts] = useState(false);
   function pushSaveAlert(type, msg, detail) {
-    const alert = {
-      id: Date.now() + Math.random(),
-      type, // 'error'|'warn'|'info'
-      msg,
-      detail: detail || "",
-      at: new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
-      read: false
-    };
-    setSaveAlerts(prev => [alert, ...prev].slice(0, 50)); // 최대 50개
-    // 오류 타입은 진단 로그에도 기록
-    if (type === "error") logDiag("save_alert_" + type, { msg, detail: String(detail || "").slice(0, 200) });
+    const now = Date.now();
+    setSaveAlerts(prev => {
+      // 1분 내 동일 메시지 중복 방지
+      const isDup = prev.some(a => a.msg === msg && now - (a._ts || 0) < 60000);
+      if (isDup) return prev;
+      const alert = {
+        id: now + Math.random(),
+        _ts: now,
+        type,
+        msg,
+        detail: detail || "",
+        at: new Date().toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+        read: false
+      };
+      if (type === "error") logDiag("save_alert_error", { msg, detail: String(detail || "").slice(0, 200) });
+      return [alert, ...prev].slice(0, 50);
+    });
   }
   const sessionIdRef = useRef("s_" + Math.random().toString(36).slice(2, 10));
   const sessionStartRef = useRef(Date.now());
@@ -14400,8 +14424,8 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       pushSaveAlert("warn", "\u26A0\uFE0F Firebase \uC6A9\uB7C9 85% \uC811\uADFC", breakdown + advice);
       fireToast(`\u26A0\uFE0F \uC6A9\uB7C9 ${usedPct}% \uC0AC\uC6A9 \uC911 \u2014 \ubcf8 \uc54c\ub9bc\uc5d0\uc11c \uD655\uC778\uD558\uC138\uC694`);
     } else {
-      fireToast(`\u2705 \uC6A9\uB7C9 ${usedPct}% \uC0AC\uC6A9 \uC911 (${totalMB}MB / 1,024MB) \u2014 \uc5ec\uc720 \uc788\uc5b4\uc694`);
-      pushSaveAlert("info", `Firebase \uC6A9\uB7C9: ${usedPct}% (${totalMB}MB)`, breakdown);
+      // 정상 범위 - 토스트만 표시, 알림 패널에는 추가 안 함
+      fireToast(`\u2705 Firebase \uC6A9\uB7C9 ${usedPct}% (${totalMB}MB / 1,024MB) \u2014 \uc5ec\uc720 \uc788\uc5b4\uc694`);
     }
   }
 
@@ -15985,7 +16009,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
     /* @__PURE__ */ React.createElement("div", { onClick: e => e.stopPropagation(), style: { width: "100%", maxWidth: 480, margin: "0 auto", background: "#fff", borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: "75vh", display: "flex", flexDirection: "column" } },
       /* 헤더 */
       /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 18px 12px", borderBottom: "1px solid #E2E4DD" } },
-        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 16, fontWeight: 800 } }, "🔔 저장 오류 알림"),
+        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 16, fontWeight: 800 } }, "🔔 시스템 알림"),
         /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8 } },
           /* @__PURE__ */ React.createElement("button", { onClick: () => setSaveAlerts(prev => prev.map(a => ({...a, read: true}))), style: { fontSize: 12, color: "#5F5E5A", background: "none", border: "1px solid #E2E4DD", borderRadius: 6, padding: "4px 8px", cursor: "pointer" } }, "모두 읽음"),
           /* @__PURE__ */ React.createElement("button", { onClick: () => { setSaveAlerts([]); setShowSaveAlerts(false); }, style: { fontSize: 12, color: "#A32D2D", background: "none", border: "1px solid #F5C2C2", borderRadius: 6, padding: "4px 8px", cursor: "pointer" } }, "전체 삭제"),
@@ -15995,7 +16019,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
       /* 알림 목록 */
       /* @__PURE__ */ React.createElement("div", { style: { overflowY: "auto", flex: 1, padding: "8px 0" } },
         saveAlerts.length === 0
-          ? /* @__PURE__ */ React.createElement("div", { style: { padding: "32px 0", textAlign: "center", color: "#888780", fontSize: 14 } }, "✅ 저장 오류가 없습니다")
+          ? /* @__PURE__ */ React.createElement("div", { style: { padding: "32px 0", textAlign: "center", color: "#888780", fontSize: 14 } }, "✅ 저장 오류나 이상 없어요")
           : saveAlerts.map(alert =>
             /* @__PURE__ */ React.createElement("div", { key: alert.id, onClick: () => setSaveAlerts(prev => prev.map(a => a.id === alert.id ? {...a, read: true} : a)),
               style: { padding: "12px 18px", borderBottom: "1px solid #F1F2EC", background: alert.read ? "#fff" : alert.type === "error" ? "#FFF5F5" : "#FFFBF0", cursor: "pointer" } },
