@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 215;
+const APP_VERSION = 216;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2070,7 +2070,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v215 (SenderPredictModal + ProductSelectSheet category/search/bulk + share flow)";
+const APP_BUILD = "v216 (OrdersTab: KakaoTalk + SMS deeplink buttons for share flow)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -18953,6 +18953,44 @@ function OrdersTab({
       }
     },
     "\uFF0B \uC0C8 \uC8FC\uBB38 \uC785\uB825"
+  ),
+  /* 카카오/문자 앱으로 이동 버튼 */
+  /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, marginBottom: 10 } },
+    /* @__PURE__ */ React.createElement("button", {
+      onClick: () => {
+        // 카카오톡 딥링크 → 실패 시 플레이스토어
+        const kakao = "intent://kakaolink#Intent;scheme=kakaolink;package=com.kakao.talk;end";
+        try {
+          const a = document.createElement("a");
+          a.href = "kakaolink://";
+          a.click();
+          setTimeout(() => {
+            // 열리지 않았으면 플레이스토어로
+            if (document.hasFocus()) {
+              window.location.href = "market://details?id=com.kakao.talk";
+            }
+          }, 1500);
+        } catch(e) {
+          window.open("https://play.google.com/store/apps/details?id=com.kakao.talk", "_blank");
+        }
+      },
+      style: { flex: 1, padding: "11px 0", borderRadius: 10, border: "1.5px solid #FAE100", background: "#FAE100", color: "#3A1D1D", fontWeight: 800, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }
+    },
+      /* @__PURE__ */ React.createElement("span", { style: { fontSize: 18 } }, "\uD83D\uDCAC"),
+      "\uCE74\uCE74\uC624\uD1A1 \uC5F4\uAE30"
+    ),
+    /* @__PURE__ */ React.createElement("button", {
+      onClick: () => {
+        // 문자(SMS) 앱 열기
+        try {
+          window.location.href = "sms:";
+        } catch(e) {}
+      },
+      style: { flex: 1, padding: "11px 0", borderRadius: 10, border: "1.5px solid #4CAF50", background: "#fff", color: "#2F6F4E", fontWeight: 800, fontSize: 13, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", gap: 6 }
+    },
+      /* @__PURE__ */ React.createElement("span", { style: { fontSize: 18 } }, "\u2709\uFE0F"),
+      "\uBB38\uC790 \uC5F4\uAE30"
+    )
   ),
   storageInfo && /* @__PURE__ */ React.createElement("div", {
     onClick: checkFirestoreQuota,
