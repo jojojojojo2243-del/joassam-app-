@@ -2070,7 +2070,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v220 (fix: 등록 직후 주문이 서버 데이터에 덮여 사라지는 문제)";
+const APP_BUILD = "v221 (fix: 기기 간 저장 충돌로 주문 일부 누락/사라짐 — 저장 전 서버 병합)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11837,10 +11837,19 @@ function App() {
                   const ordOrders = res[0] !== null ? res[0] : [];
                   const archOrders = Array.isArray(res[2]) ? res[2] : [];
                   const allOrders = [...ordOrders, ...archOrders];
+                  // v221: 청크에 빠진 최근 주문 보충 (삭제 표시된 건 제외)
+                  try {
+                    const tombL = new Set(data.deletedOrderIds || []);
+                    const haveL = new Set(allOrders.map((o) => o && o.id));
+                    const missL = (data.recentOrders || []).filter((o) => o && o.id && !haveL.has(o.id) && !tombL.has(o.id));
+                    if (missL.length && res[0] !== null) { allOrders.unshift(...missL); ordOrders.unshift(...missL); logDiag("restored_recent_orders", { count: missL.length }); }
+                  } catch (e) {}
                   if (res[0] !== null || archOrders.length > 0) {
                     applyOrdersArray(allOrders.length > 0 ? allOrders : ordOrders);
                   }
                   if (res[1] !== null) applyCustomersArray(res[1]);
+                  // v221: 다른 기기가 쓴 청크와 내 청크가 섞이지 않도록 다음 저장은 전체 다시 쓰기
+                  try { lastOrdSigsRef.current = []; lastCusSigsRef.current = []; } catch (e) {}
                   fbFirstLoadRef.current = true;
                 }).catch((err) => {
                   loadedDataSigRef.current = null;
@@ -11955,6 +11964,7 @@ function App() {
     return () => window.removeEventListener("fab-shared", onFabShared);
   }, [dataLoaded]);
   const saveTimerRef = useRef(null);
+  const saveGenRef = useRef(0); // v221: 가장 최신 저장만 서버에 쓰기
   const pendingSaveDataRef = useRef(null);
   const lastOrdSigsRef = useRef([]);
   const lastCusSigsRef = useRef([]);
@@ -12032,22 +12042,89 @@ function App() {
         }
       }
     } catch (e) {}
-    const ordersArr = data.orders || [];
-    const custArr = data.customers || [];
+    let ordersArr = data.orders || [];
+    let custArr = data.customers || [];
+    const baseOrderIds = new Set(((lastGoodDataRef.current || {}).orders || []).map((o) => o && o.id));
+    const baseCustIds = new Set(((lastGoodDataRef.current || {}).customers || []).map((c) => c && c.id));
     const mainPayload = __spreadValues({}, data);
     delete mainPayload.orders;
     delete mainPayload.customers;
-    const ordChunks = chunkArraySized(ordersArr, RECORD_CHUNK_SIZE);
-    const cusChunks = chunkArraySized(custArr, RECORD_CHUNK_SIZE);
-    const ordSigs = ordChunks.map(recordChunkSig);
-    const cusSigs = cusChunks.map(recordChunkSig);
-    const dataSig = recordChunkSig([ordSigs, cusSigs]);
+    let ordChunks, cusChunks, ordSigs, cusSigs, dataSig;
+    function buildChunks() {
+      ordChunks = chunkArraySized(ordersArr, RECORD_CHUNK_SIZE);
+      cusChunks = chunkArraySized(custArr, RECORD_CHUNK_SIZE);
+      ordSigs = ordChunks.map(recordChunkSig);
+      cusSigs = cusChunks.map(recordChunkSig);
+      dataSig = recordChunkSig([ordSigs, cusSigs]);
+    }
+    buildChunks();
+    const myGen = ++saveGenRef.current;
+    // v221: 다른 기기가 그 사이 저장했으면 서버 데이터를 먼저 합친 뒤 저장 (서로 덮어써서 주문이 사라지는 문제 방지)
+    let expectedSig = undefined;
+    function preflightMerge() {
+      return fbDb.collection("stores").doc(DATA_DOC).get().then((snap) => {
+        const d = snap.exists ? snap.data() : null;
+        expectedSig = d ? d.dataSig : undefined;
+        if (!d || typeof d.ordersChunkCount !== "number") return;
+        if (!d.dataSig || d.dataSig === loadedDataSigRef.current) return;
+        const tomb = new Set(d.deletedOrderIds || []);
+        return Promise.all([
+          fetchRecordChunks(ordChunkDocId, d.ordersChunkCount || 0, "orders"),
+          fetchRecordChunks(cusChunkDocId, d.customersChunkCount || 0, "customers")
+        ]).then(([rOrd, rCus]) => {
+          lastOrdSigsRef.current = [];
+          lastCusSigsRef.current = [];
+          // 다른 기기에서 삭제한 주문은 여기서도 제거
+          const goneO = ordersArr.filter((o) => o && tomb.has(o.id)).map((o) => o.id);
+          if (goneO.length) {
+            const goneSet = new Set(goneO);
+            ordersArr = ordersArr.filter((o) => !(o && goneSet.has(o.id)));
+            setOrders((prev) => (prev || []).filter((o) => !(o && goneSet.has(o.id))));
+            buildChunks();
+            try { logDiag("removed_remote_deleted", { count: goneO.length }); } catch (e) {}
+          }
+          const localO = new Set(ordersArr.map((o) => o && o.id));
+          const addO = [];
+          [...(rOrd || []), ...(d.recentOrders || [])].forEach((o) => {
+            if (o && o.id && !localO.has(o.id) && !baseOrderIds.has(o.id) && !tomb.has(o.id)) { localO.add(o.id); addO.push(o); }
+          });
+          const localC = new Set(custArr.map((c) => c && c.id));
+          const addC = (rCus || []).filter((c) => c && c.id && !localC.has(c.id) && !baseCustIds.has(c.id));
+          if (addO.length) {
+            ordersArr = [...addO, ...ordersArr];
+            setOrders((prev) => { const ids = new Set((prev || []).map((o) => o && o.id)); const more = addO.filter((o) => !ids.has(o.id)); return more.length ? [...more, ...prev] : prev; });
+          }
+          if (addC.length) {
+            custArr = [...custArr, ...addC];
+            setCustomers((prev) => { const ids = new Set((prev || []).map((c) => c && c.id)); const more = addC.filter((c) => !ids.has(c.id)); return more.length ? [...prev, ...more] : prev; });
+          }
+          if (addO.length || addC.length) {
+            buildChunks();
+            try { logDiag("merged_remote_before_save", { orders: addO.length, customers: addC.length }); } catch (e) {}
+          }
+        });
+      });
+    }
     let mainHash = null;
     try { mainHash = JSON.stringify(mainPayload); } catch (e) {}
     // 버그1 수정: 재시도 카운터
     let retryCount = 0;
     const MAX_RETRY = 3;
+    let conflictCount = 0;
     const onErr = (err) => {
+      if (err && err.conflict && myGen === saveGenRef.current && conflictCount < 8) {
+        conflictCount++;
+        lastOrdSigsRef.current = []; lastCusSigsRef.current = [];
+        loadedDataSigRef.current = null;
+        try { logDiag("save_conflict_retry", { n: conflictCount }); } catch (e) {}
+        setTimeout(doSave, 200 + Math.random() * 600);
+        return;
+      }
+      if (myGen !== saveGenRef.current) {
+        // 더 최신 저장이 이미 시작됨 → 오래된 데이터로 재시도하지 않음
+        try { logDiag("stale_save_dropped", { msg: String(err && err.message || err).slice(0, 80) }); } catch (e) {}
+        return;
+      }
       try { logDiag("save_failed", { msg: String(err && err.message || err).slice(0, 140), retry: retryCount }); } catch (e) {}
       if (retryCount < MAX_RETRY) {
         retryCount++;
@@ -12065,6 +12142,15 @@ function App() {
     };
     // 버그2 수정: 청크 저장을 먼저 모두 완료한 후에만 메인 문서 업데이트
     function doSave() {
+      if (myGen !== saveGenRef.current) return;
+      preflightMerge().catch((e) => {
+        try { logDiag("preflight_failed", { msg: String(e && e.message || e).slice(0, 80) }); } catch (x) {}
+      }).then(() => {
+        if (myGen !== saveGenRef.current) return;
+        return writeAll();
+      }).catch(onErr);
+    }
+    function writeAll() {
       const prevOrdSigs = lastOrdSigsRef.current || [];
       const prevCusSigs = lastCusSigsRef.current || [];
       const jobs = [];
@@ -12080,7 +12166,7 @@ function App() {
         }
       }
       // 버그2 수정: 청크 저장 완료 후 메인 문서 업데이트, 그 다음 구 청크 삭제
-      Promise.all(jobs).then(() => {
+      return Promise.all(jobs).then(() => {
         lastOrdSigsRef.current = ordSigs;
         lastCusSigsRef.current = cusSigs;
         prevOrdChunkCountRef.current = ordChunks.length;
@@ -12096,7 +12182,22 @@ function App() {
           archiveChunkCount: del,
           archiveSig: del
         });
-        return fbDb.collection("stores").doc(DATA_DOC).set(mainWrite, { merge: true }).then(() => {
+        const mainRef = fbDb.collection("stores").doc(DATA_DOC);
+        const myIds = new Set(ordersArr.map((o) => o && o.id));
+        const myDeleted = Array.from(baseOrderIds).filter((id) => id && !myIds.has(id));
+        return fbDb.runTransaction((t) => t.get(mainRef).then((snap) => {
+          const d = snap.exists ? snap.data() : {};
+          if (d.dataSig && d.dataSig !== expectedSig && d.dataSig !== dataSig) {
+            const e = new Error("save_conflict"); e.conflict = true; throw e;
+          }
+          const tombArr = Array.from(new Set([...(d.deletedOrderIds || []), ...myDeleted])).slice(-500);
+          const tomb = new Set(tombArr);
+          const recent = []; const seen = new Set();
+          [...ordersArr.slice(0, 150), ...(d.recentOrders || [])].forEach((o) => {
+            if (o && o.id && !seen.has(o.id) && !tomb.has(o.id) && recent.length < 200) { seen.add(o.id); recent.push(o); }
+          });
+          t.set(mainRef, __spreadProps(__spreadValues({}, mainWrite), { recentOrders: recent, deletedOrderIds: tombArr }), { merge: true });
+        })).then(() => {
           lastMainHashRef.current = mainHash;
           lastGoodDataRef.current = { customers: custArr, orders: ordersArr, products: data.products, vendors: data.vendors };
           recordCounts({ customers: custArr.length, orders: ordersArr.length, products: (data.products || []).length, vendors: (data.vendors || []).length });
@@ -12115,7 +12216,7 @@ function App() {
           dels.push(fbDb.collection("stores").doc(cusChunkDocId(i)).delete().catch(() => {}));
         }
         return Promise.all(dels);
-      }).catch(onErr);
+      });
     }
     doSave();
   }
