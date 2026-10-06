@@ -2070,7 +2070,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v218 (fix: intent URL deeplink for KakaoTalk/SMS - no store redirect)";
+const APP_BUILD = "v219 (원본메시지 이름/연락처/주소지정·글자수정 + 최종 확인 화면)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -17632,6 +17632,77 @@ function MultiRegModal({ modal, products, couriers, vendors, onClose, onSubmit }
   const [tempCart, setTempCart] = React.useState({});
   const [showRaw, setShowRaw] = React.useState(true); // 원본 메시지 표시
   const [editingField, setEditingField] = React.useState(null); // {idx, field}
+  // v219: 원본메시지 수정(이름지정/연락처지정/주소지정/글자수정) + 최종 확인
+  const [rawMsg, setRawMsg] = React.useState(modal.rawText || "");
+  const [selText, setSelText] = React.useState("");
+  const [assignMode, setAssignMode] = React.useState(null); // 'name' | 'phone' | 'address'
+  const [editRaw, setEditRaw] = React.useState(false);
+  const [rawDraft, setRawDraft] = React.useState("");
+  const [rawHint, setRawHint] = React.useState("");
+  const [confirmOpen, setConfirmOpen] = React.useState(false);
+  const rawRef = React.useRef(null);
+  React.useEffect(() => {
+    const onSel = () => {
+      try {
+        const sel = window.getSelection();
+        if (!sel || sel.isCollapsed) return;
+        const t = String(sel.toString() || "").trim();
+        if (!t || !rawRef.current) return;
+        if (rawRef.current.contains(sel.anchorNode)) { setSelText(t); setRawHint(""); }
+      } catch (e) {}
+    };
+    document.addEventListener("selectionchange", onSel);
+    return () => document.removeEventListener("selectionchange", onSel);
+  }, []);
+  const fmtPhone = (v) => {
+    const d = String(v || "").replace(/[^0-9]/g, "");
+    if (d.length === 11) return d.replace(/(\d{3})(\d{4})(\d{4})/, "$1-$2-$3");
+    if (d.length === 10) return d.replace(/(\d{3})(\d{3})(\d{4})/, "$1-$2-$3");
+    return d || String(v || "").trim();
+  };
+  function startAssign(mode) {
+    if (!selText) { setRawHint("원본 메시지에서 글자를 길게 눌러 먼저 선택하세요"); setAssignMode(null); return; }
+    setRawHint(""); setAssignMode(mode);
+  }
+  function applyAssign(target) {
+    const mode = assignMode;
+    let val = selText;
+    if (mode === "phone") val = fmtPhone(val);
+    else if (mode === "address") val = val.replace(/\s+/g, " ").trim();
+    else val = val.replace(/\s+/g, "").trim();
+    if (target === "sender") {
+      setSender((s) => ({ ...s, [mode]: val }));
+    } else if (target === "new") {
+      const nd = { id: "new_" + Date.now(), name: "", phone: "", address: "", cart: {} };
+      nd[mode] = val;
+      if (mode === "address" && typeof estimatePostalCode === "function") nd.postalCode = estimatePostalCode(val);
+      setDeliveries((prev) => [...prev, nd]);
+    } else {
+      setDeliveries((prev) => prev.map((d, i) => {
+        if (i !== target) return d;
+        const nd = { ...d, [mode]: val };
+        if (mode === "address" && typeof estimatePostalCode === "function") nd.postalCode = estimatePostalCode(val);
+        return nd;
+      }));
+    }
+    setAssignMode(null); setSelText("");
+    try { window.getSelection().removeAllRanges(); } catch (e) {}
+  }
+  function startEditRaw() { setRawDraft(rawMsg); setEditRaw(true); setAssignMode(null); setRawHint(""); setShowRaw(true); }
+  function saveRaw(reparse) {
+    const text = rawDraft;
+    setRawMsg(text); setEditRaw(false);
+    if (!reparse) return;
+    const rs = typeof parseMultipleRecipients === "function" ? (parseMultipleRecipients(text, products) || []) : [];
+    if (!rs.length) { setRawHint("받는분을 자동으로 찾지 못했어요. 글자를 선택해서 이름지정/주소지정으로 넣어주세요"); return; }
+    setDeliveries((prev) => rs.map((r, i) => ({
+      id: (prev[i] && prev[i].id) || ("new_" + Date.now() + "_" + i),
+      name: r.name || "", phone: r.phone ? fmtPhone(r.phone) : "", address: r.address || "",
+      postalCode: typeof estimatePostalCode === "function" ? estimatePostalCode(r.address || "") : "",
+      cart: (prev[i] && prev[i].cart) || {}
+    })));
+    setRawHint("받는분 " + rs.length + "명을 다시 인식했어요");
+  }
 
   function updateDelivery(idx, key, val) {
     setDeliveries((prev) => prev.map((d, i) => i === idx ? { ...d, [key]: val } : d));
@@ -17648,6 +17719,10 @@ function MultiRegModal({ modal, products, couriers, vendors, onClose, onSubmit }
     setProductModal(null);
   }
   function handleSubmit() {
+    setAssignMode(null);
+    setConfirmOpen(true);
+  }
+  function finalSubmit() {
     onSubmit({ sender, courier, deliveries });
     onClose();
   }
@@ -17661,7 +17736,6 @@ function MultiRegModal({ modal, products, couriers, vendors, onClose, onSubmit }
   };
 
   // 원본 메시지에서 해당 이름/전화 강조 표시
-  const rawMsg = modal.rawText || "";
   const highlightRaw = (text, deliveries) => {
     if (!text) return [];
     const parts = [];
@@ -17703,9 +17777,34 @@ function MultiRegModal({ modal, products, couriers, vendors, onClose, onSubmit }
         /* @__PURE__ */ React.createElement("span", { style: { fontSize: 12, fontWeight: 700, color: "#C0DD97" } }, "\uC6D0\uBCF8 \uBA54\uC2DC\uC9C0"),
         /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11, color: "#888780" } }, showRaw ? "\uC811\uAE30 \u25B2" : "\uD3BC\uCE58\uAE30 \u25BC")
       ),
-      showRaw && /* @__PURE__ */ React.createElement("div", { style: { padding: "0 14px 12px", maxHeight: "28vh", overflowY: "auto" } },
-        /* @__PURE__ */ React.createElement("pre", { style: { fontSize: 12.5, color: "#E2E4DD", lineHeight: 1.7, margin: 0, whiteSpace: "pre-wrap", wordBreak: "break-all", fontFamily: "inherit" } },
-          rawMsg
+      showRaw && /* @__PURE__ */ React.createElement("div", { style: { padding: "0 14px 12px" } },
+        !editRaw && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 8 } },
+          /* @__PURE__ */ React.createElement("button", { onPointerDown: (e) => e.preventDefault(), onClick: () => startAssign("name"), style: { flex: 1, border: "none", borderRadius: 8, padding: "8px 0", fontSize: 12, fontWeight: 800, cursor: "pointer", background: assignMode === "name" ? "#E8A020" : "#2F6F4E", color: "#fff" } }, "이름지정"),
+          /* @__PURE__ */ React.createElement("button", { onPointerDown: (e) => e.preventDefault(), onClick: () => startAssign("phone"), style: { flex: 1, border: "none", borderRadius: 8, padding: "8px 0", fontSize: 12, fontWeight: 800, cursor: "pointer", background: assignMode === "phone" ? "#E8A020" : "#185FA5", color: "#fff" } }, "연락처지정"),
+          /* @__PURE__ */ React.createElement("button", { onPointerDown: (e) => e.preventDefault(), onClick: () => startAssign("address"), style: { flex: 1, border: "none", borderRadius: 8, padding: "8px 0", fontSize: 12, fontWeight: 800, cursor: "pointer", background: assignMode === "address" ? "#E8A020" : "#2F6F4E", color: "#fff" } }, "주소지정"),
+          /* @__PURE__ */ React.createElement("button", { onPointerDown: (e) => e.preventDefault(), onClick: startEditRaw, style: { flex: 1, border: "none", borderRadius: 8, padding: "8px 0", fontSize: 12, fontWeight: 800, cursor: "pointer", background: "#5F5E5A", color: "#fff" } }, "글자수정")
+        ),
+        editRaw
+          ? /* @__PURE__ */ React.createElement("div", null,
+              /* @__PURE__ */ React.createElement("textarea", { value: rawDraft, onChange: (e) => setRawDraft(e.target.value), rows: 8, style: { width: "100%", boxSizing: "border-box", fontSize: 13, lineHeight: 1.6, borderRadius: 8, border: "1.5px solid #C0DD97", padding: 10, fontFamily: "inherit", background: "#fff", color: "#1B2430" } }),
+              /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginTop: 6 } },
+                /* @__PURE__ */ React.createElement("button", { onClick: () => setEditRaw(false), style: { flex: 1, border: "1px solid #888780", background: "transparent", color: "#E2E4DD", borderRadius: 8, padding: "9px 0", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, "취소"),
+                /* @__PURE__ */ React.createElement("button", { onClick: () => saveRaw(false), style: { flex: 1, border: "none", background: "#5F5E5A", color: "#fff", borderRadius: 8, padding: "9px 0", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, "글자만 저장"),
+                /* @__PURE__ */ React.createElement("button", { onClick: () => { if (window.confirm("수정한 메시지로 받는분을 다시 인식할까요?\n(이름/연락처/주소가 새로 채워지고, 이미 고른 상품은 순서대로 유지돼요)")) saveRaw(true); }, style: { flex: 1.4, border: "none", background: "#2F6F4E", color: "#fff", borderRadius: 8, padding: "9px 0", fontSize: 12, fontWeight: 800, cursor: "pointer" } }, "저장 후 다시 인식")
+              )
+            )
+          : /* @__PURE__ */ React.createElement("div", { ref: rawRef, style: { maxHeight: "24vh", overflowY: "auto", fontSize: 13.5, color: "#E2E4DD", lineHeight: 1.75, whiteSpace: "pre-wrap", wordBreak: "break-all", userSelect: "text", WebkitUserSelect: "text" } }, rawMsg),
+        !editRaw && selText && !assignMode && /* @__PURE__ */ React.createElement("div", { style: { marginTop: 6, fontSize: 11.5, color: "#C0DD97" } }, "선택됨: \u201C" + (selText.length > 30 ? selText.slice(0, 30) + "\u2026" : selText) + "\u201D \u2192 위 버튼을 누르세요"),
+        rawHint && /* @__PURE__ */ React.createElement("div", { style: { marginTop: 6, fontSize: 11.5, color: "#F4C76A", fontWeight: 700 } }, rawHint),
+        assignMode && /* @__PURE__ */ React.createElement("div", { style: { marginTop: 8, background: "#27313F", borderRadius: 10, padding: 10 } },
+          /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#fff", fontWeight: 700, marginBottom: 8 } },
+            "\u201C" + (selText.length > 24 ? selText.slice(0, 24) + "\u2026" : selText) + "\u201D \uC744(\uB97C) \uC5B4\uB514 " + ({ name: "이름", phone: "연락처", address: "주소" })[assignMode] + "\uC73C\uB85C \uB123\uC744\uAE4C\uC694?"),
+          /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } },
+            assignMode !== "address" && /* @__PURE__ */ React.createElement("button", { onClick: () => applyAssign("sender"), style: { border: "none", borderRadius: 16, padding: "7px 12px", fontSize: 12, fontWeight: 800, background: "#E8A020", color: "#fff", cursor: "pointer" } }, "주문자"),
+            deliveries.map((d, i) => /* @__PURE__ */ React.createElement("button", { key: d.id || i, onClick: () => applyAssign(i), style: { border: "none", borderRadius: 16, padding: "7px 12px", fontSize: 12, fontWeight: 800, background: "#2F6F4E", color: "#fff", cursor: "pointer" } }, "배송지" + (i + 1) + (d.name ? " (" + d.name + ")" : ""))),
+            /* @__PURE__ */ React.createElement("button", { onClick: () => applyAssign("new"), style: { border: "1px dashed #C0DD97", borderRadius: 16, padding: "7px 12px", fontSize: 12, fontWeight: 800, background: "transparent", color: "#C0DD97", cursor: "pointer" } }, "+ 새 배송지"),
+            /* @__PURE__ */ React.createElement("button", { onClick: () => setAssignMode(null), style: { border: "1px solid #888780", borderRadius: 16, padding: "7px 12px", fontSize: 12, fontWeight: 700, background: "transparent", color: "#E2E4DD", cursor: "pointer" } }, "취소")
+          )
         )
       )
     ),
@@ -17779,8 +17878,56 @@ function MultiRegModal({ modal, products, couriers, vendors, onClose, onSubmit }
       /* @__PURE__ */ React.createElement("button", {
         onClick: handleSubmit,
         style: { width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 800, fontSize: 16, cursor: "pointer" }
-      }, "\uC8FC\uBB38 \uB4F1\uB85D \uC644\uB8CC")
+      }, "\uC644\uB8CC \u2192 \uCD5C\uC885 \uD655\uC778")
     ),
+    // v219 최종 확인 화면
+    confirmOpen && (() => {
+      const pmap = {}; (products || []).forEach((p) => { pmap[p.id] = p; });
+      let grand = 0;
+      const rows = deliveries.map((d) => {
+        const items = Object.entries(d.cart || {}).filter(([, q]) => q > 0).map(([pid, q]) => {
+          const p = pmap[pid]; const price = p && p.price ? Number(p.price) : 0;
+          grand += price * q;
+          return { label: (p ? p.name : "상품") + " " + q + "개", sub: price * q };
+        });
+        const sub = items.reduce((a, b) => a + b.sub, 0);
+        const warn = [];
+        if (!d.name) warn.push("이름"); if (!d.phone) warn.push("연락처"); if (!d.address) warn.push("주소"); if (!items.length) warn.push("상품");
+        return { d, items, sub, warn };
+      });
+      const warnCount = rows.filter((r) => r.warn.length).length;
+      const senderWarn = !sender.name || !sender.phone;
+      return /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, background: "#F1F2EC", zIndex: 100001, display: "flex", flexDirection: "column" } },
+        /* @__PURE__ */ React.createElement("div", { style: { padding: "14px 16px 12px", background: "#2F6F4E", color: "#fff", fontSize: 16, fontWeight: 800, flexShrink: 0 } }, "최종 확인"),
+        /* @__PURE__ */ React.createElement("div", { style: { flex: 1, overflowY: "auto", padding: "12px 14px" } },
+          /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", borderRadius: 12, padding: "12px 14px", marginBottom: 10, fontSize: 13 } },
+            /* @__PURE__ */ React.createElement("div", { style: { color: "#5F5E5A", fontSize: 11, fontWeight: 700 } }, "택배사"),
+            /* @__PURE__ */ React.createElement("div", { style: { fontWeight: 700, marginBottom: 8 } }, courier),
+            /* @__PURE__ */ React.createElement("div", { style: { color: "#5F5E5A", fontSize: 11, fontWeight: 700 } }, "주문자"),
+            /* @__PURE__ */ React.createElement("div", { style: { fontWeight: 700, color: senderWarn ? "#C0392B" : "#1B2430" } }, (sender.name || "이름 없음") + "  " + (sender.phone || "연락처 없음"))
+          ),
+          rows.map((r, i) => /* @__PURE__ */ React.createElement("div", { key: r.d.id || i, style: { background: "#fff", borderRadius: 12, padding: "12px 14px", marginBottom: 10, fontSize: 13, border: r.warn.length ? "1.5px solid #E8A020" : "1px solid #E2E4DD" } },
+            /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 4 } },
+              /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 800, color: "#2F6F4E" } }, "배송지 " + (i + 1)),
+              r.sub > 0 && /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 800 } }, r.sub.toLocaleString() + "원")
+            ),
+            /* @__PURE__ */ React.createElement("div", { style: { fontWeight: 700 } }, (r.d.name || "-") + "  " + (r.d.phone || "-")),
+            /* @__PURE__ */ React.createElement("div", { style: { color: "#5F5E5A", marginTop: 2 } }, r.d.address || "-"),
+            /* @__PURE__ */ React.createElement("div", { style: { marginTop: 6, color: "#1B6B3A", fontWeight: 700 } }, r.items.length ? r.items.map((x) => x.label).join(", ") : ""),
+            r.warn.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { marginTop: 6, color: "#B7791F", fontWeight: 700, fontSize: 12 } }, "\u26A0\uFE0F 빠진 항목: " + r.warn.join(", "))
+          )),
+          /* @__PURE__ */ React.createElement("div", { style: { background: "#1B2430", color: "#fff", borderRadius: 12, padding: "12px 14px", display: "flex", justifyContent: "space-between", fontSize: 14, fontWeight: 800 } },
+            /* @__PURE__ */ React.createElement("span", null, "총 " + deliveries.length + "건"),
+            /* @__PURE__ */ React.createElement("span", null, grand.toLocaleString() + "원")
+          ),
+          (warnCount > 0 || senderWarn) && /* @__PURE__ */ React.createElement("div", { style: { marginTop: 10, fontSize: 12, color: "#B7791F", fontWeight: 700, textAlign: "center" } }, "빠진 항목이 있어요. 그대로 등록할 수도 있지만 확인해 주세요.")
+        ),
+        /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, padding: "12px 14px", paddingBottom: "calc(12px + env(safe-area-inset-bottom, 0px))", background: "#fff", borderTop: "1px solid #E2E4DD", flexShrink: 0 } },
+          /* @__PURE__ */ React.createElement("button", { onClick: () => setConfirmOpen(false), style: { flex: 1, padding: "15px 0", borderRadius: 14, border: "1.5px solid #2F6F4E", background: "#fff", color: "#2F6F4E", fontWeight: 800, fontSize: 15, cursor: "pointer" } }, "수정하기"),
+          /* @__PURE__ */ React.createElement("button", { onClick: finalSubmit, style: { flex: 2, padding: "15px 0", borderRadius: 14, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 800, fontSize: 15, cursor: "pointer" } }, "최종 등록 (" + deliveries.length + "건)")
+        )
+      );
+    })(),
     // 상품 선택 팝업 - 카테고리/검색/묶음처리
     productModal !== null && /* @__PURE__ */ React.createElement(ProductSelectSheet, {
       products, tempCart, setTempCart,
