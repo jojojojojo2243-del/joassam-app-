@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 217;
+const APP_VERSION = 218;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2070,7 +2070,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v217 (FAB+: app picker popup → KakaoTalk/SMS/Line deeplink → return → SenderPredictModal)";
+const APP_BUILD = "v218 (fix: intent URL deeplink for KakaoTalk/SMS - no store redirect)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -17408,34 +17408,24 @@ function FabOrderButton({ setTab, onSetSender }) {
       /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A", marginBottom: 18, lineHeight: 1.6 } }, "\uC8FC\uBB38 \uBB38\uC790\uAC00 \uC788\uB294 \uCC44\uD305 \uC571\uC744 \uC120\uD0DD\uD558\uC138\uC694\u2014 \uBB38\uC790\uC5D0\uC11C \uACF5\uC720\uD558\uBA74 \uC790\uB3D9 \uC785\uB825\uB429\uB2C8\uB2E4."),
       // 앱 목록
       [
-        { label: "\uCE74\uCE74\uC624\uD1A1", emoji: "\uD83D\uDCAC", bg: "#FAE100", color: "#3A1D1D", url: "kakaolink://", pkg: "com.kakao.talk" },
-        { label: "\uBB38\uC790(\uCC44\uD305+)", emoji: "\u2709\uFE0F", bg: "#4CAF50", color: "#fff", url: "content://sms/", pkg: "com.samsung.android.messaging" },
-        { label: "\uB124\uC774\uBC84 \uB77C\uC778", emoji: "\uD83D\uDCF1", bg: "#00C73C", color: "#fff", url: "line://", pkg: "jp.naver.line.android" },
-        { label: "\uAE30\uD0C0 \uBB38\uC790", emoji: "\uD83D\uDCEC", bg: "#E2E4DD", color: "#1B2430", url: "sms:", pkg: "" },
-      ].map(({ label, emoji, bg, color, url, pkg }) =>
+        { label: "\uCE74\uCE74\uC624\uD1A1", emoji: "\uD83D\uDCAC", bg: "#FAE100", color: "#3A1D1D",
+          open: () => { window.location.href = "intent://timeline#Intent;scheme=kakaolink;package=com.kakao.talk;end"; } },
+        { label: "\uBB38\uC790(\uCC44\uD305+)", emoji: "\u2709\uFE0F", bg: "#4CAF50", color: "#fff",
+          open: () => { window.location.href = "intent://main#Intent;scheme=smsto;package=com.samsung.android.messaging;end"; } },
+        { label: "\uB124\uC774\uBC84 \uB77C\uC778", emoji: "\uD83D\uDCF1", bg: "#00C73C", color: "#fff",
+          open: () => { window.location.href = "line://"; } },
+        { label: "\uAE30\uD0C0 \uBB38\uC790", emoji: "\uD83D\uDCEC", bg: "#5F5E5A", color: "#fff",
+          open: () => { window.location.href = "sms:"; } },
+      ].map(({ label, emoji, bg, color, open }) =>
         /* @__PURE__ */ React.createElement("button", {
           key: label,
-          onClick: () => {
-            // 앱 열기 시도
-            const a = document.createElement("a");
-            a.href = url;
-            try { a.click(); } catch(e) {}
-            // 열기 실패 시 플레이스토어로
-            if (pkg) {
-              setTimeout(() => {
-                if (document.hasFocus()) {
-                  try { window.location.href = "market://details?id=" + pkg; } catch(e) {}
-                }
-              }, 1800);
-            }
-            // 포커스 복귀 감지 유지
-          },
+          onClick: open,
           style: { display: "flex", alignItems: "center", gap: 14, width: "100%", padding: "13px 16px", borderRadius: 14, border: "none", background: bg, color, fontWeight: 800, fontSize: 15, cursor: "pointer", marginBottom: 8, textAlign: "left" }
         },
           /* @__PURE__ */ React.createElement("span", { style: { fontSize: 26, lineHeight: 1 } }, emoji),
           /* @__PURE__ */ React.createElement("div", null,
             /* @__PURE__ */ React.createElement("div", null, label),
-            /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 400, opacity: 0.75, marginTop: 1 } }, "\uD0ED\uD558\uBA74 \uC571 \uC5F4\uAE30 \u2192 \uBB38\uC790 \uACF5\uC720 \u2192 \uC790\uB3D9 \uC785\uB825")
+            /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 400, opacity: 0.8, marginTop: 1 } }, "\uD0ED\uD558\uBA74 \uC571 \uC5F4\uAE30 \u2192 \uBB38\uC790 \uACF5\uC720 \u2192 \uC790\uB3D9 \uC785\uB825")
           )
         )
       ),
