@@ -2070,7 +2070,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v219 (원본메시지 이름/연락처/주소지정·글자수정 + 최종 확인 화면)";
+const APP_BUILD = "v220 (fix: 등록 직후 주문이 서버 데이터에 덮여 사라지는 문제)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11738,7 +11738,21 @@ function App() {
       playAlertSound();
     }
     prevOrderCountRef.current = newCount;
-    setOrders(list);
+    // v220: 아직 서버에 저장되지 않은 방금 등록한 주문이 서버 데이터로 덮여 사라지는 문제 방지
+    if (firebaseReady) {
+      const prevGoodIds = new Set(((lastGoodDataRef.current || {}).orders || []).map((o) => o && o.id));
+      const remoteIds = new Set(list.map((o) => o && o.id));
+      setOrders((prev) => {
+        const keep = (prev || []).filter((o) => o && o.id && !remoteIds.has(o.id) && !prevGoodIds.has(o.id));
+        if (keep.length) {
+          try { logDiag("kept_unsaved_orders", { count: keep.length }); } catch (e) {}
+          return [...keep, ...list];
+        }
+        return list;
+      });
+    } else {
+      setOrders(list);
+    }
     lastGoodDataRef.current = __spreadProps(__spreadValues({}, lastGoodDataRef.current || {}), { orders: list });
     recordCounts({ orders: newCount });
   }
@@ -16692,11 +16706,15 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
               courier: courier || "",
               createdAt: stamp,
             };
-          }).filter((o) => o && o.recipient && (o.recipient.name || o.recipient.phone));
+          }).filter((o) => o && o.recipient && (o.recipient.name || o.recipient.phone || o.recipient.address));
+          const dropped = deliveries.length - newOrders.length;
           if (newOrders.length > 0) {
             setOrders((prev) => [...newOrders, ...prev]);
-            fireToast(`\uC8FC\uBB38 ${newOrders.length}\uAC74 \uC77C\uAD04 \uB4F1\uB85D\uB418\uC5C8\uC5B4\uC694!`);
+            const loading = firebaseReady && !fbFirstLoadRef.current;
+            fireToast(`주문 ${newOrders.length}건 등록되었어요!` + (dropped > 0 ? ` (빈 배송지 ${dropped}건 제외)` : "") + (loading ? " · 데이터를 불러온 뒤 자동 저장돼요" : ""));
             setTab("orders");
+          } else {
+            fireToast("⚠️ 등록할 배송지가 없어요. 받는분 이름이나 연락처를 입력해 주세요.");
           }
         }
       }
