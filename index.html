@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 232;
+const APP_VERSION = 233;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -119,6 +119,8 @@ function replaceRemoteEdits(localArr, remoteArr, baseArr) {
 const KO_ALERT_MAP = [
   [/vendors_dropped_by_half/g, "업체 수가 한 번에 절반 이상 줄어듦"],
   [/products_dropped_by_half/g, "상품 수가 한 번에 절반 이상 줄어듦"],
+  [/customers_dropped_by_half/g, "고객 수가 한 번에 절반 이상 줄어듦"],
+  [/orders_dropped_by_half/g, "주문 수가 한 번에 절반 이상 줄어듦"],
   [/vendors_dropped_to_empty/g, "업체가 0개가 됨"],
   [/products_dropped_to_empty/g, "상품이 0개가 됨"],
   [/customers_dropped_to_empty/g, "고객이 0명이 됨"],
@@ -653,6 +655,16 @@ function evaluateSaveGuard({ current, prev, storedFloor, allow }) {
     const storedLen = storedFloor ? storedFloor[key] || 0 : 0;
     const refLen = Math.max(prevLen, storedLen);
     if (refLen >= 10 && curLen < refLen * 0.5 && !allowed(key)) {
+      return { blocked: true, reason: key + "_dropped_by_half" };
+    }
+  }
+  // v233: 고객/주문도 한 번에 절반 이상 줄면 차단 (정리·삭제 기능으로 직접 지운 경우는 허용)
+  for (const key of ["customers", "orders"]) {
+    const curLen = arr(current, key).length;
+    const prevLen = prev ? arr(prev, key).length : 0;
+    const storedLen = storedFloor ? storedFloor[key] || 0 : 0;
+    const refLen = Math.max(prevLen, storedLen);
+    if (refLen >= 20 && curLen > 0 && curLen < refLen * 0.5 && !allowed(key)) {
       return { blocked: true, reason: key + "_dropped_by_half" };
     }
   }
@@ -2156,7 +2168,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v232 (서버 한도 초과 시 기기에 보관 후 자동 저장)";
+const APP_BUILD = "v233 (주문 저장 전체 점검: 일부 불러오기 사고 방지·재시도 데이터·백업 분할·쓰기량 절감)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -2630,7 +2642,16 @@ function aiMemSave(userId, kind, val) {
   }
   return val;
 }
+const __aiMirrorTimers = {};
 function aiMemFirebaseMirror(userId, kind, val) {
+  // v233: 사용자 동작마다 서버에 쓰던 것을 1분 단위로 묶음 (서버 쓰기 한도 절약)
+  try {
+    const k = String(userId || "default") + "/" + kind;
+    if (__aiMirrorTimers[k]) clearTimeout(__aiMirrorTimers[k].t);
+    __aiMirrorTimers[k] = { t: setTimeout(() => { delete __aiMirrorTimers[k]; aiMemFirebaseMirrorNow(userId, kind, val); }, 60000) };
+  } catch (e) {}
+}
+function aiMemFirebaseMirrorNow(userId, kind, val) {
   try {
     if (typeof fbDb === "undefined" || !fbDb) return;
     if (typeof AI_LEARNING_ENABLED_GLOBAL !== "undefined" && AI_LEARNING_ENABLED_GLOBAL === false) return;
@@ -11037,9 +11058,12 @@ function App() {
     });
   }
   const sessionIdRef = useRef("s_" + Math.random().toString(36).slice(2, 10));
+  const diagThrottleRef = useRef({}); // v233
+  const countsRef = useRef({}); // v233: 진단 기록용 최신 개수
   const sessionStartRef = useRef(Date.now());
   const [diagLog, setDiagLog] = useState(null);
   const [isStaleVersion, setIsStaleVersion] = useState(false);
+  const [reloadTick, setReloadTick] = useState(0); // v233: 불러오기 실패 시 다시 구독
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   useEffect(() => {
@@ -11393,6 +11417,16 @@ function App() {
   }
   function logDiag(event, extra) {
     if (!firebaseReady) return;
+    // v233: 진단 기록도 서버 쓰기 한도를 쓰므로, 같은 종류는 3분에 1번만 서버에 기록 (자주 나는 정상 기록은 서버에 안 남김)
+    if (/^(skip_remote_lists_while_saving|kept_unsaved_orders|kept_local_edits|merged_remote_field)$/.test(event)) return;
+    try {
+      const nowT = Date.now();
+      const last = diagThrottleRef.current[event] || 0;
+      const urgent = /^(blocked_|save_failed|load_failed|save_alert_error|outdated_client_blocked|quota_exceeded_wait)/.test(event);
+      if (nowT - last < (urgent ? 60000 : 180000)) return;
+      diagThrottleRef.current[event] = nowT;
+    } catch (e) {}
+    const cnt = countsRef.current || {};
     try {
       fbDb.collection("stores").doc("_diagnostics").collection("save_events").add(__spreadValues({
         event,
@@ -11400,7 +11434,7 @@ function App() {
         at: (/* @__PURE__ */ new Date()).toISOString(),
         sessionId: sessionIdRef.current,
         sessionAgeSec: Math.round((Date.now() - sessionStartRef.current) / 1e3),
-        counts: { customers: customers.length, orders: orders.length, products: products.length, vendors: vendors.length },
+        counts: { customers: cnt.customers || 0, orders: cnt.orders || 0, products: cnt.products || 0, vendors: cnt.vendors || 0 },
         ua: (navigator.userAgent || "").slice(0, 150),
         href: window.location.href.slice(0, 200),
         visibility: document.visibilityState
@@ -11788,9 +11822,15 @@ function App() {
     // count가 0이면 null 반환 (빈 배열로 덮어쓰는 것 방지)
     if (!n) return Promise.resolve(null);
     const gets = [];
-    for (let i = 0; i < n; i++) {
-      gets.push(fbDb.collection("stores").doc(idFn(i)).get().then((s) => s.exists && s.data() && Array.isArray(s.data()[key]) ? { arr: s.data()[key], sig: s.data().sig || null } : { arr: [], sig: null }).catch(() => ({ arr: [], sig: null })));
-    }
+    // v233: 묶음 하나라도 못 받으면 일부만 반영되어 주문이 사라지므로, 3번까지 다시 받고 그래도 실패면 전체를 실패로 처리
+    const getOne = (i, tries) => fbDb.collection("stores").doc(idFn(i)).get().then((s) => {
+      if (s.exists && s.data() && Array.isArray(s.data()[key])) return { arr: s.data()[key], sig: s.data().sig || null };
+      throw new Error("chunk_missing_" + key + "_" + i);
+    }).catch((e) => {
+      if (tries < 3) return new Promise((r) => setTimeout(r, 700 * (tries + 1))).then(() => getOne(i, tries + 1));
+      throw e;
+    });
+    for (let i = 0; i < n; i++) gets.push(getOne(i, 0));
     // v223: 각 묶음의 서명(sig)도 함께 돌려줌 → 바뀐 묶음만 다시 저장
     return Promise.all(gets).then((parts) => { const out = parts.reduce((a, b) => a.concat(b.arr), []); out.__sigs = parts.map((p) => p.sig); return out; });
   }
@@ -11980,8 +12020,10 @@ function App() {
                   fbFirstLoadRef.current = true;
                 }).catch((err) => {
                   loadedDataSigRef.current = null;
-                  fbFirstLoadRef.current = true;
-                  try { fireToast("⚠️ 데이터 로드 오류 — 기존 데이터를 유지합니다. 새로고침해 주세요."); } catch(e) {}
+                  // v233: 처음 불러오기가 실패했으면 저장을 열지 않음 (빈/일부 데이터로 서버를 덮는 것 방지)
+                  try { logDiag("load_failed", { msg: String(err && err.message || err).slice(0, 80) }); } catch (e) {}
+                  try { fireToast("⚠️ 데이터를 다 불러오지 못했어요 — 잠시 후 자동으로 다시 불러옵니다"); } catch(e) {}
+                  setTimeout(() => { try { fbDb.collection("stores").doc(DATA_DOC).get().then(() => {}).catch(() => {}); setReloadTick((t) => t + 1); } catch (e) {} }, 5000);
                 });
               } else {
                 // 이미 로드된 sig → 바로 설정
@@ -12069,7 +12111,7 @@ function App() {
       if (unsubCust) unsubCust();
       if (unsubAuth) unsubAuth();
     };
-  }, []);
+  }, [reloadTick]);
   useEffect(() => {
     if (!dataLoaded) return;
     try {
@@ -12099,6 +12141,8 @@ function App() {
   const appliedDataSigRef = useRef(null); // v231: 화면(상태)에 실제로 반영 끝난 주문/고객 서명
   const baseMainRef = useRef(null); // v231: 마지막으로 서버와 맞춘 일반 항목들
   const pendingSaveDataRef = useRef(null);
+  const latestDataRef = useRef(null); // v233
+  const forceOverwriteRef = useRef(false); // v233: 백업 복원 시 서버 병합 없이 그대로 저장
   const lastOrdSigsRef = useRef([]);
   const lastCusSigsRef = useRef([]);
   const prevOrdChunkCountRef = useRef(0);
@@ -12149,30 +12193,48 @@ function App() {
       });
       return;
     }
-    // ===== 일별 자동 백업 =====
+    // ===== v233: 시간별 자동 백업 (고객은 2천 명씩 나눠 저장 — 한 문서 1MB 제한 때문에 예전 백업은 실패하고 있었음) =====
     try {
-      const today = todayStr(); // "2026-09-30"
-      const backupKey = "joassam_last_backup_date_" + DATA_DOC;
-      const lastBackupDate = localStorage.getItem(backupKey) || "";
-      if (lastBackupDate !== today) {
-        const custArr2 = data.customers || [];
-        const ordArr2 = data.orders || [];
-        const prodArr2 = data.products || [];
-        const vendArr2 = data.vendors || [];
-        // 데이터가 있을 때만 백업
-        if (custArr2.length > 0 || ordArr2.length > 0 || prodArr2.length > 0) {
-          const backupDocId = (IS_TEST ? "test_backup_" : "backup_") + today;
-          fbDb.collection("stores").doc(backupDocId).set({
-            customers: custArr2,
-            orders: ordArr2.slice(0, 400), // 최근 400건만 (용량 절약)
-            products: prodArr2,
-            vendors: vendArr2,
-            invoices: data.invoices || [],
-            backedUpAt: nowStamp()
-          }).then(() => {
-            localStorage.setItem(backupKey, today);
-          }).catch(() => {});
-        }
+      const nowD = new Date();
+      const today = todayStr();
+      const hh = String(nowD.getHours()).padStart(2, "0");
+      const slot = today + "_" + hh;
+      const bk = "joassam_last_backup_slot_" + DATA_DOC;
+      const lastTry = Number(localStorage.getItem(bk + "_try") || 0);
+      const custB = data.customers || [], ordB = data.orders || [];
+      if (localStorage.getItem(bk) !== slot && Date.now() - lastTry > 10 * 60 * 1000 && (custB.length > 0 || ordB.length > 0)) {
+        localStorage.setItem(bk + "_try", String(Date.now()));
+        const prefix = IS_TEST ? "test_backup_" : "backup_";
+        const bid = prefix + slot;
+        const CH = 2000;
+        const cChunks = [];
+        for (let i = 0; i < custB.length; i += CH) cChunks.push(custB.slice(i, i + CH));
+        const jobs = cChunks.map((c, i) => fbDb.collection("stores").doc(bid + "_c" + i).set({ customers: c, part: i }));
+        Promise.all(jobs).then(() => fbDb.collection("stores").doc(bid).set({
+          orders: ordB.slice(0, 600),
+          ordersCount: ordB.length,
+          customersCount: custB.length,
+          customersChunkCount: cChunks.length,
+          products: data.products || [],
+          vendors: data.vendors || [],
+          invoices: data.invoices || [],
+          subscriptions: data.subscriptions || [],
+          supplier: data.supplier || {},
+          backedUpAt: nowStamp()
+        })).then(() => {
+          localStorage.setItem(bk, slot);
+          // 보관 기간: 시간별 백업은 2일, 그보다 오래된 같은 시각 백업 삭제 (매일 0시 백업은 14일 보관)
+          try {
+            const old = new Date(nowD.getTime() - (hh === "00" ? 14 : 2) * 864e5);
+            const oldId = prefix + old.getFullYear() + "-" + String(old.getMonth() + 1).padStart(2, "0") + "-" + String(old.getDate()).padStart(2, "0") + "_" + hh;
+            fbDb.collection("stores").doc(oldId).get().then((os) => {
+              if (!os.exists) return;
+              const n = (os.data() || {}).customersChunkCount || 0;
+              for (let i = 0; i < n; i++) fbDb.collection("stores").doc(oldId + "_c" + i).delete().catch(() => {});
+              fbDb.collection("stores").doc(oldId).delete().catch(() => {});
+            }).catch(() => {});
+          } catch (e) {}
+        }).catch(() => {});
       }
     } catch (e) {}
     let ordersArr = data.orders || [];
@@ -12335,26 +12397,35 @@ function App() {
     const MAX_RETRY = 3;
     let conflictCount = 0;
     const clearSaving = () => { if (savingRef.current === myGen) savingRef.current = 0; };
+    // v233: 실패 후 재시도는 '지금 최신 상태'로. 이미 예약된 새 저장이 있으면 건드리지 않음
+    const scheduleRetry = (ms) => {
+      if (!pendingSaveDataRef.current) pendingSaveDataRef.current = latestDataRef.current || data;
+      if (saveTimerRef.current) return;
+      saveTimerRef.current = setTimeout(flushSaveNow, ms);
+    };
+    const stashUnsynced = () => {
+      try {
+        const uk = "joassam_unsynced_orders_" + DATA_DOC;
+        const prevSt = JSON.parse(localStorage.getItem(uk) || "[]") || [];
+        const latestOrders = ((latestDataRef.current || {}).orders) || ordersArr;
+        const mine = latestOrders.filter((o) => o && o.id && !baseOrderIds.has(o.id));
+        const byId = {}; prevSt.forEach((o) => { if (o && o.id) byId[o.id] = o; }); mine.forEach((o) => { byId[o.id] = o; });
+        const curIds = new Set(latestOrders.map((o) => o && o.id));
+        const merged = Object.values(byId).filter((o) => curIds.has(o.id));
+        if (merged.length) localStorage.setItem(uk, JSON.stringify(merged));
+      } catch (e) {}
+    };
     const onErr = (err) => {
       if (err && err.outdated) { pendingSaveDataRef.current = null; clearSaving(); return; }
       // v232: 서버 하루 한도 초과 → 반복 재시도 대신 기기에 보관하고 5분마다 조용히 재시도
       const errText = String((err && (err.code || "")) + " " + (err && err.message || err));
       if (/quota|resource-exhausted/i.test(errText)) {
-        try {
-          const uk = "joassam_unsynced_orders_" + DATA_DOC;
-          const prevSt = JSON.parse(localStorage.getItem(uk) || "[]") || [];
-          const mine = ordersArr.filter((o) => o && o.id && !baseOrderIds.has(o.id));
-          const byId = {}; prevSt.forEach((o) => { if (o && o.id) byId[o.id] = o; }); mine.forEach((o) => { byId[o.id] = o; });
-          const curIds = new Set(ordersArr.map((o) => o && o.id));
-          const merged = Object.values(byId).filter((o) => curIds.has(o.id));
-          if (merged.length) localStorage.setItem(uk, JSON.stringify(merged));
-        } catch (e) {}
+        stashUnsynced();
+        if (myGen !== saveGenRef.current) { clearSaving(); return; }
         try { logDiag("quota_exceeded_wait", {}); } catch (e) {}
         pushSaveAlert("warn", "⏳ 서버 하루 사용 한도 초과 — 저장 대기 중", "한국 시간 오후 4시쯤 한도가 풀리면 자동으로 저장돼요.\n새로 입력한 주문은 이 기기에 보관 중이라 앱을 닫아도 다시 열면 복원돼요.\n(급하면 Firebase 요금제를 Blaze로 바꾸면 바로 저장됩니다)");
-        pendingSaveDataRef.current = data;
         clearSaving();
-        if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-        saveTimerRef.current = setTimeout(flushSaveNow, 5 * 60 * 1000);
+        scheduleRetry(5 * 60 * 1000);
         return;
       }
       if (err && err.conflict && myGen === saveGenRef.current && conflictCount < 8) {
@@ -12383,17 +12454,18 @@ function App() {
         pushSaveAlert("error", "❌ 저장 최종 실패 — 데이터가 저장되지 않았습니다",
           `오류: ${String(err && err.message || err).slice(0, 150)}\n→ 인터넷 연결을 확인하고 앱을 새로고침해주세요\n→ 데이터는 기기 내에 임시 보관됩니다`
         );
-        pendingSaveDataRef.current = data;
+        stashUnsynced();
         clearSaving();
-        if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
-        saveTimerRef.current = setTimeout(flushSaveNow, 15000);
+        scheduleRetry(15000);
       }
     };
     // 버그2 수정: 청크 저장을 먼저 모두 완료한 후에만 메인 문서 업데이트
     function doSave() {
       if (myGen !== saveGenRef.current) return;
-      preflightMerge().catch((e) => {
+      (forceOverwriteRef.current ? Promise.resolve() : preflightMerge()).catch((e) => {
         if (e && e.outdated) throw e;
+        // v233: 서버 확인/병합에 실패하면 쓰지 않고 오류로 처리(재시도) — 병합 안 된 데이터로 덮는 것 방지
+        throw e;
         try { logDiag("preflight_failed", { msg: String(e && e.message || e).slice(0, 80) }); } catch (x) {}
       }).then(() => {
         if (myGen !== saveGenRef.current) return;
@@ -12438,18 +12510,19 @@ function App() {
         return fbDb.runTransaction((t) => t.get(mainRef).then((snap) => {
           const d = snap.exists ? snap.data() : {};
           if ((d.minClientVersion || 0) > APP_VERSION) handleOutdated(d.minClientVersion);
+          const forced = forceOverwriteRef.current;
           const myVendSig = recordChunkSig(mainPayload.vendors || []);
           const myFullSig = calcFullSig();
           savedFullSig = myFullSig;
           // v231: 그 사이 다른 기기가 무엇이든(정기배송·설정 포함) 저장했으면 충돌 → 다시 합쳐서 저장
-          if (d.fullSig && d.fullSig !== expectedFullSig && d.fullSig !== myFullSig) {
+          if (!forced && d.fullSig && d.fullSig !== expectedFullSig && d.fullSig !== myFullSig) {
             const e = new Error("save_conflict"); e.conflict = true; throw e;
           }
           const myProdSig = recordChunkSig(mainPayload.products || []);
-          if ((d.vendSig && d.vendSig !== expectedVendSig && d.vendSig !== myVendSig) || (d.prodSig && d.prodSig !== expectedProdSig && d.prodSig !== myProdSig)) {
+          if (!forced && ((d.vendSig && d.vendSig !== expectedVendSig && d.vendSig !== myVendSig) || (d.prodSig && d.prodSig !== expectedProdSig && d.prodSig !== myProdSig))) {
             const e = new Error("save_conflict_lists"); e.conflict = true; throw e;
           }
-          if (d.dataSig && d.dataSig !== expectedSig && d.dataSig !== dataSig) {
+          if (!forced && d.dataSig && d.dataSig !== expectedSig && d.dataSig !== dataSig) {
             const e = new Error("save_conflict"); e.conflict = true; throw e;
           }
           const tombArr = Array.from(new Set([...(d.deletedOrderIds || []), ...myDeleted])).slice(-500);
@@ -12474,6 +12547,7 @@ function App() {
           if (savingRef.current === myGen) savingRef.current = 0;
           if (savedFullSig) syncedSigRef.current = savedFullSig;
           try { localStorage.removeItem("joassam_unsynced_orders_" + DATA_DOC); } catch (e) {}
+          forceOverwriteRef.current = false;
           appliedDataSigRef.current = dataSig;
           baseMainRef.current = __spreadValues({}, mainPayload);
           recordCounts({ customers: custArr.length, orders: ordersArr.length, products: (data.products || []).length, vendors: (data.vendors || []).length });
@@ -12499,6 +12573,8 @@ function App() {
   useEffect(() => {
     if (!dataLoaded) return;
     const data = { appName, appLogo, customers, products, orders, vendors, supplier, invoices, subscriptions, integrations, customMarketplaces, couriers, smsTemplate, orderTemplate, customerTemplate, productTemplate, courierTemplates };
+    latestDataRef.current = data; // v233: 항상 최신 상태 보관 (실패 후 재시도는 이 값으로)
+    countsRef.current = { customers: (customers || []).length, orders: (orders || []).length, products: (products || []).length, vendors: (vendors || []).length };
     if (firebaseReady) {
       if (!fbFirstLoadRef.current) return;
       if (isStaleVersion) return;
@@ -12519,6 +12595,18 @@ function App() {
           clearTimeout(saveTimerRef.current);
           saveTimerRef.current = null;
         }
+        // v233: 아직 서버에 확정되지 않은 새 주문은 기기에 보관 → 앱이 저장 도중 종료돼도 다시 열면 복원
+        try {
+          const latest = latestDataRef.current;
+          const baseIds = new Set(((lastGoodDataRef.current || {}).orders || []).map((o) => o && o.id));
+          const fresh = latest && (latest.orders || []).filter((o) => o && o.id && !baseIds.has(o.id));
+          if (fresh && fresh.length && lastGoodDataRef.current) {
+            const uk = "joassam_unsynced_orders_" + DATA_DOC;
+            const prevSt = JSON.parse(localStorage.getItem(uk) || "[]") || [];
+            const byId = {}; prevSt.forEach((o) => { if (o && o.id) byId[o.id] = o; }); fresh.forEach((o) => { byId[o.id] = o; });
+            localStorage.setItem(uk, JSON.stringify(Object.values(byId)));
+          }
+        } catch (e) {}
         if (pendingSaveDataRef.current) {
           // localStorage에 긴급 백업 저장
           try {
@@ -13283,6 +13371,9 @@ function App() {
   // v224: 일반 주문이 업체로 잘못 표시된 것 점검/정리
   const [bizCheck, setBizCheck] = useState(null);
   const allowDropRef = useRef({}); // v228: 정리 도구로 의도적으로 줄인 목록은 안전장치 통과
+  function allowBulkDrop(key, minLeft) {
+    allowDropRef.current = __spreadProps(__spreadValues({}, allowDropRef.current), { [key]: { min: Math.max(1, minLeft), until: Date.now() + 10 * 60 * 1000 } });
+  }
   function openBizCheck() {
     const isPerson = (n) => { const t = String(n || "").replace(/\s+/g, ""); return /^[가-힣]{2,4}$/.test(t) && KO_SURNAMES.has(t[0]); };
     const bizProduct = (o) => /채소\s*2\s*kg|업체용/i.test(orderItemsText(o) || "") || (Number(o.boxVolume) || 0) >= 5;
@@ -13690,6 +13781,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       return;
     }
     askConfirm(`\uC120\uD0DD\uD55C \uC8FC\uBB38 ${checkedIds.size}\uAC74\uC744 \uC0AD\uC81C\uD560\uAE4C\uC694? \uB418\uB3CC\uB9B4 \uC218 \uC5C6\uC2B5\uB2C8\uB2E4.`, () => {
+      allowBulkDrop("orders", orders.length - checkedIds.size - 5);
       setOrders((prev) => prev.filter((o) => !checkedIds.has(o.id)));
       const n = checkedIds.size;
       setCheckedIds(/* @__PURE__ */ new Set());
@@ -13902,6 +13994,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     setCustomers((prev) => prev.filter((c) => c.id !== id));
   }
   function removeCustomersMulti(ids) {
+    try { allowBulkDrop("customers", customers.length - (ids ? ids.length || ids.size || 0 : 0) - 5); } catch (e) {}
     const idSet = new Set(ids);
     setCustomers((prev) => prev.filter((c) => !idSet.has(c.id)));
     fireToast(`\uACE0\uAC1D ${ids.length}\uBA85\uC744 \uC0AD\uC81C\uD588\uC2B5\uB2C8\uB2E4`);
@@ -14845,6 +14938,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       `(\uC0AD\uC81C\uD574\uB3C4 \uC8FC\uBB38 \uB370\uC774\uD130\uB294 \uBCF4\uC874\uB429\uB2C8\uB2E4)`,
       () => {
         justSubmittedRef.current = true;
+        allowBulkDrop("customers", active.length - 5);
         setCustomers(active);
         fireToast(`\u2705 ${inactive.length}\uBA85 \uC0AD\uC81C \u2192 ${active.length}\uBA85 \uB0A8\uC74C`);
         pushSaveAlert("info",
@@ -15035,6 +15129,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
 
         const newOrders = orders.map((o) => o && o.customerId && idRemap[o.customerId] ? __spreadProps(__spreadValues({}, o), { customerId: idRemap[o.customerId] }) : o);
         justSubmittedRef.current = true;
+        allowBulkDrop("customers", keepList.length - 5);
         setCustomers(keepList);
         setOrders(newOrders);
         fireToast(`\u2705 \uC911\uBCF5 \uC815\uB9AC \uC644\uB8CC \u2014 ${totalRemove}\uBA85 \uC81C\uAC70 (${afterCount}\uBA85 \uB0A8\uC74C). \uACF5\uC720\uD3F0 \uC758\uC2EC ${skipGroups.length}\uADF8\uB8F9\uC740 \uBCF4\uC874\uB418\uC5C8\uC5B4\uC694.`);
@@ -16351,13 +16446,13 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
     try {
       const snap = await fbDb.collection("stores").get();
       const prefix = IS_TEST ? "test_backup_" : "backup_";
-      const list = snap.docs.filter((d) => d.id.startsWith(prefix)).map((d) => {
+      const list = snap.docs.filter((d) => d.id.startsWith(prefix) && !/_c\d+$/.test(d.id)).map((d) => {
         const data = d.data() || {};
         return {
           id: d.id,
           dateStr: d.id.replace(prefix, ""),
-          customers: (data.customers || []).length,
-          orders: (data.orders || []).length,
+          customers: data.customersCount != null ? data.customersCount : (data.customers || []).length,
+          orders: data.ordersCount != null ? data.ordersCount : (data.orders || []).length,
           products: (data.products || []).length,
           vendors: (data.vendors || []).length,
           backedUpAt: data.backedUpAt || ""
@@ -16382,7 +16477,12 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         return;
       }
       const data = snap.data();
-      const custList = Array.isArray(data.customers) ? data.customers : [];
+      let custList = Array.isArray(data.customers) ? data.customers : [];
+      if (data.customersChunkCount) {
+        const parts = await Promise.all(Array.from({ length: data.customersChunkCount }, (_, i) => fbDb.collection("stores").doc(docId + "_c" + i).get().then((cs) => (cs.exists && cs.data() && cs.data().customers) || null)));
+        if (parts.some((p) => !p)) { fireToast("백업 일부를 불러오지 못했어요. 잠시 후 다시 시도해 주세요"); return; }
+        custList = parts.reduce((a, b) => a.concat(b), []);
+      }
       const vendList = Array.isArray(data.vendors) ? data.vendors : [];
       const prodList = Array.isArray(data.products) ? data.products : [];
       const ordList = Array.isArray(data.orders) ? data.orders : [];
@@ -16391,12 +16491,15 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         fireToast(`\uC774 \uBC31\uC5C5(${dateStr})\uC5D0\uB294 \uACE0\uAC1D/\uC5C5\uCCB4/\uC0C1\uD488 \uB370\uC774\uD130\uAC00 \uC5C6\uC5B4\uC694. \uB2E4\uB978 \uB0A0\uC9DC\uB97C \uC120\uD0DD\uD574\uC8FC\uC138\uC694`);
         return;
       }
-      // 복구 적용
+      // 복구 적용 (v233: 서버 병합 없이 그대로 저장, 안전장치 허용)
       justSubmittedRef.current = true;
+      forceOverwriteRef.current = true;
+      ["customers", "orders", "products", "vendors"].forEach((k) => allowBulkDrop(k, 1));
       if (custList.length > 0) setCustomers(custList);
       if (prodList.length > 0) setProducts(prodList);
       if (vendList.length > 0) setVendors(vendList);
-      if (ordList.length > 0) setOrders(ordList);
+      // 주문: 백업에 있는 주문은 백업 내용으로, 백업 이후 생긴 주문은 그대로 유지
+      if (ordList.length > 0) setOrders((prev) => overlayRecent(prev || [], ordList, null));
       if (data.invoices) setInvoices(data.invoices);
       if (data.supplier) setSupplier(data.supplier);
       if (data.subscriptions) setSubscriptions(data.subscriptions);
@@ -16408,13 +16511,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
       if (data.customerTemplate) setCustomerTemplate(data.customerTemplate);
       if (data.productTemplate) setProductTemplate(data.productTemplate);
       if (data.courierTemplates) setCourierTemplates(data.courierTemplates);
-      // lastGoodDataRef 업데이트 (저장 guard 통과 보장)
-      lastGoodDataRef.current = {
-        customers: custList,
-        orders: ordList,
-        products: prodList,
-        vendors: vendList
-      };
+      // (v233) lastGoodDataRef는 건드리지 않음 — 강제 저장으로 그대로 서버에 반영됨
       // 복구 데이터를 Firebase에 즉시 저장 (onSnapshot이 다시 덮어씌우기 전에)
       setTimeout(() => {
         if (pendingSaveDataRef.current) {
