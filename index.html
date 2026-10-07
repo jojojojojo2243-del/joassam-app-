@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 227;
+const APP_VERSION = 228;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -547,13 +547,16 @@ function squishStr(s) {
 function coreStr(s) {
   return squishStr(s).replace(/\d+(\.\d+)?(kg|g|개|박스|봉|팩|병|호|입|매|ml|l)?/g, "").replace(/[xX×*]/g, "").replace(/[()[\]{}]/g, "");
 }
-function evaluateSaveGuard({ current, prev, storedFloor }) {
+function evaluateSaveGuard({ current, prev, storedFloor, allow }) {
   const arr = (obj, key) => obj && obj[key] || [];
+  // v228: 사용자가 정리 도구로 직접 지운 경우는 허용 (허용 범위: 정리 후 예상 개수 이상)
+  const allowed = (key) => { const a = allow && allow[key]; return !!(a && Date.now() < a.until && arr(current, key).length >= a.min); };
   // products와 vendors: 0이 되면 차단 (엄격)
   const strictKeys = ["products", "vendors"];
   for (const key of strictKeys) {
     const curLen = arr(current, key).length;
     if (curLen > 0) continue;
+    if (allowed(key)) continue;
     const prevLen = prev ? arr(prev, key).length : 0;
     const storedLen = storedFloor ? storedFloor[key] || 0 : 0;
     if (prevLen > 5 || storedLen > 5) {
@@ -566,7 +569,7 @@ function evaluateSaveGuard({ current, prev, storedFloor }) {
     const prevLen = prev ? arr(prev, key).length : 0;
     const storedLen = storedFloor ? storedFloor[key] || 0 : 0;
     const refLen = Math.max(prevLen, storedLen);
-    if (refLen >= 10 && curLen < refLen * 0.5) {
+    if (refLen >= 10 && curLen < refLen * 0.5 && !allowed(key)) {
       return { blocked: true, reason: key + "_dropped_by_half" };
     }
   }
@@ -2070,7 +2073,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v227 (업체/상품 목록도 기기 간 덮어쓰기 방지 — 정리한 업체가 되살아나는 문제)";
+const APP_BUILD = "v228 (정리 도구로 업체를 많이 지울 때 안전장치가 저장을 막던 문제)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -12020,7 +12023,7 @@ function App() {
       const raw = localStorage.getItem("joassam_last_counts_" + DATA_DOC);
       if (raw) storedFloor = JSON.parse(raw);
     } catch (e) {}
-    const guard = evaluateSaveGuard({ current: { customers: data.customers, orders: data.orders, products: data.products, vendors: data.vendors }, prev: lastGoodDataRef.current, storedFloor });
+    const guard = evaluateSaveGuard({ current: { customers: data.customers, orders: data.orders, products: data.products, vendors: data.vendors }, prev: lastGoodDataRef.current, storedFloor, allow: allowDropRef.current });
     if (guard.blocked) {
       fireToast("⚠ 데이터 소실 위험 감지 — 저장을 막았어요. 알림창을 확인해주세요");
       const cur = { 고객: (data.customers||[]).length, 주문: (data.orders||[]).length, 상품: (data.products||[]).length, 업체: (data.vendors||[]).length };
@@ -13088,6 +13091,7 @@ function App() {
   const [multiRegModal, setMultiRegModal] = useState(null); // 어레인지식 주문등록 팝업
   // v224: 일반 주문이 업체로 잘못 표시된 것 점검/정리
   const [bizCheck, setBizCheck] = useState(null);
+  const allowDropRef = useRef({}); // v228: 정리 도구로 의도적으로 줄인 목록은 안전장치 통과
   function openBizCheck() {
     const isPerson = (n) => { const t = String(n || "").replace(/\s+/g, ""); return /^[가-힣]{2,4}$/.test(t) && KO_SURNAMES.has(t[0]); };
     const bizProduct = (o) => /채소\s*2\s*kg|업체용/i.test(orderItemsText(o) || "") || (Number(o.boxVolume) || 0) >= 5;
@@ -13162,6 +13166,11 @@ function App() {
       if (p && phoneToVendorId[p] && !o.isBusiness && !o.vendorId) { ordFixed++; return __spreadProps(__spreadValues({}, o), { isBusiness: true, vendorId: phoneToVendorId[p] }); }
       return o;
     }));
+    const until = Date.now() + 10 * 60 * 1000;
+    allowDropRef.current = __spreadProps(__spreadValues({}, allowDropRef.current), {
+      vendors: { min: Math.max(0, (vendors || []).length - removeVIds.size + newVends.length - 5), until },
+      customers: { min: Math.max(0, (customers || []).length - removeCIds.size + newCusts.length - 5), until }
+    });
     setVendors((prev) => [...prev.filter((v) => !removeVIds.has(v.id)), ...newVends]);
     setCustomers((prev) => [...prev.filter((c) => !removeCIds.has(c.id)), ...newCusts]);
     try { logDiag("list_fix_applied", { vToC: moveV.length, cToV: moveC.length, orders: ordFixed }); } catch (e) {}
@@ -13177,7 +13186,10 @@ function App() {
     const removeIds = bizCheck.removeVendors ? new Set(bizCheck.vendors.filter((v) => !stillUsed.has(v.id) && fixedNames.has(String(v.name).trim())).map((v) => v.id)) : new Set();
     justSubmittedRef.current = true;
     setOrders((prev) => prev.map((o) => ids.has(o.id) ? __spreadProps(__spreadValues({}, o), { isBusiness: false, vendorId: "" }) : o));
-    if (removeIds.size) setVendors((prev) => prev.filter((v) => !removeIds.has(v.id)));
+    if (removeIds.size) {
+      allowDropRef.current = __spreadProps(__spreadValues({}, allowDropRef.current), { vendors: { min: Math.max(0, (vendors || []).length - removeIds.size - 5), until: Date.now() + 10 * 60 * 1000 } });
+      setVendors((prev) => prev.filter((v) => !removeIds.has(v.id)));
+    }
     try { logDiag("biz_flag_fixed", { orders: ids.size, vendorsRemoved: removeIds.size }); } catch (e) {}
     fireToast(`주문 ${ids.size}건을 일반으로 바꿨어요` + (removeIds.size ? ` · 잘못 만들어진 업체 ${removeIds.size}개 정리` : ""));
     setBizCheck(null);
