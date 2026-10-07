@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 231;
+const APP_VERSION = 232;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2156,7 +2156,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v231 (저장 반복 충돌 수정 · 동시 사용 시 수정 내용 보존 · 알림 한글화)";
+const APP_BUILD = "v232 (서버 한도 초과 시 기기에 보관 후 자동 저장)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -12337,6 +12337,26 @@ function App() {
     const clearSaving = () => { if (savingRef.current === myGen) savingRef.current = 0; };
     const onErr = (err) => {
       if (err && err.outdated) { pendingSaveDataRef.current = null; clearSaving(); return; }
+      // v232: 서버 하루 한도 초과 → 반복 재시도 대신 기기에 보관하고 5분마다 조용히 재시도
+      const errText = String((err && (err.code || "")) + " " + (err && err.message || err));
+      if (/quota|resource-exhausted/i.test(errText)) {
+        try {
+          const uk = "joassam_unsynced_orders_" + DATA_DOC;
+          const prevSt = JSON.parse(localStorage.getItem(uk) || "[]") || [];
+          const mine = ordersArr.filter((o) => o && o.id && !baseOrderIds.has(o.id));
+          const byId = {}; prevSt.forEach((o) => { if (o && o.id) byId[o.id] = o; }); mine.forEach((o) => { byId[o.id] = o; });
+          const curIds = new Set(ordersArr.map((o) => o && o.id));
+          const merged = Object.values(byId).filter((o) => curIds.has(o.id));
+          if (merged.length) localStorage.setItem(uk, JSON.stringify(merged));
+        } catch (e) {}
+        try { logDiag("quota_exceeded_wait", {}); } catch (e) {}
+        pushSaveAlert("warn", "⏳ 서버 하루 사용 한도 초과 — 저장 대기 중", "한국 시간 오후 4시쯤 한도가 풀리면 자동으로 저장돼요.\n새로 입력한 주문은 이 기기에 보관 중이라 앱을 닫아도 다시 열면 복원돼요.\n(급하면 Firebase 요금제를 Blaze로 바꾸면 바로 저장됩니다)");
+        pendingSaveDataRef.current = data;
+        clearSaving();
+        if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = setTimeout(flushSaveNow, 5 * 60 * 1000);
+        return;
+      }
       if (err && err.conflict && myGen === saveGenRef.current && conflictCount < 8) {
         conflictCount++;
         lastOrdSigsRef.current = []; lastCusSigsRef.current = [];
@@ -12453,6 +12473,7 @@ function App() {
           lastGoodDataRef.current = { customers: custArr, orders: ordersArr, products: mainPayload.products, vendors: mainPayload.vendors };
           if (savingRef.current === myGen) savingRef.current = 0;
           if (savedFullSig) syncedSigRef.current = savedFullSig;
+          try { localStorage.removeItem("joassam_unsynced_orders_" + DATA_DOC); } catch (e) {}
           appliedDataSigRef.current = dataSig;
           baseMainRef.current = __spreadValues({}, mainPayload);
           recordCounts({ customers: custArr.length, orders: ordersArr.length, products: (data.products || []).length, vendors: (data.vendors || []).length });
