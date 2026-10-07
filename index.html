@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 218;
+const APP_VERSION = 222;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2070,7 +2070,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v221 (fix: 기기 간 저장 충돌로 주문 일부 누락/사라짐 — 저장 전 서버 병합)";
+const APP_BUILD = "v222 (옛 버전 기기는 저장 대신 자동 업데이트 + 저장 충돌 방지)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11848,6 +11848,22 @@ function App() {
                     applyOrdersArray(allOrders.length > 0 ? allOrders : ordOrders);
                   }
                   if (res[1] !== null) applyCustomersArray(res[1]);
+                  // v222: 업데이트 전에 저장 못 한 주문 복원
+                  try {
+                    const uk = "joassam_unsynced_orders_" + DATA_DOC;
+                    const uraw = localStorage.getItem(uk);
+                    if (uraw) {
+                      localStorage.removeItem(uk);
+                      const st = JSON.parse(uraw) || [];
+                      const tombU = new Set(data.deletedOrderIds || []);
+                      setOrders((prev) => {
+                        const ids = new Set((prev || []).map((o) => o && o.id));
+                        const add = st.filter((o) => o && o.id && !ids.has(o.id) && !tombU.has(o.id));
+                        return add.length ? [...add, ...prev] : prev;
+                      });
+                      logDiag("restored_unsynced_orders", { count: st.length });
+                    }
+                  } catch (e) {}
                   // v221: 다른 기기가 쓴 청크와 내 청크가 섞이지 않도록 다음 저장은 전체 다시 쓰기
                   try { lastOrdSigsRef.current = []; lastCusSigsRef.current = []; } catch (e) {}
                   fbFirstLoadRef.current = true;
@@ -11884,7 +11900,7 @@ function App() {
               } else {
                 setIsStaleVersion(false);
                 if (storedMinVersion !== SAFE_MIN_VERSION) {
-                  fbDb.collection("stores").doc(DATA_DOC).set({ appMinVersion: SAFE_MIN_VERSION }, { merge: true }).catch(() => {
+                  fbDb.collection("stores").doc(DATA_DOC).set({ appMinVersion: SAFE_MIN_VERSION, wv: APP_VERSION, wt: firebase.firestore.FieldValue.serverTimestamp() }, { merge: true }).catch(() => {
                   });
                 }
               }
@@ -12061,9 +12077,31 @@ function App() {
     const myGen = ++saveGenRef.current;
     // v221: 다른 기기가 그 사이 저장했으면 서버 데이터를 먼저 합친 뒤 저장 (서로 덮어써서 주문이 사라지는 문제 방지)
     let expectedSig = undefined;
+    // v222: 더 새 버전이 서버에 저장한 뒤라면, 이 기기(옛 버전)는 저장하지 않고 자동 업데이트
+    function handleOutdated(need) {
+      try {
+        const unsynced = ordersArr.filter((o) => o && o.id && !baseOrderIds.has(o.id));
+        if (unsynced.length) localStorage.setItem("joassam_unsynced_orders_" + DATA_DOC, JSON.stringify(unsynced));
+      } catch (e) {}
+      try { logDiag("outdated_client_blocked", { mine: APP_VERSION, need }); } catch (e) {}
+      try { fireToast("🔄 새 버전이 있어요 — 자동 업데이트 후 저장합니다"); } catch (e) {}
+      try {
+        const k = "joassam_outdated_reload";
+        const last = Number(sessionStorage.getItem(k) || 0);
+        if (Date.now() - last > 60000) {
+          sessionStorage.setItem(k, String(Date.now()));
+          const go = () => window.location.reload();
+          if (navigator.serviceWorker && navigator.serviceWorker.getRegistration) {
+            navigator.serviceWorker.getRegistration().then((r) => r && r.update()).catch(() => {}).then(() => setTimeout(go, 1500));
+          } else setTimeout(go, 1500);
+        }
+      } catch (e) {}
+      const err = new Error("outdated_client"); err.outdated = true; throw err;
+    }
     function preflightMerge() {
       return fbDb.collection("stores").doc(DATA_DOC).get().then((snap) => {
         const d = snap.exists ? snap.data() : null;
+        if (d && (d.minClientVersion || 0) > APP_VERSION) handleOutdated(d.minClientVersion);
         expectedSig = d ? d.dataSig : undefined;
         if (!d || typeof d.ordersChunkCount !== "number") return;
         if (!d.dataSig || d.dataSig === loadedDataSigRef.current) return;
@@ -12112,6 +12150,7 @@ function App() {
     const MAX_RETRY = 3;
     let conflictCount = 0;
     const onErr = (err) => {
+      if (err && err.outdated) { pendingSaveDataRef.current = null; return; }
       if (err && err.conflict && myGen === saveGenRef.current && conflictCount < 8) {
         conflictCount++;
         lastOrdSigsRef.current = []; lastCusSigsRef.current = [];
@@ -12144,6 +12183,7 @@ function App() {
     function doSave() {
       if (myGen !== saveGenRef.current) return;
       preflightMerge().catch((e) => {
+        if (e && e.outdated) throw e;
         try { logDiag("preflight_failed", { msg: String(e && e.message || e).slice(0, 80) }); } catch (x) {}
       }).then(() => {
         if (myGen !== saveGenRef.current) return;
@@ -12157,12 +12197,12 @@ function App() {
       // 변경된 청크만 저장
       for (let i = 0; i < ordChunks.length; i++) {
         if (ordSigs[i] !== prevOrdSigs[i]) {
-          jobs.push(fbDb.collection("stores").doc(ordChunkDocId(i)).set({ orders: ordChunks[i], sig: ordSigs[i], part: i }));
+          jobs.push(fbDb.collection("stores").doc(ordChunkDocId(i)).set({ orders: ordChunks[i], sig: ordSigs[i], part: i, wv: APP_VERSION, wt: firebase.firestore.FieldValue.serverTimestamp() }));
         }
       }
       for (let i = 0; i < cusChunks.length; i++) {
         if (cusSigs[i] !== prevCusSigs[i]) {
-          jobs.push(fbDb.collection("stores").doc(cusChunkDocId(i)).set({ customers: cusChunks[i], sig: cusSigs[i], part: i }));
+          jobs.push(fbDb.collection("stores").doc(cusChunkDocId(i)).set({ customers: cusChunks[i], sig: cusSigs[i], part: i, wv: APP_VERSION, wt: firebase.firestore.FieldValue.serverTimestamp() }));
         }
       }
       // 버그2 수정: 청크 저장 완료 후 메인 문서 업데이트, 그 다음 구 청크 삭제
@@ -12187,6 +12227,7 @@ function App() {
         const myDeleted = Array.from(baseOrderIds).filter((id) => id && !myIds.has(id));
         return fbDb.runTransaction((t) => t.get(mainRef).then((snap) => {
           const d = snap.exists ? snap.data() : {};
+          if ((d.minClientVersion || 0) > APP_VERSION) handleOutdated(d.minClientVersion);
           if (d.dataSig && d.dataSig !== expectedSig && d.dataSig !== dataSig) {
             const e = new Error("save_conflict"); e.conflict = true; throw e;
           }
@@ -12196,7 +12237,7 @@ function App() {
           [...ordersArr.slice(0, 150), ...(d.recentOrders || [])].forEach((o) => {
             if (o && o.id && !seen.has(o.id) && !tomb.has(o.id) && recent.length < 200) { seen.add(o.id); recent.push(o); }
           });
-          t.set(mainRef, __spreadProps(__spreadValues({}, mainWrite), { recentOrders: recent, deletedOrderIds: tombArr }), { merge: true });
+          t.set(mainRef, __spreadProps(__spreadValues({}, mainWrite), { recentOrders: recent, deletedOrderIds: tombArr, minClientVersion: Math.max(d.minClientVersion || 0, APP_VERSION), wv: APP_VERSION, wt: firebase.firestore.FieldValue.serverTimestamp() }), { merge: true });
         })).then(() => {
           lastMainHashRef.current = mainHash;
           lastGoodDataRef.current = { customers: custArr, orders: ordersArr, products: data.products, vendors: data.vendors };
