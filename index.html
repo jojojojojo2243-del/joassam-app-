@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 223;
+const APP_VERSION = 224;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2070,7 +2070,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v223 (저장 충돌 시 바뀐 묶음만 다시 저장 — 쓰기량 대폭 감소)";
+const APP_BUILD = "v224 (일반 주문이 업체로 잘못 표시되는 문제 수정 + 점검 도구)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -13047,6 +13047,42 @@ function App() {
   const [smsBatch, setSmsBatch] = useState(null);
   const [bulkOrderModal, setBulkOrderModal] = useState(null);
   const [multiRegModal, setMultiRegModal] = useState(null); // 어레인지식 주문등록 팝업
+  // v224: 일반 주문이 업체로 잘못 표시된 것 점검/정리
+  const [bizCheck, setBizCheck] = useState(null);
+  function openBizCheck() {
+    const isPerson = (n) => { const t = String(n || "").trim(); return /^[가-힣]{2,4}$/.test(t) && KO_SURNAMES.has(t[0]); };
+    const bizProduct = (o) => /채소\s*2\s*kg|업체용/i.test(orderItemsText(o) || "") || (Number(o.boxVolume) || 0) >= 5;
+    const vmap = {}; (vendors || []).forEach((v) => { vmap[v.id] = v; });
+    // 사업자 정보가 하나도 없고 사람 이름인 업체 = 자동으로 잘못 만들어진 업체 후보
+    const suspectV = (vendors || []).filter((v) => isPerson(v.name) && !v.bizNo && !v.ceo && !v.bizLicense);
+    const suspectVIds = new Set(suspectV.map((v) => v.id));
+    const suspectNames = new Set(suspectV.map((v) => String(v.name).trim()));
+    const list = (orders || []).filter((o) => {
+      if (!(o.isBusiness || o.vendorId)) return false;
+      if (bizProduct(o)) return false;
+      const nm = String((o.recipient && o.recipient.name) || "").trim();
+      if (o.vendorId) return suspectVIds.has(o.vendorId) || (!vmap[o.vendorId] && isPerson(nm));
+      return isPerson(nm) || suspectNames.has(nm);
+    });
+    const usedVIds = new Set(list.map((o) => o.vendorId).filter(Boolean));
+    const listNames = new Set(list.map((o) => String((o.recipient && o.recipient.name) || "").trim()));
+    const vendorsToRemove = suspectV.filter((v) => usedVIds.has(v.id) || listNames.has(String(v.name).trim()));
+    setBizCheck({ orders: list, checked: new Set(list.map((o) => o.id)), vendors: vendorsToRemove, removeVendors: true });
+  }
+  function applyBizCheck() {
+    if (!bizCheck) return;
+    const ids = bizCheck.checked;
+    const fixedNames = new Set(bizCheck.orders.filter((o) => ids.has(o.id)).map((o) => String((o.recipient && o.recipient.name) || "").trim()));
+    const remaining = orders.filter((o) => !ids.has(o.id) && (o.isBusiness || o.vendorId));
+    const stillUsed = new Set(remaining.map((o) => o.vendorId).filter(Boolean));
+    const removeIds = bizCheck.removeVendors ? new Set(bizCheck.vendors.filter((v) => !stillUsed.has(v.id) && fixedNames.has(String(v.name).trim())).map((v) => v.id)) : new Set();
+    justSubmittedRef.current = true;
+    setOrders((prev) => prev.map((o) => ids.has(o.id) ? __spreadProps(__spreadValues({}, o), { isBusiness: false, vendorId: "" }) : o));
+    if (removeIds.size) setVendors((prev) => prev.filter((v) => !removeIds.has(v.id)));
+    try { logDiag("biz_flag_fixed", { orders: ids.size, vendorsRemoved: removeIds.size }); } catch (e) {}
+    fireToast(`주문 ${ids.size}건을 일반으로 바꿨어요` + (removeIds.size ? ` · 잘못 만들어진 업체 ${removeIds.size}개 정리` : ""));
+    setBizCheck(null);
+  }
   const [ambiguousReview, setAmbiguousReview] = useState(null);
   function deleteAmbiguousEntry(item) {
     if (item.type === "vendor") {
@@ -15246,7 +15282,8 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
         if (!recipName) return false;
         if (findMatchingParty(recipName, "", "", vendors)) return true;
         // 채소2kg, 2kg 등 업체 패턴
-        if (/채소\s*\d+kg|2kg\s*X\s*[2-9]|업체/i.test(productText || "")) return true;
+        // v224: '모듬쌈채소 1kg' 같은 일반 상품까지 업체로 보던 문제 수정 → 채소2kg/업체용만 업체
+        if (/채소\s*2\s*kg|업체용/i.test(productText || "")) return true;
         return false;
       };
 
@@ -16820,6 +16857,30 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         }
       }
     }),
+    bizCheck && /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, background: "#F1F2EC", zIndex: 100002, display: "flex", flexDirection: "column" } },
+      /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px 12px", background: "#854F0B", color: "#fff", flexShrink: 0 } },
+        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 15, fontWeight: 800 } }, "업체로 잘못 표시된 주문 " + bizCheck.orders.length + "건"),
+        /* @__PURE__ */ React.createElement("button", { onClick: () => setBizCheck(null), style: { border: "none", background: "rgba(255,255,255,0.2)", borderRadius: 8, padding: "5px 12px", color: "#fff", fontWeight: 700, fontSize: 13 } }, "닫기")
+      ),
+      /* @__PURE__ */ React.createElement("div", { style: { flex: 1, overflowY: "auto", padding: "12px 14px" } },
+        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A", marginBottom: 10, lineHeight: 1.6 } }, "받는분이 사람 이름이고 상품이 업체용(채소2kg·부피5 이상)이 아닌데 업체로 표시된 주문이에요. 실제 업체 주문이면 체크를 빼주세요."),
+        bizCheck.orders.length === 0 && /* @__PURE__ */ React.createElement("div", { style: { padding: 30, textAlign: "center", color: "#2F6F4E", fontWeight: 700 } }, "잘못 표시된 주문이 없어요 ✓"),
+        bizCheck.orders.map((o) => /* @__PURE__ */ React.createElement("label", { key: o.id, style: { display: "flex", gap: 10, alignItems: "flex-start", background: "#fff", borderRadius: 10, padding: "10px 12px", marginBottom: 8, cursor: "pointer" } },
+          /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: bizCheck.checked.has(o.id), onChange: () => setBizCheck((b) => { const c = new Set(b.checked); c.has(o.id) ? c.delete(o.id) : c.add(o.id); return __spreadProps(__spreadValues({}, b), { checked: c }); }), style: { marginTop: 3, width: 18, height: 18 } }),
+          /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, minWidth: 0 } },
+            /* @__PURE__ */ React.createElement("div", { style: { fontWeight: 800 } }, ((o.recipient && o.recipient.name) || "-") + "  ", /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 400, color: "#888780", fontSize: 12 } }, o.orderDate || "")),
+            /* @__PURE__ */ React.createElement("div", { style: { color: "#5F5E5A", fontSize: 12, marginTop: 2 } }, orderItemsText(o) || "")
+          )
+        )),
+        bizCheck.vendors.length > 0 && /* @__PURE__ */ React.createElement("label", { style: { display: "flex", gap: 10, alignItems: "flex-start", background: "#FAEEDA", borderRadius: 10, padding: "10px 12px", marginTop: 6, fontSize: 12.5, color: "#854F0B", lineHeight: 1.6 } },
+          /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: bizCheck.removeVendors, onChange: () => setBizCheck((b) => __spreadProps(__spreadValues({}, b), { removeVendors: !b.removeVendors })), style: { marginTop: 3, width: 18, height: 18 } }),
+          /* @__PURE__ */ React.createElement("div", null, "업체 목록에 사람 이름으로 잘못 만들어진 업체도 정리하기 (", bizCheck.vendors.map((v) => v.name).join(", "), "). 이게 남아 있으면 다음 주문도 또 업체로 표시돼요.")
+        )
+      ),
+      bizCheck.orders.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { padding: "12px 14px", paddingBottom: "calc(12px + env(safe-area-inset-bottom, 0px))", background: "#fff", borderTop: "1px solid #E2E4DD", flexShrink: 0 } },
+        /* @__PURE__ */ React.createElement("button", { onClick: applyBizCheck, disabled: bizCheck.checked.size === 0, style: { width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: bizCheck.checked.size ? "#2F6F4E" : "#B4B2A9", color: "#fff", fontWeight: 800, fontSize: 15 } }, "선택한 " + bizCheck.checked.size + "건 일반 주문으로 바꾸기")
+      )
+    ),
     multiRegModal && /* @__PURE__ */ React.createElement(
       MultiRegModal,
       {
@@ -16876,6 +16937,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         restoreFromCloudBackup,
         onOpenDiagnostics: loadDiagLog,
         onOpenBackupList: loadBackupList,
+        onBizCheck: openBizCheck,
         onCheckUpdate: checkForAppUpdate,
         checkingUpdate,
         onSelfTest: runSelfTestAndShow,
@@ -20069,7 +20131,7 @@ function ProblemNoteRow({ entry, products, onSave, onDelete }) {
     changed ? "\uACE0\uCE5C \uB0B4\uC6A9 \uD559\uC2B5 \uC800\uC7A5" : "\uC815\uB9AC\uD558\uACE0 \uB2EB\uAE30"
   ), /* @__PURE__ */ React.createElement("button", { onClick: () => onDelete(entry.id), style: { border: "1px solid #E2C4C4", background: "#fff", color: "#A32D2D", fontSize: 11.5, fontWeight: 700, borderRadius: 8, padding: "9px 14px", cursor: "pointer" } }, "\uC0AD\uC81C")));
 }
-function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onOpenBackupList, onCheckUpdate, checkingUpdate, onSelfTest, onMemory, onAiMemory, onVoiceTrain, onBrainSettings, onProblemNote, problemNoteCount, isAdmin, onClose, onNavigate, askConfirm, handleLogout, fireToast, geminiKey, setGeminiKey }) {
+function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, backupInputRef, importBackup, restoreFromCloudBackup, onOpenDiagnostics, onOpenBackupList, onBizCheck, onCheckUpdate, checkingUpdate, onSelfTest, onMemory, onAiMemory, onVoiceTrain, onBrainSettings, onProblemNote, problemNoteCount, isAdmin, onClose, onNavigate, askConfirm, handleLogout, fireToast, geminiKey, setGeminiKey }) {
   const [editingName, setEditingName] = useState(false);
   const [draftName, setDraftName] = useState(appName);
   const [restoreDate, setRestoreDate] = useState(todayStr());
@@ -20167,6 +20229,13 @@ function SideMenuDrawer({ appName, setAppName, nickname, members, exportBackup, 
         style: { width: "100%", marginTop: 8, padding: "9px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12, cursor: "pointer" }
       },
       "\u{1F4CB} \uC804\uCCB4 \uBC31\uC5C5 \uBAA9\uB85D \uBCF4\uAE30 (\uB0A0\uC9DC\uBCC4 \uB370\uC774\uD130 \uAC1C\uC218 \uD655\uC778)"
+    ), onBizCheck && /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        onClick: () => { onBizCheck(); onClose(); },
+        style: { width: "100%", marginTop: 8, padding: "9px 0", borderRadius: 8, border: "1px solid #854F0B", background: "#fff", color: "#854F0B", fontWeight: 700, fontSize: 12, cursor: "pointer" }
+      },
+      "🏢 업체/일반 잘못 표시된 주문 점검"
     )),
     /* @__PURE__ */ React.createElement("div", { style: { padding: "12px 20px", borderBottom: "1px solid #F1F2EC" } }, /* @__PURE__ */ React.createElement(
       "button",
