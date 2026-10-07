@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 222;
+const APP_VERSION = 223;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2070,7 +2070,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v222 (옛 버전 기기는 저장 대신 자동 업데이트 + 저장 충돌 방지)";
+const APP_BUILD = "v223 (저장 충돌 시 바뀐 묶음만 다시 저장 — 쓰기량 대폭 감소)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11701,9 +11701,10 @@ function App() {
     if (!n) return Promise.resolve(null);
     const gets = [];
     for (let i = 0; i < n; i++) {
-      gets.push(fbDb.collection("stores").doc(idFn(i)).get().then((s) => s.exists && s.data() && Array.isArray(s.data()[key]) ? s.data()[key] : []).catch(() => []));
+      gets.push(fbDb.collection("stores").doc(idFn(i)).get().then((s) => s.exists && s.data() && Array.isArray(s.data()[key]) ? { arr: s.data()[key], sig: s.data().sig || null } : { arr: [], sig: null }).catch(() => ({ arr: [], sig: null })));
     }
-    return Promise.all(gets).then((parts) => parts.reduce((a, b) => a.concat(b), []));
+    // v223: 각 묶음의 서명(sig)도 함께 돌려줌 → 바뀐 묶음만 다시 저장
+    return Promise.all(gets).then((parts) => { const out = parts.reduce((a, b) => a.concat(b.arr), []); out.__sigs = parts.map((p) => p.sig); return out; });
   }
   function recordCounts(partial) {
     try {
@@ -11865,7 +11866,7 @@ function App() {
                     }
                   } catch (e) {}
                   // v221: 다른 기기가 쓴 청크와 내 청크가 섞이지 않도록 다음 저장은 전체 다시 쓰기
-                  try { lastOrdSigsRef.current = []; lastCusSigsRef.current = []; } catch (e) {}
+                  try { lastOrdSigsRef.current = (res[0] && res[0].__sigs) || []; lastCusSigsRef.current = (res[1] && res[1].__sigs) || []; } catch (e) {}
                   fbFirstLoadRef.current = true;
                 }).catch((err) => {
                   loadedDataSigRef.current = null;
@@ -12110,8 +12111,9 @@ function App() {
           fetchRecordChunks(ordChunkDocId, d.ordersChunkCount || 0, "orders"),
           fetchRecordChunks(cusChunkDocId, d.customersChunkCount || 0, "customers")
         ]).then(([rOrd, rCus]) => {
-          lastOrdSigsRef.current = [];
-          lastCusSigsRef.current = [];
+          // v223: 서버 묶음 서명 기준으로 바뀐 묶음만 저장 (고객 1만8천명 전체를 매번 다시 쓰지 않음)
+          lastOrdSigsRef.current = (rOrd && rOrd.__sigs) || [];
+          lastCusSigsRef.current = (rCus && rCus.__sigs) || [];
           // 다른 기기에서 삭제한 주문은 여기서도 제거
           const goneO = ordersArr.filter((o) => o && tomb.has(o.id)).map((o) => o.id);
           if (goneO.length) {
