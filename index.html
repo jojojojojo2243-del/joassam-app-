@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 226;
+const APP_VERSION = 227;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2070,7 +2070,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v226 (목록 정리: 띄어쓴 이름(김 미라)도 사람으로 인식)";
+const APP_BUILD = "v227 (업체/상품 목록도 기기 간 덮어쓰기 방지 — 정리한 업체가 되살아나는 문제)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11820,8 +11820,11 @@ function App() {
             const data = snap.data();
             if (data.appName) setAppName(data.appName);
             if (data.appLogo) setAppLogo(data.appLogo);
-            if (data.products) applyProductsArray(data.products);
-            if (data.vendors) applyVendorsArray(data.vendors);
+            // v227: 아직 저장 안 된 업체/상품 변경이 있으면 서버 목록으로 덮지 않음 (저장 때 서버와 합쳐짐)
+            const listBusy = !!(pendingSaveDataRef.current || saveTimerRef.current || savingRef.current);
+            if (listBusy) { try { logDiag("skip_remote_lists_while_saving", {}); } catch (e) {} }
+            if (data.products && !listBusy) applyProductsArray(data.products);
+            if (data.vendors && !listBusy) applyVendorsArray(data.vendors);
             if (data.invoices) setInvoices(data.invoices);
             if (data.supplier) setSupplier(data.supplier);
             const hasManifest = typeof data.ordersChunkCount === "number" || typeof data.customersChunkCount === "number";
@@ -11982,6 +11985,7 @@ function App() {
   }, [dataLoaded]);
   const saveTimerRef = useRef(null);
   const saveGenRef = useRef(0); // v221: 가장 최신 저장만 서버에 쓰기
+  const savingRef = useRef(0); // v227: 저장 진행 중 표시
   const pendingSaveDataRef = useRef(null);
   const lastOrdSigsRef = useRef([]);
   const lastCusSigsRef = useRef([]);
@@ -12063,6 +12067,25 @@ function App() {
     let custArr = data.customers || [];
     const baseOrderIds = new Set(((lastGoodDataRef.current || {}).orders || []).map((o) => o && o.id));
     const baseCustIds = new Set(((lastGoodDataRef.current || {}).customers || []).map((c) => c && c.id));
+    const baseVendIds = new Set(((lastGoodDataRef.current || {}).vendors || []).map((v) => v && v.id));
+    const baseProdIds = new Set(((lastGoodDataRef.current || {}).products || []).map((v) => v && v.id));
+    let expectedVendSig, expectedProdSig;
+    // 업체/상품 목록 3방향 병합: 다른 기기가 추가한 건 더하고, 다른 기기가 지운 건 빼고, 내 변경은 유지
+    function mergeList(key, setter, baseIds) {
+      return (remote) => {
+        if (!Array.isArray(remote) || !remote.length) return false;
+        const local = mainPayload[key] || [];
+        const localIds = new Set(local.map((x) => x && x.id));
+        const remoteIds = new Set(remote.map((x) => x && x.id));
+        const added = remote.filter((x) => x && x.id && !localIds.has(x.id) && !baseIds.has(x.id));
+        const removed = new Set(local.filter((x) => x && x.id && baseIds.has(x.id) && !remoteIds.has(x.id)).map((x) => x.id));
+        if (!added.length && !removed.size) return false;
+        mainPayload[key] = [...local.filter((x) => !(x && removed.has(x.id))), ...added];
+        setter((prev) => { const ids = new Set((prev || []).map((x) => x && x.id)); return [...(prev || []).filter((x) => !(x && removed.has(x.id))), ...added.filter((x) => !ids.has(x.id))]; });
+        try { logDiag("merged_remote_" + key, { added: added.length, removed: removed.size }); } catch (e) {}
+        return true;
+      };
+    }
     const mainPayload = __spreadValues({}, data);
     delete mainPayload.orders;
     delete mainPayload.customers;
@@ -12076,6 +12099,7 @@ function App() {
     }
     buildChunks();
     const myGen = ++saveGenRef.current;
+    savingRef.current = myGen;
     // v221: 다른 기기가 그 사이 저장했으면 서버 데이터를 먼저 합친 뒤 저장 (서로 덮어써서 주문이 사라지는 문제 방지)
     let expectedSig = undefined;
     // v222: 더 새 버전이 서버에 저장한 뒤라면, 이 기기(옛 버전)는 저장하지 않고 자동 업데이트
@@ -12104,6 +12128,12 @@ function App() {
         const d = snap.exists ? snap.data() : null;
         if (d && (d.minClientVersion || 0) > APP_VERSION) handleOutdated(d.minClientVersion);
         expectedSig = d ? d.dataSig : undefined;
+        expectedVendSig = d ? d.vendSig : undefined;
+        expectedProdSig = d ? d.prodSig : undefined;
+        if (d) {
+          mergeList("vendors", setVendors, baseVendIds)(d.vendors);
+          mergeList("products", setProducts, baseProdIds)(d.products);
+        }
         if (!d || typeof d.ordersChunkCount !== "number") return;
         if (!d.dataSig || d.dataSig === loadedDataSigRef.current) return;
         const tomb = new Set(d.deletedOrderIds || []);
@@ -12151,8 +12181,9 @@ function App() {
     let retryCount = 0;
     const MAX_RETRY = 3;
     let conflictCount = 0;
+    const clearSaving = () => { if (savingRef.current === myGen) savingRef.current = 0; };
     const onErr = (err) => {
-      if (err && err.outdated) { pendingSaveDataRef.current = null; return; }
+      if (err && err.outdated) { pendingSaveDataRef.current = null; clearSaving(); return; }
       if (err && err.conflict && myGen === saveGenRef.current && conflictCount < 8) {
         conflictCount++;
         lastOrdSigsRef.current = []; lastCusSigsRef.current = [];
@@ -12164,6 +12195,7 @@ function App() {
       if (myGen !== saveGenRef.current) {
         // 더 최신 저장이 이미 시작됨 → 오래된 데이터로 재시도하지 않음
         try { logDiag("stale_save_dropped", { msg: String(err && err.message || err).slice(0, 80) }); } catch (e) {}
+        clearSaving();
         return;
       }
       try { logDiag("save_failed", { msg: String(err && err.message || err).slice(0, 140), retry: retryCount }); } catch (e) {}
@@ -12179,6 +12211,7 @@ function App() {
           `오류: ${String(err && err.message || err).slice(0, 150)}\n→ 인터넷 연결을 확인하고 앱을 새로고침해주세요\n→ 데이터는 기기 내에 임시 보관됩니다`
         );
         pendingSaveDataRef.current = data;
+        clearSaving();
       }
     };
     // 버그2 수정: 청크 저장을 먼저 모두 완료한 후에만 메인 문서 업데이트
@@ -12230,6 +12263,11 @@ function App() {
         return fbDb.runTransaction((t) => t.get(mainRef).then((snap) => {
           const d = snap.exists ? snap.data() : {};
           if ((d.minClientVersion || 0) > APP_VERSION) handleOutdated(d.minClientVersion);
+          const myVendSig = recordChunkSig(mainPayload.vendors || []);
+          const myProdSig = recordChunkSig(mainPayload.products || []);
+          if ((d.vendSig && d.vendSig !== expectedVendSig && d.vendSig !== myVendSig) || (d.prodSig && d.prodSig !== expectedProdSig && d.prodSig !== myProdSig)) {
+            const e = new Error("save_conflict_lists"); e.conflict = true; throw e;
+          }
           if (d.dataSig && d.dataSig !== expectedSig && d.dataSig !== dataSig) {
             const e = new Error("save_conflict"); e.conflict = true; throw e;
           }
@@ -12239,10 +12277,11 @@ function App() {
           [...ordersArr.slice(0, 150), ...(d.recentOrders || [])].forEach((o) => {
             if (o && o.id && !seen.has(o.id) && !tomb.has(o.id) && recent.length < 200) { seen.add(o.id); recent.push(o); }
           });
-          t.set(mainRef, __spreadProps(__spreadValues({}, mainWrite), { recentOrders: recent, deletedOrderIds: tombArr, minClientVersion: Math.max(d.minClientVersion || 0, APP_VERSION), wv: APP_VERSION, wt: firebase.firestore.FieldValue.serverTimestamp() }), { merge: true });
+          t.set(mainRef, __spreadProps(__spreadValues({}, mainWrite), { vendors: mainPayload.vendors, products: mainPayload.products, vendSig: myVendSig, prodSig: myProdSig, recentOrders: recent, deletedOrderIds: tombArr, minClientVersion: Math.max(d.minClientVersion || 0, APP_VERSION), wv: APP_VERSION, wt: firebase.firestore.FieldValue.serverTimestamp() }), { merge: true });
         })).then(() => {
           lastMainHashRef.current = mainHash;
-          lastGoodDataRef.current = { customers: custArr, orders: ordersArr, products: data.products, vendors: data.vendors };
+          lastGoodDataRef.current = { customers: custArr, orders: ordersArr, products: mainPayload.products, vendors: mainPayload.vendors };
+          if (savingRef.current === myGen) savingRef.current = 0;
           recordCounts({ customers: custArr.length, orders: ordersArr.length, products: (data.products || []).length, vendors: (data.vendors || []).length });
           // 저장 성공 알림 (최초 1회 또는 이전에 오류가 있었을 때만)
           if (retryCount > 0) {
