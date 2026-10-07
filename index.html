@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 230;
+const APP_VERSION = 231;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -88,8 +88,73 @@ function compareByName(a, b) {
   const col = ga === 1 ? __enCollator : __koCollator;
   return col ? col.compare(na, nb) : na.localeCompare(nb);
 }
+// v231: 키 순서가 달라도 같은 내용이면 같은 문자열 (서버에서 받은 객체와 내 객체 비교용)
+function stableStr(v) {
+  if (v === null || v === undefined) return "null";
+  if (typeof v !== "object") return JSON.stringify(v);
+  if (Array.isArray(v)) return "[" + v.map(stableStr).join(",") + "]";
+  if (typeof v.toMillis === "function") return String(v.toMillis());
+  const ks = Object.keys(v).filter((k) => v[k] !== undefined).sort();
+  return "{" + ks.map((k) => JSON.stringify(k) + ":" + stableStr(v[k])).join(",") + "}";
+}
+// 다른 기기가 바꾼 레코드 반영: 내 쪽은 그대로(base와 같음)인데 서버 쪽이 바뀐 레코드만 서버 것으로 교체
+function replaceRemoteEdits(localArr, remoteArr, baseArr) {
+  const out = { arr: localArr, replaced: {} , count: 0 };
+  if (!Array.isArray(remoteArr) || !remoteArr.length || !Array.isArray(baseArr) || !baseArr.length) return out;
+  const rMap = {}; remoteArr.forEach((r) => { if (r && r.id) rMap[r.id] = r; });
+  const bMap = {}; baseArr.forEach((b) => { if (b && b.id && rMap[b.id]) bMap[b.id] = b; });
+  out.arr = localArr.map((x) => {
+    if (!x || !x.id) return x;
+    const r = rMap[x.id], b = bMap[x.id];
+    if (!r || !b) return x;
+    const bs = stableStr(b);
+    if (stableStr(x) !== bs) return x;      // 내가 고친 레코드 → 내 것 유지
+    if (stableStr(r) === bs) return x;      // 서버도 그대로
+    out.replaced[x.id] = r; out.count++;
+    return r;
+  });
+  return out;
+}
+// v231: 알림/토스트 문구 한글화 (진단 기록은 그대로)
+const KO_ALERT_MAP = [
+  [/vendors_dropped_by_half/g, "업체 수가 한 번에 절반 이상 줄어듦"],
+  [/products_dropped_by_half/g, "상품 수가 한 번에 절반 이상 줄어듦"],
+  [/vendors_dropped_to_empty/g, "업체가 0개가 됨"],
+  [/products_dropped_to_empty/g, "상품이 0개가 됨"],
+  [/customers_dropped_to_empty/g, "고객이 0명이 됨"],
+  [/orders_dropped_to_empty/g, "주문이 0건이 됨"],
+  [/save_conflict_lists|save_conflict/g, "다른 기기와 동시에 저장되어 다시 맞추는 중"],
+  [/outdated_client/g, "옛 버전이라 저장하지 않고 업데이트함"],
+  [/Missing or insufficient permissions\.?|permission-denied/gi, "서버 접근 권한이 없어요"],
+  [/Quota exceeded\.?|resource-exhausted/gi, "서버 사용 한도를 넘었어요 (잠시 후 다시 시도)"],
+  [/Failed to get document because the client is offline\.?|client is offline|unavailable/gi, "인터넷 연결이 끊겼어요"],
+  [/deadline-exceeded/gi, "서버 응답 시간이 초과됐어요"],
+  [/Transaction failed[^.]*\.?|failed-precondition|aborted/gi, "동시 저장 충돌"],
+  [/Failed to fetch|NetworkError[^.]*\.?/gi, "인터넷 연결 오류"],
+  [/tx contention/gi, "동시 저장 충돌"],
+  [/Firebase에서/g, "서버에서"],
+  [/Firebase 연결 오류/g, "서버 연결 오류"],
+  [/Firebase 용량/g, "서버 저장공간"],
+  [/Firebase/g, "서버"]
+];
+function koAlertText(t) {
+  let out = String(t == null ? "" : t);
+  KO_ALERT_MAP.forEach(([re, ko]) => { out = out.replace(re, ko); });
+  return out;
+}
+// v231: 메인 문서(트랜잭션으로 확정된 값)의 최근 변경 레코드를 묶음 데이터 위에 덮어씀
+function overlayRecent(arr, recent, tomb) {
+  if (!Array.isArray(recent) || !recent.length) return arr;
+  const t = tomb || new Set();
+  const rMap = {}; recent.forEach((r) => { if (r && r.id && !t.has(r.id)) rMap[r.id] = r; });
+  const seen = new Set();
+  const out = (arr || []).map((x) => { if (x && x.id && rMap[x.id]) { seen.add(x.id); return rMap[x.id]; } return x; });
+  const missing = Object.keys(rMap).filter((id) => !seen.has(id)).map((id) => rMap[id]);
+  if (Array.isArray(arr) && arr.__sigs) out.__sigs = arr.__sigs;
+  return missing.length ? [...missing, ...out] : out;
+}
 function recordChunkSig(arr) {
-  const s = JSON.stringify(arr || []);
+  const s = stableStr(arr || []);
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
   return (arr ? arr.length : 0) + ":" + (h >>> 0).toString(36);
@@ -2091,7 +2156,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v230 (업체 카드 → 고객으로 / 고객 카드 → 업체로 바로 옮기기 버튼)";
+const APP_BUILD = "v231 (저장 반복 충돌 수정 · 동시 사용 시 수정 내용 보존 · 알림 한글화)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -10951,6 +11016,8 @@ function App() {
   const [showSaveAlerts, setShowSaveAlerts] = useState(false);
   const [senderPredictModal, setSenderPredictModal] = useState(null); // 주문자 예측 팝업
   function pushSaveAlert(type, msg, detail) {
+    msg = koAlertText(msg);
+    detail = koAlertText(detail);
     const now = Date.now();
     setSaveAlerts(prev => {
       // 1분 내 동일 메시지 중복 방지
@@ -11740,7 +11807,7 @@ function App() {
     }
   }
   function applyOrdersArray(arr) {
-    const list = Array.isArray(arr) ? arr : [];
+    let list = Array.isArray(arr) ? arr : [];
     const newCount = list.length;
     const prevCount = prevOrderCountRef.current;
     const wasJustSubmitted = justSubmittedRef.current;
@@ -11762,15 +11829,25 @@ function App() {
     prevOrderCountRef.current = newCount;
     // v220: 아직 서버에 저장되지 않은 방금 등록한 주문이 서버 데이터로 덮여 사라지는 문제 방지
     if (firebaseReady) {
-      const prevGoodIds = new Set(((lastGoodDataRef.current || {}).orders || []).map((o) => o && o.id));
+      const prevGoodArr = ((lastGoodDataRef.current || {}).orders || []);
+      const prevGoodIds = new Set(prevGoodArr.map((o) => o && o.id));
       const remoteIds = new Set(list.map((o) => o && o.id));
+      const busyO = !!(pendingSaveDataRef.current || saveTimerRef.current || savingRef.current);
       setOrders((prev) => {
+        let listX = list;
+        // v231: 저장 전인 내 수정(상태·송장번호 등)이 있으면 그 주문은 내 것 유지
+        if (busyO && prevGoodArr.length) {
+          const bMap = {}; prevGoodArr.forEach((b) => { if (b && b.id) bMap[b.id] = stableStr(b); });
+          const myEdit = {}; (prev || []).forEach((o) => { if (o && o.id && bMap[o.id] && stableStr(o) !== bMap[o.id]) myEdit[o.id] = o; });
+          const ek = Object.keys(myEdit);
+          if (ek.length) { listX = list.map((r) => (r && myEdit[r.id]) || r); try { logDiag("kept_local_edits", { count: ek.length }); } catch (e) {} }
+        }
         const keep = (prev || []).filter((o) => o && o.id && !remoteIds.has(o.id) && !prevGoodIds.has(o.id));
         if (keep.length) {
           try { logDiag("kept_unsaved_orders", { count: keep.length }); } catch (e) {}
-          return [...keep, ...list];
+          return [...keep, ...listX];
         }
-        return list;
+        return listX;
       });
     } else {
       setOrders(list);
@@ -11839,15 +11916,18 @@ function App() {
           }
           if (snap.exists) {
             const data = snap.data();
-            if (data.appName) setAppName(data.appName);
-            if (data.appLogo) setAppLogo(data.appLogo);
-            // v227: 아직 저장 안 된 업체/상품 변경이 있으면 서버 목록으로 덮지 않음 (저장 때 서버와 합쳐짐)
+            if (data.fullSig) syncedSigRef.current = data.fullSig;
+            // v227/v231: 아직 저장 안 된 내 변경이 있으면 서버 값으로 덮지 않음 (저장할 때 서버와 합쳐짐)
             const listBusy = !!(pendingSaveDataRef.current || saveTimerRef.current || savingRef.current);
             if (listBusy) { try { logDiag("skip_remote_lists_while_saving", {}); } catch (e) {} }
+            else baseMainRef.current = data;
+            if (data.appName && !listBusy) setAppName(data.appName);
+            if (data.appLogo && !listBusy) setAppLogo(data.appLogo);
             if (data.products && !listBusy) applyProductsArray(data.products);
             if (data.vendors && !listBusy) applyVendorsArray(data.vendors);
-            if (data.invoices) setInvoices(data.invoices);
-            if (data.supplier) setSupplier(data.supplier);
+            if (data.invoices && !listBusy) setInvoices(data.invoices);
+            if (data.supplier && !listBusy) setSupplier(data.supplier);
+            if (Array.isArray(data.subscriptions) && !listBusy) setSubscriptions(data.subscriptions);
             const hasManifest = typeof data.ordersChunkCount === "number" || typeof data.customersChunkCount === "number";
             if (hasManifest) {
               const sig = String(data.dataSig || "");
@@ -11867,7 +11947,12 @@ function App() {
                     const tombL = new Set(data.deletedOrderIds || []);
                     const haveL = new Set(allOrders.map((o) => o && o.id));
                     const missL = (data.recentOrders || []).filter((o) => o && o.id && !haveL.has(o.id) && !tombL.has(o.id));
-                    if (missL.length && res[0] !== null) { allOrders.unshift(...missL); ordOrders.unshift(...missL); logDiag("restored_recent_orders", { count: missL.length }); }
+                    if (res[0] !== null && (data.recentOrders || []).length) {
+                      const ov = overlayRecent(allOrders, data.recentOrders, tombL);
+                      allOrders.length = 0; allOrders.push(...ov);
+                      if (missL.length) logDiag("restored_recent_orders", { count: missL.length });
+                    }
+                    if (res[1] !== null && (data.recentCustomers || []).length) res[1] = overlayRecent(res[1], data.recentCustomers, null);
                   } catch (e) {}
                   if (res[0] !== null || archOrders.length > 0) {
                     applyOrdersArray(allOrders.length > 0 ? allOrders : ordOrders);
@@ -11891,6 +11976,7 @@ function App() {
                   } catch (e) {}
                   // v221: 다른 기기가 쓴 청크와 내 청크가 섞이지 않도록 다음 저장은 전체 다시 쓰기
                   try { lastOrdSigsRef.current = (res[0] && res[0].__sigs) || []; lastCusSigsRef.current = (res[1] && res[1].__sigs) || []; } catch (e) {}
+                  appliedDataSigRef.current = sig;
                   fbFirstLoadRef.current = true;
                 }).catch((err) => {
                   loadedDataSigRef.current = null;
@@ -11906,14 +11992,16 @@ function App() {
               if (data.customers && data.customers.length > 0) applyCustomersArray(data.customers);
               fbFirstLoadRef.current = true;
             }
-            if (data.integrations) setIntegrations(data.integrations);
-            if (data.customMarketplaces) setCustomMarketplaces(data.customMarketplaces);
-            if (data.couriers) setCouriers(data.couriers);
-            if (data.smsTemplate) setSmsTemplate(data.smsTemplate);
-            if (data.orderTemplate) setOrderTemplate(data.orderTemplate);
-            if (data.customerTemplate) setCustomerTemplate(data.customerTemplate);
-            if (data.productTemplate) setProductTemplate(data.productTemplate);
-            if (data.courierTemplates) setCourierTemplates(data.courierTemplates);
+            if (!listBusy) {
+              if (data.integrations) setIntegrations(data.integrations);
+              if (data.customMarketplaces) setCustomMarketplaces(data.customMarketplaces);
+              if (data.couriers) setCouriers(data.couriers);
+              if (data.smsTemplate) setSmsTemplate(data.smsTemplate);
+              if (data.orderTemplate) setOrderTemplate(data.orderTemplate);
+              if (data.customerTemplate) setCustomerTemplate(data.customerTemplate);
+              if (data.productTemplate) setProductTemplate(data.productTemplate);
+              if (data.courierTemplates) setCourierTemplates(data.courierTemplates);
+            }
             // fbFirstLoadRef는 hasManifest 분기에서 이미 설정됨 — 여기서 중복 설정 제거
             // products/vendors는 applyProductsArray/applyVendorsArray에서 lastGoodDataRef 갱신됨
             recordCounts({ products: (data.products || []).length, vendors: (data.vendors || []).length });
@@ -12007,6 +12095,9 @@ function App() {
   const saveTimerRef = useRef(null);
   const saveGenRef = useRef(0); // v221: 가장 최신 저장만 서버에 쓰기
   const savingRef = useRef(0); // v227: 저장 진행 중 표시
+  const syncedSigRef = useRef(null); // v231: 서버와 같은 상태의 서명 (같으면 저장 생략)
+  const appliedDataSigRef = useRef(null); // v231: 화면(상태)에 실제로 반영 끝난 주문/고객 서명
+  const baseMainRef = useRef(null); // v231: 마지막으로 서버와 맞춘 일반 항목들
   const pendingSaveDataRef = useRef(null);
   const lastOrdSigsRef = useRef([]);
   const lastCusSigsRef = useRef([]);
@@ -12091,6 +12182,14 @@ function App() {
     const baseVendIds = new Set(((lastGoodDataRef.current || {}).vendors || []).map((v) => v && v.id));
     const baseProdIds = new Set(((lastGoodDataRef.current || {}).products || []).map((v) => v && v.id));
     let expectedVendSig, expectedProdSig;
+    let savedFullSig = null;
+    let expectedFullSig;
+    const baseOrdArr = (lastGoodDataRef.current || {}).orders || [];
+    const baseCusArr = (lastGoodDataRef.current || {}).customers || [];
+    const baseVendArr = (lastGoodDataRef.current || {}).vendors || [];
+    const baseProdArr = (lastGoodDataRef.current || {}).products || [];
+    const baseMain = baseMainRef.current;
+    const MAIN_SETTERS = { appName: setAppName, appLogo: setAppLogo, supplier: setSupplier, invoices: setInvoices, subscriptions: setSubscriptions, integrations: setIntegrations, customMarketplaces: setCustomMarketplaces, couriers: setCouriers, smsTemplate: setSmsTemplate, orderTemplate: setOrderTemplate, customerTemplate: setCustomerTemplate, productTemplate: setProductTemplate, courierTemplates: setCourierTemplates };
     // 업체/상품 목록 3방향 병합: 다른 기기가 추가한 건 더하고, 다른 기기가 지운 건 빼고, 내 변경은 유지
     function mergeList(key, setter, baseIds) {
       return (remote) => {
@@ -12100,10 +12199,11 @@ function App() {
         const remoteIds = new Set(remote.map((x) => x && x.id));
         const added = remote.filter((x) => x && x.id && !localIds.has(x.id) && !baseIds.has(x.id));
         const removed = new Set(local.filter((x) => x && x.id && baseIds.has(x.id) && !remoteIds.has(x.id)).map((x) => x.id));
-        if (!added.length && !removed.size) return false;
-        mainPayload[key] = [...local.filter((x) => !(x && removed.has(x.id))), ...added];
-        setter((prev) => { const ids = new Set((prev || []).map((x) => x && x.id)); return [...(prev || []).filter((x) => !(x && removed.has(x.id))), ...added.filter((x) => !ids.has(x.id))]; });
-        try { logDiag("merged_remote_" + key, { added: added.length, removed: removed.size }); } catch (e) {}
+        const rep2 = replaceRemoteEdits(local, remote, key === "vendors" ? baseVendArr : baseProdArr);
+        if (!added.length && !removed.size && !rep2.count) return false;
+        mainPayload[key] = [...rep2.arr.filter((x) => !(x && removed.has(x.id))), ...added];
+        setter((prev) => { const ids = new Set((prev || []).map((x) => x && x.id)); return [...(prev || []).map((x) => (x && rep2.replaced[x.id]) || x).filter((x) => !(x && removed.has(x.id))), ...added.filter((x) => !ids.has(x.id))]; });
+        try { logDiag("merged_remote_" + key, { added: added.length, removed: removed.size, updated: rep2.count }); } catch (e) {}
         return true;
       };
     }
@@ -12119,10 +12219,16 @@ function App() {
       dataSig = recordChunkSig([ordSigs, cusSigs]);
     }
     buildChunks();
+    // v231: 서버와 내용이 완전히 같으면 저장하지 않음 (저장→알림→저장 무한 반복 방지)
+    const calcFullSig = () => dataSig + "|" + recordChunkSig(Object.keys(MAIN_SETTERS).concat(["vendors", "products"]).map((k) => [k, mainPayload[k]]));
+    if (!savingRef.current && syncedSigRef.current && calcFullSig() === syncedSigRef.current) {
+      return;
+    }
     const myGen = ++saveGenRef.current;
     savingRef.current = myGen;
     // v221: 다른 기기가 그 사이 저장했으면 서버 데이터를 먼저 합친 뒤 저장 (서로 덮어써서 주문이 사라지는 문제 방지)
     let expectedSig = undefined;
+    const basedOnSig = appliedDataSigRef.current;
     // v222: 더 새 버전이 서버에 저장한 뒤라면, 이 기기(옛 버전)는 저장하지 않고 자동 업데이트
     function handleOutdated(need) {
       try {
@@ -12150,21 +12256,36 @@ function App() {
         if (d && (d.minClientVersion || 0) > APP_VERSION) handleOutdated(d.minClientVersion);
         expectedSig = d ? d.dataSig : undefined;
         expectedVendSig = d ? d.vendSig : undefined;
+        expectedFullSig = d ? d.fullSig : undefined;
         expectedProdSig = d ? d.prodSig : undefined;
         if (d) {
           mergeList("vendors", setVendors, baseVendIds)(d.vendors);
           mergeList("products", setProducts, baseProdIds)(d.products);
+          // 일반 항목(정기배송·계산서·설정 등): 내 쪽이 안 바뀌었고 서버가 바뀌었으면 서버 것 사용
+          if (baseMain) {
+            Object.keys(MAIN_SETTERS).forEach((k) => {
+              if (!(k in d)) return;
+              const bs = stableStr(baseMain[k]);
+              if (stableStr(mainPayload[k]) === bs && stableStr(d[k]) !== bs) {
+                mainPayload[k] = d[k];
+                try { MAIN_SETTERS[k](d[k]); } catch (e) {}
+                try { logDiag("merged_remote_field", { field: k }); } catch (e) {}
+              }
+            });
+          }
         }
         if (!d || typeof d.ordersChunkCount !== "number") return;
-        if (!d.dataSig || d.dataSig === loadedDataSigRef.current) return;
+        if (!d.dataSig || d.dataSig === basedOnSig) return;
         const tomb = new Set(d.deletedOrderIds || []);
         return Promise.all([
           fetchRecordChunks(ordChunkDocId, d.ordersChunkCount || 0, "orders"),
           fetchRecordChunks(cusChunkDocId, d.customersChunkCount || 0, "customers")
-        ]).then(([rOrd, rCus]) => {
+        ]).then(([rOrd0, rCus0]) => {
+          const rOrd = overlayRecent(rOrd0 || [], d.recentOrders, tomb);
+          const rCus = overlayRecent(rCus0 || [], d.recentCustomers, null);
           // v223: 서버 묶음 서명 기준으로 바뀐 묶음만 저장 (고객 1만8천명 전체를 매번 다시 쓰지 않음)
-          lastOrdSigsRef.current = (rOrd && rOrd.__sigs) || [];
-          lastCusSigsRef.current = (rCus && rCus.__sigs) || [];
+          lastOrdSigsRef.current = (rOrd0 && rOrd0.__sigs) || [];
+          lastCusSigsRef.current = (rCus0 && rCus0.__sigs) || [];
           // 다른 기기에서 삭제한 주문은 여기서도 제거
           const goneO = ordersArr.filter((o) => o && tomb.has(o.id)).map((o) => o.id);
           if (goneO.length) {
@@ -12174,6 +12295,17 @@ function App() {
             buildChunks();
             try { logDiag("removed_remote_deleted", { count: goneO.length }); } catch (e) {}
           }
+          const repO = replaceRemoteEdits(ordersArr, rOrd, baseOrdArr);
+          if (repO.count) {
+            ordersArr = repO.arr;
+            setOrders((prev) => (prev || []).map((o) => (o && repO.replaced[o.id]) || o));
+          }
+          const repC = replaceRemoteEdits(custArr, rCus, baseCusArr);
+          if (repC.count) {
+            custArr = repC.arr;
+            setCustomers((prev) => (prev || []).map((c) => (c && repC.replaced[c.id]) || c));
+          }
+          if (repO.count || repC.count) { buildChunks(); try { logDiag("merged_remote_edits", { orders: repO.count, customers: repC.count }); } catch (e) {} }
           const localO = new Set(ordersArr.map((o) => o && o.id));
           const addO = [];
           [...(rOrd || []), ...(d.recentOrders || [])].forEach((o) => {
@@ -12233,6 +12365,8 @@ function App() {
         );
         pendingSaveDataRef.current = data;
         clearSaving();
+        if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = setTimeout(flushSaveNow, 15000);
       }
     };
     // 버그2 수정: 청크 저장을 먼저 모두 완료한 후에만 메인 문서 업데이트
@@ -12285,6 +12419,12 @@ function App() {
           const d = snap.exists ? snap.data() : {};
           if ((d.minClientVersion || 0) > APP_VERSION) handleOutdated(d.minClientVersion);
           const myVendSig = recordChunkSig(mainPayload.vendors || []);
+          const myFullSig = calcFullSig();
+          savedFullSig = myFullSig;
+          // v231: 그 사이 다른 기기가 무엇이든(정기배송·설정 포함) 저장했으면 충돌 → 다시 합쳐서 저장
+          if (d.fullSig && d.fullSig !== expectedFullSig && d.fullSig !== myFullSig) {
+            const e = new Error("save_conflict"); e.conflict = true; throw e;
+          }
           const myProdSig = recordChunkSig(mainPayload.products || []);
           if ((d.vendSig && d.vendSig !== expectedVendSig && d.vendSig !== myVendSig) || (d.prodSig && d.prodSig !== expectedProdSig && d.prodSig !== myProdSig)) {
             const e = new Error("save_conflict_lists"); e.conflict = true; throw e;
@@ -12295,14 +12435,26 @@ function App() {
           const tombArr = Array.from(new Set([...(d.deletedOrderIds || []), ...myDeleted])).slice(-500);
           const tomb = new Set(tombArr);
           const recent = []; const seen = new Set();
-          [...ordersArr.slice(0, 150), ...(d.recentOrders || [])].forEach((o) => {
-            if (o && o.id && !seen.has(o.id) && !tomb.has(o.id) && recent.length < 200) { seen.add(o.id); recent.push(o); }
+          const bO = {}; baseOrdArr.forEach((b) => { if (b && b.id) bO[b.id] = b; });
+          const changedO = ordersArr.filter((o) => o && o.id && (!bO[o.id] || stableStr(o) !== stableStr(bO[o.id])));
+          [...changedO, ...ordersArr.slice(0, 150), ...(d.recentOrders || [])].forEach((o) => {
+            if (o && o.id && !seen.has(o.id) && !tomb.has(o.id) && recent.length < 300) { seen.add(o.id); recent.push(o); }
           });
-          t.set(mainRef, __spreadProps(__spreadValues({}, mainWrite), { vendors: mainPayload.vendors, products: mainPayload.products, vendSig: myVendSig, prodSig: myProdSig, recentOrders: recent, deletedOrderIds: tombArr, minClientVersion: Math.max(d.minClientVersion || 0, APP_VERSION), wv: APP_VERSION, wt: firebase.firestore.FieldValue.serverTimestamp() }), { merge: true });
+          const bC = {}; baseCusArr.forEach((b) => { if (b && b.id) bC[b.id] = b; });
+          const changedC = custArr.filter((c) => c && c.id && (!bC[c.id] || stableStr(c) !== stableStr(bC[c.id])));
+          const curCIds = new Set(custArr.map((c) => c && c.id));
+          const recentC = []; const seenC = new Set();
+          [...changedC, ...(d.recentCustomers || [])].forEach((c) => {
+            if (c && c.id && !seenC.has(c.id) && curCIds.has(c.id) && recentC.length < 300) { seenC.add(c.id); recentC.push(c); }
+          });
+          t.set(mainRef, __spreadProps(__spreadValues({}, mainWrite), { vendors: mainPayload.vendors, products: mainPayload.products, vendSig: myVendSig, prodSig: myProdSig, fullSig: myFullSig, recentOrders: recent, recentCustomers: recentC, deletedOrderIds: tombArr, minClientVersion: Math.max(d.minClientVersion || 0, APP_VERSION), wv: APP_VERSION, wt: firebase.firestore.FieldValue.serverTimestamp() }), { merge: true });
         })).then(() => {
           lastMainHashRef.current = mainHash;
           lastGoodDataRef.current = { customers: custArr, orders: ordersArr, products: mainPayload.products, vendors: mainPayload.vendors };
           if (savingRef.current === myGen) savingRef.current = 0;
+          if (savedFullSig) syncedSigRef.current = savedFullSig;
+          appliedDataSigRef.current = dataSig;
+          baseMainRef.current = __spreadValues({}, mainPayload);
           recordCounts({ customers: custArr.length, orders: ordersArr.length, products: (data.products || []).length, vendors: (data.vendors || []).length });
           // 저장 성공 알림 (최초 1회 또는 이전에 오류가 있었을 때만)
           if (retryCount > 0) {
@@ -13362,7 +13514,7 @@ function App() {
     }).join(", ");
   }
   function fireToast(msg) {
-    setToast(msg);
+    setToast(koAlertText(msg));
     setTimeout(() => setToast(""), 2400);
   }
   function inDateRange(order, range) {
