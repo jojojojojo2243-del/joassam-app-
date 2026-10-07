@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 225;
+const APP_VERSION = 226;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2070,7 +2070,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v225 (업체/고객 목록 섞인 것 정리 도구)";
+const APP_BUILD = "v226 (목록 정리: 띄어쓴 이름(김 미라)도 사람으로 인식)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -13050,7 +13050,7 @@ function App() {
   // v224: 일반 주문이 업체로 잘못 표시된 것 점검/정리
   const [bizCheck, setBizCheck] = useState(null);
   function openBizCheck() {
-    const isPerson = (n) => { const t = String(n || "").trim(); return /^[가-힣]{2,4}$/.test(t) && KO_SURNAMES.has(t[0]); };
+    const isPerson = (n) => { const t = String(n || "").replace(/\s+/g, ""); return /^[가-힣]{2,4}$/.test(t) && KO_SURNAMES.has(t[0]); };
     const bizProduct = (o) => /채소\s*2\s*kg|업체용/i.test(orderItemsText(o) || "") || (Number(o.boxVolume) || 0) >= 5;
     const vmap = {}; (vendors || []).forEach((v) => { vmap[v.id] = v; });
     // 사업자 정보가 하나도 없고 사람 이름인 업체 = 자동으로 잘못 만들어진 업체 후보
@@ -13073,7 +13073,7 @@ function App() {
   const [listFix, setListFix] = useState(null);
   function openListFix() {
     const np = (p) => String(p || "").replace(/[^0-9]/g, "");
-    const isPerson = (n) => { const t = String(n || "").trim(); return /^[가-힣]{2,4}$/.test(t) && KO_SURNAMES.has(t[0]); };
+    const isPerson = (n) => { const t = String(n || "").replace(/\s+/g, ""); return /^[가-힣]{2,4}$/.test(t) && KO_SURNAMES.has(t[0]); };
     const BIZ = /(정육|식당|음식점|쌈밥|카페|마트|농장|베이커리|분식|치킨|피자|족발|순대|국밥|고깃집|삼겹살|갈비|횟집|회관|상회|가든|축산|푸드|마켓|본점|지점|주식회사|\\(주\\)|㈜|매일소풍|대솔|하레하레|쌈채우리|우렁)/;
     const vToC = (vendors || []).filter((v) => isPerson(v.name) && !BIZ.test(v.name || "") && !v.bizNo && !v.ceo && !v.bizLicense);
     const cToV = (customers || []).filter((c) => !isPerson(c.name) && BIZ.test(c.name || ""));
