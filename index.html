@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 239;
+const APP_VERSION = 240;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2168,7 +2168,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v239 (PC: + 버튼·Ctrl+V로 주문 문자 붙여넣기 등록)";
+const APP_BUILD = "v240 (대화방 이름 뒤 잡글자 정리, 고객 찾기 개선)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -18408,6 +18408,14 @@ function extractLabeledSender(text) {
   }
   return null;
 }
+// v240: 화면에서 읽은 대화방 이름 정리 — 앞쪽 한글 이름만 남기기 ("조숙희고객님v2그라오행:" → "조숙희고객")
+function cleanChatTitle(t) {
+  const s = String(t || "").replace(/^[^가-힣0-9]+/, "");
+  if (/^[0-9\s\-.+]+$/.test(s.trim())) return s.trim();
+  const m = s.match(/[가-힣]{2,}(?:\s?[가-힣]{1,6}){0,2}/);
+  if (!m) return "";
+  return m[0].replace(/\s+/g, "").replace(/님$/, "");
+}
 // v234/v237: 주문자 후보 = 문자 속 '보내는분' → 플로팅 앱이 읽은 대화방 이름·휴대폰 연락처 → 고객 목록 순
 function buildSenderGuess(senderName, text, customers, senderPhone) {
   const digits = (p) => String(p || "").replace(/[^0-9]/g, "");
@@ -18426,13 +18434,16 @@ function buildSenderGuess(senderName, text, customers, senderPhone) {
   }
   // 2) 대화방 이름 (+ 휴대폰 연락처에서 찾은 번호)
   const ph = digits(senderPhone);
-  let nm = norm(senderName);
+  let nm = norm(cleanChatTitle(senderName));
   if (/^0\d{8,10}$/.test(digits(nm)) && !/[가-힣]/.test(nm)) { if (!ph) senderPhone = nm; nm = ""; }
   const ph2 = digits(senderPhone);
   byPhone(ph2).forEach(push);
   if (nm) {
     const strip = nm.replace(/(고객님|고객|님)$/, "");
-    const exact = list.filter((c) => c.name && (norm(c.name) === nm || (strip !== nm && norm(c.name) === strip)));
+    const forms = new Set([nm, strip, strip + "고객", strip + "고객님", strip + "님"]);
+    let exact = list.filter((c) => c.name && forms.has(norm(c.name)));
+    // 이름 뒤에 다른 말이 붙어 저장된 고객(예: "조숙희 사장님", "조숙희(서울)")
+    if (!exact.length && strip.length >= 2) exact = list.filter((c) => { const cn = norm(c.name); return cn.startsWith(strip) && cn.length - strip.length <= 6 && !/^[가-힣]/.test(cn.slice(strip.length).replace(/^(고객|님|사장|대표|씨)/, "x")); }).slice(0, 4);
     // 화면 글자 인식 시 앞에 프로필 글자가 붙는 경우(예: "기김종옥고객") → 끝부분이 같은 고객
     const tail = exact.length ? [] : list.filter((c) => { const cn = norm(c.name); return cn.length >= 2 && nm.length - cn.length <= 2 && nm.length > cn.length && nm.endsWith(cn); });
     const matched = exact.length ? exact : tail;
@@ -18476,13 +18487,14 @@ function HomeStatTile({ label, value, color, bg, onClick }) {
   return /* @__PURE__ */ React.createElement("button", { onClick, style: { background: bg, border: "none", borderRadius: 12, padding: "12px 4px", textAlign: "center", cursor: "pointer" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 21, fontWeight: 700, color } }, value), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 700, color, marginTop: 2 } }, label));
 }
 function MultiRegModal({ modal, customers, products, couriers, vendors, onClose, onSubmit }) {
-  const [sender, setSender] = React.useState(modal.sender || { name: "", phone: "" });
+  const [sender, setSender] = React.useState(() => { const s0 = modal.sender || { name: "", phone: "" }; return Object.assign({}, s0, { name: cleanChatTitle(s0.name) || s0.name || "" }); });
   // v238: 주문자 칸 — 등록된 고객에서 찾아 보여주기
   const [senderSugOpen, setSenderSugOpen] = React.useState(!(modal.sender && modal.sender.phone));
   const senderSug = React.useMemo(() => {
     const norm = (x) => String(x || "").replace(/\s+/g, "");
     const dg = (x) => String(x || "").replace(/[^0-9]/g, "");
-    const q = norm(sender.name).replace(/(고객님|님)$/, "");
+    const q = norm(cleanChatTitle(sender.name) || sender.name).replace(/(고객님|님)$/, "");
+    const q2 = q.replace(/고객$/, "");
     const qp = dg(sender.phone);
     if (q.length < 1 && qp.length < 4) return [];
     const scored = [];
@@ -18493,6 +18505,8 @@ function MultiRegModal({ modal, customers, products, couriers, vendors, onClose,
       if (qp.length >= 4 && cp && cp.includes(qp)) sc = qp === cp ? 100 : 60;
       if (q) {
         if (cn === q) sc = Math.max(sc, 90);
+        else if (q2.length >= 2 && (cn === q2 || cn === q2 + "고객")) sc = Math.max(sc, 85);
+        else if (q2.length >= 2 && cn.startsWith(q2)) sc = Math.max(sc, 55);
         else if (q.length >= 2 && q.endsWith(cn) && q.length - cn.length <= 2 && cn.length >= 2) sc = Math.max(sc, 80); // 화면 인식 앞글자 붙음
         else if (cn.startsWith(q)) sc = Math.max(sc, 50);
         else if (q.length >= 2 && cn.includes(q)) sc = Math.max(sc, 40);
