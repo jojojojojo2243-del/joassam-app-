@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 237;
+const APP_VERSION = 238;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2168,7 +2168,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v237 (주문자: 문자 속 보내는분·휴대폰 연락처 번호 자동 인식)";
+const APP_BUILD = "v238 (주문 화면 + 버튼, 주문자 칸 등록 고객 찾기)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -17337,10 +17337,15 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         /* @__PURE__ */ React.createElement("button", { onClick: applyBizCheck, disabled: bizCheck.checked.size === 0, style: { width: "100%", padding: "15px 0", borderRadius: 14, border: "none", background: bizCheck.checked.size ? "#2F6F4E" : "#B4B2A9", color: "#fff", fontWeight: 800, fontSize: 15 } }, "선택한 " + bizCheck.checked.size + "건 일반 주문으로 바꾸기")
       )
     ),
+    tab === "orders" && !selectedOrder && !invoicePreview && /* @__PURE__ */ React.createElement(FabOrderButton, {
+      setTab,
+      onSetSender: (name, phone) => { setDraft((prev) => __spreadProps(__spreadValues({}, prev), { sender: { name: name || "", phone: phone || "" } })); }
+    }),
     multiRegModal && /* @__PURE__ */ React.createElement(
       MultiRegModal,
       {
         modal: multiRegModal,
+        customers,
         products,
         couriers,
         vendors,
@@ -18272,9 +18277,18 @@ function SenderPredictModal({ sharedText, guessed, customers, onConfirm, onClose
   };
   const [search, setSearch] = React.useState("");
   const digits = p => String(p||"").replace(/[^0-9]/g,"");
-  const filtered = search.length >= 1
-    ? customers.filter(c => c.name && c.name.includes(search)).slice(0, 6)
-    : guessed.slice(0, 6);
+  // v238: 추천 주문자 + 등록된 고객 검색 결과를 함께
+  const filtered = (() => {
+    const q = String(search || input || "").replace(/\s+/g, "");
+    const out = []; const seen = new Set();
+    const add = (c) => { const k = c.name + "|" + digits(c.phone); if (c && c.name && !seen.has(k)) { seen.add(k); out.push(c); } };
+    (guessed || []).slice(0, 4).forEach(add);
+    if (q.length >= 1) {
+      const qd = digits(q);
+      customers.filter((c) => c.name && (String(c.name).replace(/\s+/g, "").includes(q) || (qd.length >= 4 && digits(c.phone).includes(qd)))).slice(0, 8).forEach(add);
+    }
+    return out.slice(0, 10);
+  })();
   return /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 99999, display: "flex", alignItems: "flex-end" } },
     /* @__PURE__ */ React.createElement("div", { style: { width: "100%", background: "#fff", borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingBottom: "calc(20px + env(safe-area-inset-bottom,0px))" } },
       // 헤더
@@ -18304,7 +18318,7 @@ function SenderPredictModal({ sharedText, guessed, customers, onConfirm, onClose
         }),
         // 추천 목록
         filtered.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 12 } },
-          /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 700, color: "#888780", marginBottom: 6 } }, search ? "\uAC80\uC0C9 \uACB0\uACFC" : "\uCD94\uCC9C \uC8FC\uBB38\uC790"),
+          /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 700, color: "#888780", marginBottom: 6 } }, "추천 주문자 · 등록된 고객"),
           /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexWrap: "wrap", gap: 6 } },
             filtered.map((c, i) =>
               /* @__PURE__ */ React.createElement("button", {
@@ -18416,8 +18430,33 @@ function guessSharedSender(text, customers) {
 function HomeStatTile({ label, value, color, bg, onClick }) {
   return /* @__PURE__ */ React.createElement("button", { onClick, style: { background: bg, border: "none", borderRadius: 12, padding: "12px 4px", textAlign: "center", cursor: "pointer" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 21, fontWeight: 700, color } }, value), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 700, color, marginTop: 2 } }, label));
 }
-function MultiRegModal({ modal, products, couriers, vendors, onClose, onSubmit }) {
+function MultiRegModal({ modal, customers, products, couriers, vendors, onClose, onSubmit }) {
   const [sender, setSender] = React.useState(modal.sender || { name: "", phone: "" });
+  // v238: 주문자 칸 — 등록된 고객에서 찾아 보여주기
+  const [senderSugOpen, setSenderSugOpen] = React.useState(!(modal.sender && modal.sender.phone));
+  const senderSug = React.useMemo(() => {
+    const norm = (x) => String(x || "").replace(/\s+/g, "");
+    const dg = (x) => String(x || "").replace(/[^0-9]/g, "");
+    const q = norm(sender.name).replace(/(고객님|님)$/, "");
+    const qp = dg(sender.phone);
+    if (q.length < 1 && qp.length < 4) return [];
+    const scored = [];
+    (customers || []).forEach((c) => {
+      const cn = norm(c.name), cp = dg(c.phone);
+      if (!cn) return;
+      let sc = 0;
+      if (qp.length >= 4 && cp && cp.includes(qp)) sc = qp === cp ? 100 : 60;
+      if (q) {
+        if (cn === q) sc = Math.max(sc, 90);
+        else if (q.length >= 2 && q.endsWith(cn) && q.length - cn.length <= 2 && cn.length >= 2) sc = Math.max(sc, 80); // 화면 인식 앞글자 붙음
+        else if (cn.startsWith(q)) sc = Math.max(sc, 50);
+        else if (q.length >= 2 && cn.includes(q)) sc = Math.max(sc, 40);
+      }
+      if (sc) scored.push([sc, c]);
+    });
+    scored.sort((a, b) => b[0] - a[0] || String(a[1].name).localeCompare(String(b[1].name)));
+    return scored.slice(0, 6).map((x) => x[1]);
+  }, [sender.name, sender.phone, customers]);
   const [courier, setCourier] = React.useState(modal.courier || "\uC6B0\uCCB4\uAD6D\uD0DD\uBC30");
   const [deliveries, setDeliveries] = React.useState(modal.deliveries || []);
   const [productModal, setProductModal] = React.useState(null);
@@ -18614,11 +18653,28 @@ function MultiRegModal({ modal, products, couriers, vendors, onClose, onSubmit }
         /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6 } },
           /* @__PURE__ */ React.createElement("div", { style: { flex: 1 } },
             /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10, fontWeight: 700, color: "#5F5E5A", marginBottom: 3 } }, "\uC8FC\uBB38\uC790"),
-            /* @__PURE__ */ React.createElement("input", { placeholder: "\uBCF4\uB0B4\uB294\uBD84 \uC774\uB984", value: sender.name, onChange: (e) => setSender((s) => ({...s, name: e.target.value})), style: fieldStyle(sender.name) })
+            /* @__PURE__ */ React.createElement("input", { placeholder: "\uBCF4\uB0B4\uB294\uBD84 \uC774\uB984", value: sender.name, onFocus: () => setSenderSugOpen(true), onChange: (e) => { setSenderSugOpen(true); setSender((s) => ({...s, name: e.target.value})); }, style: fieldStyle(sender.name) })
           ),
           /* @__PURE__ */ React.createElement("div", { style: { flex: 1 } },
             /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10, fontWeight: 700, color: "#5F5E5A", marginBottom: 3 } }, "\uC8FC\uBB38\uC790 \uC5F0\uB77D\uCC98"),
-            /* @__PURE__ */ React.createElement("input", { placeholder: "010-0000-0000", value: sender.phone, onChange: (e) => setSender((s) => ({...s, phone: e.target.value})), style: fieldStyle(sender.phone) })
+            /* @__PURE__ */ React.createElement("input", { placeholder: "010-0000-0000", inputMode: "tel", value: sender.phone, onFocus: () => setSenderSugOpen(true), onChange: (e) => { setSenderSugOpen(true); setSender((s) => ({...s, phone: e.target.value})); }, style: fieldStyle(sender.phone) })
+          )
+        ),
+        senderSugOpen && senderSug.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { marginTop: 8, background: "#F1F7EE", border: "1px solid #C0DD97", borderRadius: 10, padding: "8px 10px" } },
+          /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 } },
+            /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11, fontWeight: 800, color: "#2F6F4E" } }, "등록된 고객에서 찾음 — 눌러서 선택"),
+            /* @__PURE__ */ React.createElement("button", { onClick: () => setSenderSugOpen(false), style: { border: "none", background: "none", fontSize: 11, color: "#888780", cursor: "pointer" } }, "닫기")
+          ),
+          /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4 } },
+            senderSug.map((c) => /* @__PURE__ */ React.createElement("button", {
+              key: c.id || (c.name + c.phone),
+              onPointerDown: (e) => e.preventDefault(),
+              onClick: () => { setSender({ name: c.name || "", phone: c.phone || "", id: c.id || "" }); setSenderSugOpen(false); },
+              style: { display: "flex", justifyContent: "space-between", gap: 8, width: "100%", textAlign: "left", border: "1px solid #DDE8D3", background: "#fff", borderRadius: 8, padding: "8px 10px", fontSize: 13, cursor: "pointer", color: "#1B2430" }
+            },
+              /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 800 } }, c.name),
+              /* @__PURE__ */ React.createElement("span", { style: { color: "#5F5E5A" } }, c.phone || "번호 없음")
+            ))
           )
         )
       ),
