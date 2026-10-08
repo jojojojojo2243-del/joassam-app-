@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 235;
+const APP_VERSION = 236;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2168,7 +2168,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v235 (+ 버튼: 플로팅 앱 없으면 기존 입력 화면으로 바로 안내)";
+const APP_BUILD = "v236 (플로팅 등록 → 항상 주문등록 화면으로, 인식 실패 안내)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -12120,7 +12120,7 @@ function App() {
       if (shared) {
         // v234: 플로팅 앱이 화면에서 읽은 대화방 이름(sender)을 주문자 후보 맨 앞에
         const guessed = buildSenderGuess(params.get("sender") || "", shared, customers);
-        setSenderPredictModal({ sharedText: shared, guessed });
+        setSenderPredictModal({ sharedText: shared, guessed, fromOcr: params.get("src") === "ocr" });
         window.history.replaceState({}, "", window.location.pathname + window.location.hash);
       }
     } catch (e) {}
@@ -17261,17 +17261,13 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         setSenderPredictModal(null);
         const text = senderPredictModal.sharedText;
         const recipients = typeof parseMultipleRecipients === "function" ? parseMultipleRecipients(text, products) : [];
-        if (recipients.length >= 2) {
-          const deliveries = recipients.map(r => {
-            const matchedC = customers.find(c => r.phone && (c.phone||"").replace(/[-\s.]/g,"") === r.phone);
-            return { id: uid("d"), name: r.name, phone: r.phone, address: r.address, cart: {}, postalCode: estimatePostalCode(r.address), customerId: matchedC ? matchedC.id : "" };
-          });
-          setMultiRegModal({ sender: senderObj, deliveries, courier: couriers && couriers[0] || "\uC6B0\uCCB4\uAD6D\uD0DD\uBC30", rawText: text });
-        } else {
-          setDraft(prev => __spreadProps(__spreadValues({}, prev), { sender: senderObj, message: text }));
-          analyzeMessage(text);
-          setTab("new");
-        }
+        // v236: 받는분이 1명이거나 못 찾아도 항상 '주문등록' 화면(배송지·원본메시지 수정·상품선택)으로
+        const deliveries = recipients.map(r => {
+          const matchedC = customers.find(c => r.phone && (c.phone||"").replace(/[-\s.]/g,"") === r.phone);
+          return { id: uid("d"), name: r.name, phone: r.phone, address: r.address, cart: {}, postalCode: estimatePostalCode(r.address), customerId: matchedC ? matchedC.id : "" };
+        });
+        if (!deliveries.length) deliveries.push({ id: uid("d"), name: "", phone: "", address: "", cart: {}, postalCode: "", customerId: "" });
+        setMultiRegModal({ sender: senderObj, deliveries, courier: couriers && couriers[0] || "\uC6B0\uCCB4\uAD6D\uD0DD\uBC30", rawText: text, noRecipient: !recipients.length, fromOcr: !!senderPredictModal.fromOcr });
       }
     }),
     listFix && (() => {
@@ -18372,7 +18368,9 @@ function MultiRegModal({ modal, products, couriers, vendors, onClose, onSubmit }
   const [assignMode, setAssignMode] = React.useState(null); // 'name' | 'phone' | 'address'
   const [editRaw, setEditRaw] = React.useState(false);
   const [rawDraft, setRawDraft] = React.useState("");
-  const [rawHint, setRawHint] = React.useState("");
+  const [rawHint, setRawHint] = React.useState(
+    modal.noRecipient ? "\u26A0\uFE0F 받는분 이름·전화번호·주소를 찾지 못했어요. 주문 문자를 복사했는지 확인하거나, 글자를 선택해서 이름지정/주소지정으로 넣어주세요"
+    : modal.fromOcr ? "\u2139\uFE0F 복사한 문자가 없어서 화면 글자를 읽어 넣었어요. 틀린 글자가 있으면 글자수정으로 고쳐주세요" : "");
   const [confirmOpen, setConfirmOpen] = React.useState(false);
   const rawRef = React.useRef(null);
   React.useEffect(() => {
