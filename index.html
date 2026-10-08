@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 236;
+const APP_VERSION = 237;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2168,7 +2168,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v236 (플로팅 등록 → 항상 주문등록 화면으로, 인식 실패 안내)";
+const APP_BUILD = "v237 (주문자: 문자 속 보내는분·휴대폰 연락처 번호 자동 인식)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -12119,7 +12119,7 @@ function App() {
       const shared = (params.get("text") || params.get("title") || "").trim();
       if (shared) {
         // v234: 플로팅 앱이 화면에서 읽은 대화방 이름(sender)을 주문자 후보 맨 앞에
-        const guessed = buildSenderGuess(params.get("sender") || "", shared, customers);
+        const guessed = buildSenderGuess(params.get("sender") || "", shared, customers, params.get("senderPhone") || "");
         setSenderPredictModal({ sharedText: shared, guessed, fromOcr: params.get("src") === "ocr" });
         window.history.replaceState({}, "", window.location.pathname + window.location.hash);
       }
@@ -12128,7 +12128,7 @@ function App() {
     const onFabShared = (e) => {
       const text = (e.detail && e.detail.text) || "";
       if (text && text.length > 10) {
-        const guessed = guessSharedSender(text, customers);
+        const guessed = buildSenderGuess("", text, customers, "");
         setSenderPredictModal({ sharedText: text, guessed });
       }
     };
@@ -17260,7 +17260,10 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
       onConfirm: (senderObj) => {
         setSenderPredictModal(null);
         const text = senderPredictModal.sharedText;
-        const recipients = typeof parseMultipleRecipients === "function" ? parseMultipleRecipients(text, products) : [];
+        const lab = extractLabeledSender(text);
+        const sPh = String((senderObj && senderObj.phone) || "").replace(/[^0-9]/g, "");
+        const recipients = (typeof parseMultipleRecipients === "function" ? parseMultipleRecipients(text, products) : [])
+          .filter((r) => !(lab && lab.phone && r.phone === lab.phone && sPh === lab.phone)); // v237: '보내는분' 정보는 받는분에서 빼기
         // v236: 받는분이 1명이거나 못 찾아도 항상 '주문등록' 화면(배송지·원본메시지 수정·상품선택)으로
         const deliveries = recipients.map(r => {
           const matchedC = customers.find(c => r.phone && (c.phone||"").replace(/[-\s.]/g,"") === r.phone);
@@ -18256,6 +18259,17 @@ function ProductSelectSheet({ products, tempCart, setTempCart, deliveryIdx, deli
 
 function SenderPredictModal({ sharedText, guessed, customers, onConfirm, onClose }) {
   const [input, setInput] = React.useState(guessed && guessed[0] ? guessed[0].name : "");
+  const [phoneIn, setPhoneIn] = React.useState(guessed && guessed[0] && guessed[0].phone ? guessed[0].phone : "");
+  const fmtP = (v) => { const d = String(v || "").replace(/[^0-9]/g, ""); return d.length === 11 ? d.replace(/(\d{3})(\d{4})(\d{4})/, "$1-$2-$3") : d.length === 10 ? d.replace(/(\d{3})(\d{3})(\d{4})/, "$1-$2-$3") : String(v || ""); };
+  // v237: 확정할 때 이름에 맞는 고객의 전화번호 채우기
+  const confirmWith = (nm, ph) => {
+    const n = String(nm || "").trim();
+    let p = String(ph || "").trim();
+    const g = (guessed || []).find((c) => c.name === n);
+    const c2 = (customers || []).find((c) => c.name === n && c.phone);
+    if (!p) p = (g && g.phone) || (c2 && c2.phone) || "";
+    onConfirm({ id: (g && g.id) || (c2 && c2.id) || "", name: n, phone: fmtP(p) });
+  };
   const [search, setSearch] = React.useState("");
   const digits = p => String(p||"").replace(/[^0-9]/g,"");
   const filtered = search.length >= 1
@@ -18277,9 +18291,16 @@ function SenderPredictModal({ sharedText, guessed, customers, onConfirm, onClose
           placeholder: "\uC8FC\uBB38\uC790 \uC774\uB984 \uC785\uB825 \uB610\uB294 \uAC80\uC0C9",
           value: input,
           onChange: e => { setInput(e.target.value); setSearch(e.target.value); },
-          onKeyDown: e => e.key === "Enter" && onConfirm({ name: input, phone: "" }),
+          onKeyDown: e => e.key === "Enter" && confirmWith(input, phoneIn),
           autoFocus: true,
-          style: { width: "100%", padding: "13px 14px", borderRadius: 12, border: "2px solid #2F6F4E", fontSize: 15, fontWeight: 600, boxSizing: "border-box", outline: "none", marginBottom: 12 }
+          style: { width: "100%", padding: "13px 14px", borderRadius: 12, border: "2px solid #2F6F4E", fontSize: 15, fontWeight: 600, boxSizing: "border-box", outline: "none", marginBottom: 8 }
+        }),
+        /* @__PURE__ */ React.createElement("input", {
+          placeholder: "주문자 연락처 (010-0000-0000)",
+          value: phoneIn,
+          inputMode: "tel",
+          onChange: e => setPhoneIn(e.target.value),
+          style: { width: "100%", padding: "11px 14px", borderRadius: 12, border: "1.5px solid #B4B2A9", fontSize: 14, boxSizing: "border-box", outline: "none", marginBottom: 12 }
         }),
         // 추천 목록
         filtered.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 12 } },
@@ -18288,15 +18309,15 @@ function SenderPredictModal({ sharedText, guessed, customers, onConfirm, onClose
             filtered.map((c, i) =>
               /* @__PURE__ */ React.createElement("button", {
                 key: c.id || i,
-                onClick: () => { setInput(c.name); onConfirm(c); },
+                onClick: () => { setInput(c.name); setPhoneIn(c.phone || ""); confirmWith(c.name, c.phone || ""); },
                 style: { padding: "8px 14px", borderRadius: 20, border: "1.5px solid #2F6F4E", background: input === c.name ? "#2F6F4E" : "#fff", color: input === c.name ? "#fff" : "#2F6F4E", fontWeight: 700, fontSize: 13, cursor: "pointer" }
-              }, c.name)
+              }, c.name + (c.phone ? " · " + String(c.phone).replace(/[^0-9]/g, "").slice(-4) : ""))
             )
           )
         ),
         // 확인 버튼
         /* @__PURE__ */ React.createElement("button", {
-          onClick: () => onConfirm({ name: input.trim(), phone: "" }),
+          onClick: () => confirmWith(input, phoneIn),
           style: { width: "100%", padding: "14px 0", borderRadius: 14, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 800, fontSize: 15, cursor: "pointer", opacity: input.trim() ? 1 : 0.5 }
         }, "\uC8FC\uBB38\uC790 \uB4F1\uB85D \u2192")
       )
@@ -18305,24 +18326,65 @@ function SenderPredictModal({ sharedText, guessed, customers, onConfirm, onClose
 }
 
 // v234: 플로팅 앱이 읽은 대화방 이름 + 기존 추측을 합쳐 주문자 후보 만들기
-function buildSenderGuess(senderName, text, customers) {
-  const base = guessSharedSender(text, customers) || [];
-  const nm = String(senderName || "").replace(/\s+/g, "").trim();
-  if (!nm) return base;
-  const strip = nm.replace(/(고객님|고객|님)$/, "");
+// v237: 문자 안에 "보내는분/주문자: 이름 전화번호"가 적혀 있으면 찾아내기
+function extractLabeledSender(text) {
+  const lines = String(text || "").split(/\n/).map((l) => l.trim());
+  const LABEL = /(보내는\s*분|보내는\s*사람|보내시는\s*분|주문자|주문하신\s*분|발송인|발신인|발송자|보낸\s*사람)\s*(?:정보|성함|이름|명)?\s*[:：)\]-]?\s*/;
+  const PHONE = /01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/;
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(LABEL);
+    if (!m) continue;
+    let rest = lines[i].slice(m.index + m[0].length);
+    // 이름/전화가 다음 줄에 있는 경우
+    let j = i + 1;
+    while ((!/[가-힣]{2}/.test(rest.replace(PHONE, "")) || !PHONE.test(rest)) && j < lines.length && j <= i + 2) {
+      if (!lines[j]) { j++; continue; }
+      if (/(받는\s*분|받는\s*사람|수령인|수취인|배송지|주소)/.test(lines[j])) break;
+      rest += " " + lines[j]; j++;
+    }
+    const ph = rest.match(PHONE);
+    const nameSrc = rest.replace(PHONE, " ").replace(/(연락처|전화번호|전화|핸드폰|휴대폰|번호|성함|이름)\s*[:：]?/g, " ");
+    const nm = (nameSrc.match(/[가-힣]{2,5}/) || [""])[0];
+    if (nm || ph) return { name: nm, phone: ph ? ph[0].replace(/[^0-9]/g, "") : "" };
+  }
+  return null;
+}
+// v234/v237: 주문자 후보 = 문자 속 '보내는분' → 플로팅 앱이 읽은 대화방 이름·휴대폰 연락처 → 고객 목록 순
+function buildSenderGuess(senderName, text, customers, senderPhone) {
+  const digits = (p) => String(p || "").replace(/[^0-9]/g, "");
   const norm = (x) => String(x || "").replace(/\s+/g, "");
-  const list = (customers || []);
-  const exact = [...list.filter((c) => c.name && norm(c.name) === nm), ...list.filter((c) => c.name && strip !== nm && norm(c.name) === strip)];
-  const part = strip.length >= 2 ? list.filter((c) => c.name && norm(c.name).includes(strip) && !exact.includes(c)).slice(0, 5) : [];
+  const list = customers || [];
   const out = [];
   const seen = new Set();
-  const push = (c) => { const k = (c.id || "") + "|" + c.name + "|" + (c.phone || ""); if (!seen.has(k)) { seen.add(k); out.push(c); } };
-  exact.forEach(push);
-  if (!exact.length) push({ id: "", name: nm, phone: "" });
-  part.forEach(push);
-  base.forEach(push);
+  const push = (c) => { if (!c || !c.name) return; const k = norm(c.name) + "|" + digits(c.phone); if (!seen.has(k)) { seen.add(k); out.push(c); } };
+  const byPhone = (ph) => ph ? list.filter((c) => digits(c.phone) === ph) : [];
+  // 1) 문자에 적힌 보내는분
+  const lab = extractLabeledSender(text);
+  if (lab) {
+    const hit = byPhone(lab.phone);
+    if (hit.length) hit.forEach(push);
+    if (lab.name) push({ id: (hit.find((c) => norm(c.name) === lab.name) || {}).id || "", name: lab.name, phone: lab.phone });
+  }
+  // 2) 대화방 이름 (+ 휴대폰 연락처에서 찾은 번호)
+  const ph = digits(senderPhone);
+  let nm = norm(senderName);
+  if (/^0\d{8,10}$/.test(digits(nm)) && !/[가-힣]/.test(nm)) { if (!ph) senderPhone = nm; nm = ""; }
+  const ph2 = digits(senderPhone);
+  byPhone(ph2).forEach(push);
+  if (nm) {
+    const strip = nm.replace(/(고객님|고객|님)$/, "");
+    const exact = list.filter((c) => c.name && (norm(c.name) === nm || (strip !== nm && norm(c.name) === strip)));
+    // 화면 글자 인식 시 앞에 프로필 글자가 붙는 경우(예: "기김종옥고객") → 끝부분이 같은 고객
+    const tail = exact.length ? [] : list.filter((c) => { const cn = norm(c.name); return cn.length >= 2 && nm.length - cn.length <= 2 && nm.length > cn.length && nm.endsWith(cn); });
+    const matched = exact.length ? exact : tail;
+    matched.forEach((c) => push(c.phone ? c : Object.assign({}, c, { phone: ph2 })));
+    if (!matched.length) push({ id: "", name: nm, phone: ph2 });
+    if (strip.length >= 2) list.filter((c) => c.name && norm(c.name).includes(strip)).slice(0, 4).forEach(push);
+  }
+  if (!out.length) (guessSharedSender(text, customers) || []).forEach(push);
   return out;
 }
+
 function guessSharedSender(text, customers) {
   if (!text || !customers) return [];
   const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
