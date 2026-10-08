@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 233;
+const APP_VERSION = 234;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2168,7 +2168,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v233 (주문 저장 전체 점검: 일부 불러오기 사고 방지·재시도 데이터·백업 분할·쓰기량 절감)";
+const APP_BUILD = "v234 (+ 버튼 → 플로팅 앱(어레인지 방식) 연결, 대화방 이름 주문자 자동 인식)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -12118,7 +12118,8 @@ function App() {
       const params = new URLSearchParams(window.location.search);
       const shared = (params.get("text") || params.get("title") || "").trim();
       if (shared) {
-        const guessed = guessSharedSender(shared, customers);
+        // v234: 플로팅 앱이 화면에서 읽은 대화방 이름(sender)을 주문자 후보 맨 앞에
+        const guessed = buildSenderGuess(params.get("sender") || "", shared, customers);
         setSenderPredictModal({ sharedText: shared, guessed });
         window.history.replaceState({}, "", window.location.pathname + window.location.hash);
       }
@@ -18061,6 +18062,24 @@ function HomeTab({ appName, orders, counts, customerMap, productMap, orderTotal,
 }
 function FabOrderButton({ setTab, onSetSender }) {
   const [showPicker, setShowPicker] = React.useState(false); // 앱 선택 팝업
+  const [floatMissing, setFloatMissing] = React.useState(false); // v234
+  React.useEffect(() => {
+    try {
+      const sp = new URLSearchParams(window.location.search);
+      if (sp.get("float") === "missing") {
+        setFloatMissing(true);
+        setShowPicker(true);
+        window.history.replaceState({}, "", window.location.pathname + window.location.hash);
+      }
+    } catch (e) {}
+  }, []);
+  // v234: 어레인지 방식 — 안드로이드면 '조아저씨쌈 플로팅' 앱을 띄우고 홈 화면으로
+  function openFloating() {
+    const isAndroid = /Android/i.test(navigator.userAgent || "");
+    if (!isAndroid) { setShowPicker(true); return; }
+    const fallback = window.location.origin + window.location.pathname + "?float=missing";
+    window.location.href = "intent://start#Intent;scheme=joassamfloat;package=com.joassam.floating;S.browser_fallback_url=" + encodeURIComponent(fallback) + ";end";
+  }
 
   // 앱에서 돌아왔을 때 클립보드 자동 감지
   React.useEffect(() => {
@@ -18086,17 +18105,18 @@ function FabOrderButton({ setTab, onSetSender }) {
     "div", { style: { position: "fixed", inset: 0, background: "rgba(27,36,48,0.75)", zIndex: 9000, display: "flex", alignItems: "flex-end" }, onClick: () => setShowPicker(false) },
     /* @__PURE__ */ React.createElement("div", { onClick: e => e.stopPropagation(), style: { width: "100%", background: "#fff", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: "20px 20px", paddingBottom: "calc(20px + env(safe-area-inset-bottom,0px))" } },
       /* @__PURE__ */ React.createElement("div", { style: { fontSize: 15, fontWeight: 800, color: "#1B2430", marginBottom: 4 } }, "\uC8FC\uBB38 \uBB38\uC790 \uD655\uC778"),
+      floatMissing && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, background: "#FAEEDA", color: "#854F0B", borderRadius: 10, padding: "10px 12px", marginBottom: 12, lineHeight: 1.6, fontWeight: 600 } }, "\uD50C\uB85C\uD305 \uBC84\uD2BC\uC744 \uC4F0\uB824\uBA74 '\uC870\uC544\uC800\uC528\uC308 \uD50C\uB85C\uD305' \uC571\uC744 \uC124\uCE58\uD558\uACE0 '\uB2E4\uB978 \uC571 \uC704\uC5D0 \uD45C\uC2DC'\uB97C \uD5C8\uC6A9\uD574 \uC8FC\uC138\uC694. \uADF8 \uC804\uAE4C\uC9C0\uB294 \uC544\uB798 \uBC29\uBC95\uC73C\uB85C \uC785\uB825\uD560 \uC218 \uC788\uC5B4\uC694."),
       /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A", marginBottom: 18, lineHeight: 1.6 } }, "\uC8FC\uBB38 \uBB38\uC790\uAC00 \uC788\uB294 \uCC44\uD305 \uC571\uC744 \uC120\uD0DD\uD558\uC138\uC694\u2014 \uBB38\uC790\uC5D0\uC11C \uACF5\uC720\uD558\uBA74 \uC790\uB3D9 \uC785\uB825\uB429\uB2C8\uB2E4."),
       // 앱 목록
       [
         { label: "\uCE74\uCE74\uC624\uD1A1", emoji: "\uD83D\uDCAC", bg: "#FAE100", color: "#3A1D1D",
           open: () => { window.location.href = "intent://timeline#Intent;scheme=kakaolink;package=com.kakao.talk;end"; } },
         { label: "\uBB38\uC790(\uCC44\uD305+)", emoji: "\u2709\uFE0F", bg: "#4CAF50", color: "#fff",
-          open: () => { window.location.href = "intent://main#Intent;scheme=smsto;package=com.samsung.android.messaging;end"; } },
+          open: () => { window.location.href = "intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.APP_MESSAGING;S.browser_fallback_url=" + encodeURIComponent(window.location.href) + ";end"; } },
         { label: "\uB124\uC774\uBC84 \uB77C\uC778", emoji: "\uD83D\uDCF1", bg: "#00C73C", color: "#fff",
           open: () => { window.location.href = "line://"; } },
         { label: "\uAE30\uD0C0 \uBB38\uC790", emoji: "\uD83D\uDCEC", bg: "#5F5E5A", color: "#fff",
-          open: () => { window.location.href = "sms:"; } },
+          open: () => { window.location.href = "intent:#Intent;action=android.intent.action.MAIN;category=android.intent.category.APP_MESSAGING;S.browser_fallback_url=" + encodeURIComponent(window.location.href) + ";end"; } },
       ].map(({ label, emoji, bg, color, open }) =>
         /* @__PURE__ */ React.createElement("button", {
           key: label,
@@ -18120,7 +18140,7 @@ function FabOrderButton({ setTab, onSetSender }) {
   return /* @__PURE__ */ React.createElement(React.Fragment, null,
     picker,
     /* @__PURE__ */ React.createElement("button", {
-      onClick: () => setShowPicker(true),
+      onClick: openFloating,
       style: { position: "fixed", bottom: "calc(70px + env(safe-area-inset-bottom, 0px))", right: 20, width: 56, height: 56, borderRadius: "50%", background: "#2F6F4E", color: "#fff", border: "none", fontSize: 28, fontWeight: 700, boxShadow: "0 4px 16px rgba(0,0,0,0.3)", cursor: "pointer", zIndex: 50, display: "flex", alignItems: "center", justifyContent: "center" }
     }, "\uFF0B")
   );
@@ -18274,6 +18294,25 @@ function SenderPredictModal({ sharedText, guessed, customers, onConfirm, onClose
   );
 }
 
+// v234: 플로팅 앱이 읽은 대화방 이름 + 기존 추측을 합쳐 주문자 후보 만들기
+function buildSenderGuess(senderName, text, customers) {
+  const base = guessSharedSender(text, customers) || [];
+  const nm = String(senderName || "").replace(/\s+/g, "").trim();
+  if (!nm) return base;
+  const strip = nm.replace(/(고객님|고객|님)$/, "");
+  const norm = (x) => String(x || "").replace(/\s+/g, "");
+  const list = (customers || []);
+  const exact = [...list.filter((c) => c.name && norm(c.name) === nm), ...list.filter((c) => c.name && strip !== nm && norm(c.name) === strip)];
+  const part = strip.length >= 2 ? list.filter((c) => c.name && norm(c.name).includes(strip) && !exact.includes(c)).slice(0, 5) : [];
+  const out = [];
+  const seen = new Set();
+  const push = (c) => { const k = (c.id || "") + "|" + c.name + "|" + (c.phone || ""); if (!seen.has(k)) { seen.add(k); out.push(c); } };
+  exact.forEach(push);
+  if (!exact.length) push({ id: "", name: nm, phone: "" });
+  part.forEach(push);
+  base.forEach(push);
+  return out;
+}
 function guessSharedSender(text, customers) {
   if (!text || !customers) return [];
   const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
