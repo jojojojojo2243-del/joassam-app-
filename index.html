@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 241;
+const APP_VERSION = 242;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1673,7 +1673,144 @@ function parseNameAddr(text, products) {
 
   return { name, address };
 }
+// v242: 문자 유형이 달라도 이름·전화·주소를 찾아내는 인식기
+const __SURNAMES = "김이박최정강조윤장임한오서신권황안송류전홍고문양손배백허유남심노하곽성차주우구나민진지엄채원천방공현함변염여추도소석선설마길연위표명기반왕금옥육인맹제모탁국어은편용봉예탄빈경라모간갈감견계공궁궐기낭노당돈동두라마만매목묵미범부사상생서설섭소순승시아애야약양어언엄여연영오옹왕요용우운원위유음이익인임자잠장저전점정제조좌주준증지직진차창채천초총최추춘탁태판팽편평포표피하학함해허현형호홍화환황후훈";
+const __SUR_SET = new Set(__SURNAMES.split(""));
+const __SUR2 = ["남궁", "황보", "제갈", "선우", "독고", "사공", "서문", "동방"];
+const __ADDR_SUFFIX = /(시|군|구|읍|면|로|길|층|호|도|번지|빌라|아파트|마을|단지|상가|농협|건물|빌딩|타워)$/;
+const __NOT_NAME = new Set(["보내주세요", "감사합니다", "안녕하세요", "부탁드립니다", "부탁드려요", "입금완료", "계좌번호", "우체국", "택배", "배송지", "받는분", "보내는분", "주문자", "연락처", "전화번호", "핸드폰", "휴대폰", "수령인", "수취인", "서울","부산","대구","인천","광주","대전","울산","세종","경기","강원","충북","충남","전북","전남","경북","경남","제주","경기도", "서울시", "고객님", "사장님", "월요일", "화요일", "수요일", "목요일", "금요일", "토요일", "일요일", "내일", "오늘", "모레", "도착", "문앞", "경비실", "택배함", "아파트", "입금", "확인", "알겠습니다", "네네", "넵넵"]);
+function __stripChatNoise(line) {
+  let s = String(line || "").replace(/​/g, "").trim();
+  // "[유태수] [오전 9:43] 내용" 형식(카카오톡 복사) → 내용만
+  s = s.replace(/^\[[^\]]{1,20}\]\s*\[(?:오전|오후)\s*\d{1,2}:\d{2}\]\s*/, "");
+  s = s.replace(/\s*(?:오전|오후)\s*\d{1,2}:\d{2}\s*$/, "");
+  if (/^(?:오전|오후)\s*\d{1,2}:\d{2}$/.test(s)) return "";
+  if (/^\d{4}년\s*\d{1,2}월\s*\d{1,2}일/.test(s) || /^\d{1,2}월\s*\d{1,2}일\s*[월화수목금토일]요일$/.test(s)) return "";
+  if (/^(사진|동영상|이모티콘|파일|읽음|전송됨)\s*\d*(장|개)?$/.test(s)) return "";
+  return s;
+}
+function __nameOK(s, strict) {
+  const t = String(s || "").trim();
+  if (!/^[가-힣]{2,4}$/.test(t)) return false;
+  if (__NOT_NAME.has(t)) return false;
+  if (__ADDR_SUFFIX.test(t)) return false;
+  if (/(동|리)$/.test(t) && t.length !== 3) return false;
+  const sur = __SUR_SET.has(t[0]) || __SUR2.includes(t.slice(0, 2));
+  if (strict && !sur) return false;
+  return true;
+}
+function __isAddrLine(s) {
+  const t = String(s || "");
+  if (/^[가-힣]{2,4}$/.test(t) && __nameOK(t, true)) return false;
+  if (/^(서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|전북|전남|경북|경남|제주)/.test(t)) return true;
+  if (/[가-힣0-9]+(시|군|구|읍|면|동|리|로|길|번길|번지|층|호|동|아파트|빌라|마을|단지|상가|빌딩|타워|농협)(\s|$|\d)/.test(t) && /[가-힣]/.test(t)) return true;
+  if (/\d+-\d+/.test(t) && /[가-힣]/.test(t)) return true;
+  if (/\d+\s*(층|호|동)/.test(t)) return true;
+  return false;
+}
+function __isQtyLine(s) {
+  return /\d+\s*(kg|㎏|키로|박스|개|봉|팩|세트|병)|보내\s*주|보내\s*줘|부탁|감사|입금|계좌|월요일|도착|배송\s*메시지|요청/i.test(s);
+}
+// 한 건의 주문 문자(줄 목록)에서 받는분 이름·전화·주소 뽑기
+function smartParseBlock(rawLines) {
+  const PHONE_G = /01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/;
+  const lines = [];
+  (rawLines || []).forEach((l) => { const c = __stripChatNoise(l); if (!c) return; if (/[\/|]/.test(c) || (/,/.test(c) && /01[016789]/.test(c))) c.split(/\s*[\/|,]\s*/).forEach((p) => { if (p.trim()) lines.push(p.trim()); }); else lines.push(c); });
+  let phone = "", phoneIdx = -1;
+  for (let i = 0; i < lines.length; i++) { const m = lines[i].match(PHONE_G); if (m) { phone = m[0].replace(/[^0-9]/g, ""); phoneIdx = i; break; } }
+  let labelName = "", labelAddr = "";
+  const work = lines.map((l, i) => {
+    let s = l;
+    if (i === phoneIdx) s = s.replace(PHONE_G, " ").replace(/(연락처|전화번호|전화|핸드폰|휴대폰|연락)\s*[:：)]?/g, " ");
+    s = s.replace(/\s+/g, " ").trim();
+    let m = s.match(/^(?:받는\s*분|받는\s*사람|수령인|수취인|성함|이름)\s*(?:성함|이름)?\s*[:：)\]-]?\s*(.*)$/);
+    if (m) { const cand = (m[1] || "").match(/^[가-힣]{2,5}/); if (cand) { labelName = cand[0]; s = (m[1] || "").slice(cand[0].length).trim(); } else s = (m[1] || "").trim(); }
+    m = s.match(/^(?:받는\s*분\s*)?(?:배송지|주소|받는\s*주소)\s*[:：)\]-]?\s*(.*)$/);
+    if (m) { labelAddr = (m[1] || "").trim(); s = ""; }
+    return s;
+  });
+  let name = labelName, nameLine = -1, nameStrength = labelName ? 3 : 0;
+  const consider = (cand, idx, strength, strip) => { if (strength > nameStrength || (strength === nameStrength && nameLine >= 0 && Math.abs(idx - phoneIdx) < Math.abs(nameLine - phoneIdx))) { name = cand; nameLine = idx; nameStrength = strength; work[idx] = strip; } };
+  if (!labelName) {
+    for (let i = 0; i < work.length; i++) {
+      const s = work[i]; if (!s) continue;
+      const bare = s.replace(/(고객님|씨|님)$/, "");
+      if (/^[가-힣]{2,4}$/.test(bare) && __nameOK(bare, true) && !__isAddrLine(s)) { consider(bare, i, 2, ""); continue; }
+      const toks = s.split(" ");
+      if (toks.length >= 2) {
+        const last = toks[toks.length - 1].replace(/(고객님|씨|님)$/, "");
+        if (__nameOK(last, true) && __isAddrLine(toks.slice(0, -1).join(" ")) && !__isQtyLine(s)) { consider(last, i, 1, toks.slice(0, -1).join(" ")); continue; }
+        const first = toks[0].replace(/(고객님|씨|님)$/, "");
+        if (i === phoneIdx && __nameOK(first, true) && __isAddrLine(toks.slice(1).join(" ")) && !__isQtyLine(s)) { consider(first, i, 1, toks.slice(1).join(" ")); continue; }
+      }
+    }
+    if (!name) {
+      for (let i = 0; i < work.length; i++) { const s = work[i].replace(/(고객님|씨|님)$/, ""); if (/^[가-힣]{2,4}$/.test(s) && __nameOK(s, false) && !__isQtyLine(s) && !__isAddrLine(s)) { name = s; work[i] = ""; break; } }
+    }
+  }
+  const addrParts = [];
+  if (labelAddr) addrParts.push(labelAddr);
+  let prevAddr = !!labelAddr;
+  for (let i = 0; i < work.length; i++) {
+    const s = work[i]; if (!s) { continue; }
+    if (__isQtyLine(s) && !__isAddrLine(s)) { prevAddr = false; continue; }
+    if (__isAddrLine(s)) { addrParts.push(s); prevAddr = true; continue; }
+    if (prevAddr && /^\d{1,4}$/.test(s)) { addrParts.push(s); continue; }              // "307번길" 다음 줄의 "19"
+    if (prevAddr && /^[가-힣A-Za-z0-9\-\s]{1,15}$/.test(s) && !__nameOK(s.replace(/\s/g, ""), true) && !__isQtyLine(s)) { addrParts.push(s); continue; } // 건물 이름 이어짐
+    prevAddr = false;
+  }
+  return { name, phone, address: addrParts.join(" ").replace(/\s+/g, " ").trim() };
+}
+// 문자 전체를 배송지 한 건씩으로 나누기 (빈 줄 기준, 한 덩어리에 전화번호가 둘 이상이면 null → 옛 방식 사용)
+function smartSplitRecipients(text) {
+  const PHONE_G = /01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/g;
+  const raw = String(text || "").replace(/\r\n?/g, "\n");
+  if (/(보내는\s*분|주문자|발송인|발신인|보내는\s*사람)/.test(raw) && (raw.match(PHONE_G) || []).length >= 2) return null;
+  const chunks = raw.split(/\n\s*\n/).map((c) => c.split("\n").map((l) => l.trim()).filter(Boolean)).filter((c) => c.length);
+  const phoneCount = (c) => new Set((c.join("\n").match(PHONE_G) || []).map((p) => p.replace(/[^0-9]/g, ""))).size;
+  if (chunks.some((c) => phoneCount(c) > 1)) return null;
+  const total = chunks.reduce((n, c) => n + phoneCount(c), 0);
+  if (total === 0) return null;
+  const merged = [];
+  let pendingNoPhone = [];
+  for (const c of chunks) {
+    if (phoneCount(c) === 0) {
+      const addrish = c.some((l) => __isAddrLine(l));
+      if (addrish) pendingNoPhone.push(...c);            // 주소만 있는 덩어리는 다음 전화번호와 합침
+      else if (merged.length) merged[merged.length - 1].extra.push(...c); // 상품·요청 줄은 앞 건에 붙임
+      continue;
+    }
+    merged.push({ lines: [...pendingNoPhone, ...c], extra: [] });
+    pendingNoPhone = [];
+  }
+  return merged;
+}
+
 function parseMultipleRecipients(text, products) {
+  // v242: 먼저 새 인식기(이름·전화·주소 순서가 제각각인 문자 대응), 못 읽는 항목만 옛 방식으로 보충
+  try {
+    const sp = smartSplitRecipients(text);
+    if (sp && sp.length) {
+      const out = [];
+      sp.forEach((b) => {
+        const r = smartParseBlock(b.lines);
+        if (!r.phone && !r.name && !r.address) return;
+        let old = null;
+        try { old = parseOrderMessage(b.lines.concat(b.extra || []).join("\n"), products); } catch (e) {}
+        out.push({
+          name: r.name || (old && old.recipName) || "",
+          phone: r.phone || (old && (old.recipPhone || old.senderPhone)) || "",
+          address: r.address || (old && old.address) || "",
+          items: (old && old.items) || [],
+          deliveryMessage: (old && old.deliveryMessage) || ""
+        });
+      });
+      if (out.length && out.some((o) => o.phone)) return out;
+    }
+  } catch (e) {}
+  return parseMultipleRecipientsOld(text, products);
+}
+function parseMultipleRecipientsOld(text, products) {
   // 발신자(보내는분) 정보 추출
   const senderPhone = "";
   const senderName = "";
@@ -2204,7 +2341,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v241 (주문·고객 저장 안전 강화: 되돌리기·삭제·동시 사용 오류 수정)";
+const APP_BUILD = "v242 (문자 유형별 이름·전화·주소 인식 강화, 대화방 이름 인식 개선)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -12185,17 +12322,26 @@ function App() {
       const params = new URLSearchParams(window.location.search);
       const shared = (params.get("text") || params.get("title") || "").trim();
       if (shared) {
-        // v234: 플로팅 앱이 화면에서 읽은 대화방 이름(sender)을 주문자 후보 맨 앞에
-        const guessed = buildSenderGuess(params.get("sender") || "", shared, customers, params.get("senderPhone") || "");
-        setSenderPredictModal({ sharedText: shared, guessed, fromOcr: params.get("src") === "ocr" });
+        const sName = params.get("sender") || "", sPhone = params.get("senderPhone") || "", fromOcr = params.get("src") === "ocr";
         window.history.replaceState({}, "", window.location.pathname + window.location.hash);
+        // v242: 앱이 막 켜졌을 때는 고객 목록이 아직 안 불러와졌을 수 있음 → 다 불러온 뒤에 주문자를 찾음 (최대 8초)
+        let tries = 0;
+        const go = () => {
+          const loaded = !firebaseReady || fbFirstLoadRef.current;
+          if (!loaded && tries++ < 27) { setTimeout(go, 300); return; }
+          const custNow = (latestDataRef.current && latestDataRef.current.customers) || customers;
+          const guessed = buildSenderGuess(sName, shared, custNow, sPhone);
+          setSenderPredictModal({ sharedText: shared, guessed, fromOcr });
+        };
+        go();
       }
     } catch (e) {}
     // FAB에서 클립보드 복귀 이벤트 수신
     const onFabShared = (e) => {
       const text = (e.detail && e.detail.text) || "";
       if (text && text.length > 10) {
-        const guessed = buildSenderGuess("", text, customers, "");
+        const custNow = (latestDataRef.current && latestDataRef.current.customers) || customers;
+        const guessed = buildSenderGuess("", text, custNow, "");
         setSenderPredictModal({ sharedText: text, guessed });
       }
     };
@@ -18510,9 +18656,14 @@ function extractLabeledSender(text) {
 function cleanChatTitle(t) {
   const s = String(t || "").replace(/^[^가-힣0-9]+/, "");
   if (/^[0-9\s\-.+]+$/.test(s.trim())) return s.trim();
-  const m = s.match(/[가-힣]{2,}(?:\s?[가-힣]{1,6}){0,2}/);
+  const m = s.match(/[가-힣]{2,}(?:(?:\s*[\-_·]\s*|\s?)[가-힣]{1,6}){0,3}/);
   if (!m) return "";
-  return m[0].replace(/\s+/g, "").replace(/님$/, "");
+  const SHOP = /^(조아저씨쌈|조아쌈|조아저씨|조아농장|조아)$/;
+  let parts = m[0].split(/\s*[\-_·]\s*/).map((x) => x.replace(/\s+/g, "")).filter(Boolean);
+  parts = parts.map((x) => x.replace(/^(조아저씨쌈|조아쌈)(?=[가-힣]{2,})/, "")).filter((x) => x && !SHOP.test(x));
+  if (!parts.length) return "";
+  const pick = parts.find((x) => /(고객님|고객|님)$/.test(x)) || parts[parts.length - 1];
+  return pick.replace(/님$/, "");
 }
 // v234/v237: 주문자 후보 = 문자 속 '보내는분' → 플로팅 앱이 읽은 대화방 이름·휴대폰 연락처 → 고객 목록 순
 function buildSenderGuess(senderName, text, customers, senderPhone) {
