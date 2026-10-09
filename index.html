@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 240;
+const APP_VERSION = 241;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -64,10 +64,45 @@ function ordChunkDocId(i) {
 function cusChunkDocId(i) {
   return (IS_TEST ? "test_cus_" : "cus_") + i;
 }
+// v241: 전화번호를 읽기 쉽게 010-1234-5678 모양으로 (숫자만 있어도, 이미 하이픈이 있어도)
+function fmtPhoneKo(p) {
+  const raw = String(p == null ? "" : p).trim();
+  const d = raw.replace(/[^0-9]/g, "");
+  if (!d) return raw;
+  if (/^01[016789]\d{7,8}$/.test(d)) return d.length === 11 ? d.slice(0, 3) + "-" + d.slice(3, 7) + "-" + d.slice(7) : d.slice(0, 3) + "-" + d.slice(3, 6) + "-" + d.slice(6);
+  if (/^02\d{7,8}$/.test(d)) return d.length === 10 ? "02-" + d.slice(2, 6) + "-" + d.slice(6) : "02-" + d.slice(2, 5) + "-" + d.slice(5);
+  if (/^0[3-6]\d{8,9}$/.test(d)) return d.length === 11 ? d.slice(0, 3) + "-" + d.slice(3, 7) + "-" + d.slice(7) : d.slice(0, 3) + "-" + d.slice(3, 6) + "-" + d.slice(6);
+  return raw;
+}
+// v241: 글자 수(UTF-8) 어림 계산 — 한글은 3바이트
+function utf8Len(s) {
+  const str = String(s || "");
+  const m = str.match(/[^\x00-\x7f]/g);
+  return str.length + (m ? m.length * 2 : 0);
+}
+// v241: 개수(400)뿐 아니라 크기(약 70만 바이트)도 넘지 않게 나눔 — 주문 메모·원본 문자가 길어도 저장이 막히지 않도록 (Firestore 문서 1MB 제한)
+const CHUNK_MAX_BYTES = 700000;
 function chunkArraySized(arr, size) {
   const a = arr || [];
   const out = [];
-  for (let i = 0; i < a.length; i += size) out.push(a.slice(i, i + size));
+  let cur = [], bytes = 0;
+  for (let i = 0; i < a.length; i++) {
+    let b = 300;
+    try { b = utf8Len(JSON.stringify(a[i])); } catch (e) {}
+    if (cur.length && (cur.length >= size || bytes + b > CHUNK_MAX_BYTES)) { out.push(cur); cur = []; bytes = 0; }
+    cur.push(a[i]); bytes += b;
+  }
+  if (cur.length) out.push(cur);
+  return out;
+}
+// v241: 최근 목록(메인 문서에 들어감)이 너무 커지지 않게 줄임
+function capByBytes(list, maxBytes) {
+  const out = []; let tot = 0;
+  for (let i = 0; i < list.length; i++) {
+    let b = 300; try { b = utf8Len(JSON.stringify(list[i])); } catch (e) {}
+    if (tot + b > maxBytes && out.length >= 20) break;
+    tot += b; out.push(list[i]);
+  }
   return out;
 }
 // v229: 이름 정렬 — 한글(가나다) 먼저, 그다음 영어(abc), 숫자, 기타
@@ -700,7 +735,8 @@ function nowStamp() {
   return `${pad(d.getMonth() + 1)}.${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 function uid(prefix) {
-  return prefix + Math.random().toString(36).slice(2, 8);
+  // v241: 6000건만 넘어도 겹칠 수 있던 짧은 번호 → 시간 + 긴 난수로 (같은 번호면 주문 하나가 조용히 사라질 수 있음)
+  return prefix + Date.now().toString(36).slice(-5) + Math.random().toString(36).slice(2, 8) + Math.random().toString(36).slice(2, 5);
 }
 var ARCHIVE_CHUNK_SIZE = 300;
 function archiveChunkDocId(i) {
@@ -2168,7 +2204,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v240 (대화방 이름 뒤 잡글자 정리, 고객 찾기 개선)";
+const APP_BUILD = "v241 (주문·고객 저장 안전 강화: 되돌리기·삭제·동시 사용 오류 수정)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11817,6 +11853,7 @@ function App() {
     })();
   }, []);
   const loadedDataSigRef = useRef(null);
+  const snapSeqRef = useRef(0); // v241: 늦게 도착한 옛 데이터가 새 데이터를 덮지 않게
   function fetchRecordChunks(idFn, count, key) {
     const n = count || 0;
     // count가 0이면 null 반환 (빈 배열로 덮어쓰는 것 방지)
@@ -11877,10 +11914,14 @@ function App() {
         let listX = list;
         // v231: 저장 전인 내 수정(상태·송장번호 등)이 있으면 그 주문은 내 것 유지
         if (busyO && prevGoodArr.length) {
-          const bMap = {}; prevGoodArr.forEach((b) => { if (b && b.id) bMap[b.id] = stableStr(b); });
-          const myEdit = {}; (prev || []).forEach((o) => { if (o && o.id && bMap[o.id] && stableStr(o) !== bMap[o.id]) myEdit[o.id] = o; });
+          const bRef = {}; prevGoodArr.forEach((b) => { if (b && b.id) bRef[b.id] = b; });
+          const myEdit = {}; (prev || []).forEach((o) => { if (o && o.id && bRef[o.id] && o !== bRef[o.id] && stableStr(o) !== stableStr(bRef[o.id])) myEdit[o.id] = o; });
           const ek = Object.keys(myEdit);
           if (ek.length) { listX = list.map((r) => (r && myEdit[r.id]) || r); try { logDiag("kept_local_edits", { count: ek.length }); } catch (e) {} }
+          // v241: 내가 방금 지웠는데 아직 저장 전인 주문이 다른 기기 저장 때문에 되살아나는 것 방지
+          const prevIdsX = new Set((prev || []).map((o) => o && o.id));
+          const myDel = new Set(prevGoodArr.filter((b) => b && b.id && !prevIdsX.has(b.id)).map((b) => b.id));
+          if (myDel.size) { listX = listX.filter((r) => !(r && myDel.has(r.id))); try { logDiag("kept_local_deletes", { count: myDel.size }); } catch (e) {} }
         }
         const keep = (prev || []).filter((o) => o && o.id && !remoteIds.has(o.id) && !prevGoodIds.has(o.id));
         if (keep.length) {
@@ -11905,7 +11946,26 @@ function App() {
         return;
       }
     }
-    setCustomers(list);
+    // v241: 저장 전인 내 고객 추가·수정·삭제가 다른 기기 저장 때문에 사라지지 않게 보호 (주문은 남고 고객만 없어지던 문제)
+    const busyC = !!(pendingSaveDataRef.current || saveTimerRef.current || savingRef.current);
+    const prevGoodC = ((lastGoodDataRef.current || {}).customers || []);
+    if (firebaseReady && (busyC || prevGoodC.length === 0)) {
+      const remoteIdsC = new Set(list.map((c) => c && c.id));
+      const goodRef = {}; prevGoodC.forEach((c) => { if (c && c.id) goodRef[c.id] = c; });
+      setCustomers((prev) => {
+        const prevArr = prev || [];
+        const prevIds = new Set(prevArr.map((c) => c && c.id));
+        const myDel = new Set(prevGoodC.filter((c) => c && c.id && !prevIds.has(c.id)).map((c) => c.id));
+        const myEdit = {}; prevArr.forEach((c) => { if (c && c.id && goodRef[c.id] && c !== goodRef[c.id] && stableStr(c) !== stableStr(goodRef[c.id])) myEdit[c.id] = c; });
+        const keepNew = prevArr.filter((c) => c && c.id && !remoteIdsC.has(c.id) && !goodRef[c.id]);
+        if (!myDel.size && !keepNew.length && !Object.keys(myEdit).length) return list;
+        try { logDiag("kept_local_customers", { added: keepNew.length, edited: Object.keys(myEdit).length, deleted: myDel.size }); } catch (e) {}
+        const base2 = list.filter((c) => !(c && myDel.has(c.id))).map((c) => (c && myEdit[c.id]) || c);
+        return keepNew.length ? [...base2, ...keepNew] : base2;
+      });
+    } else {
+      setCustomers(list);
+    }
     lastGoodDataRef.current = __spreadProps(__spreadValues({}, lastGoodDataRef.current || {}), { customers: list });
     recordCounts({ customers: list.length });
   }
@@ -11974,11 +12034,13 @@ function App() {
               if (sig !== loadedDataSigRef.current) {
                 loadedDataSigRef.current = sig;
                 const archiveCount = typeof data.archiveChunkCount === "number" ? data.archiveChunkCount : 0;
+                const mySnapSeq = ++snapSeqRef.current;
                 Promise.all([
                   fetchRecordChunks(ordChunkDocId, data.ordersChunkCount || 0, "orders"),
                   fetchRecordChunks(cusChunkDocId, data.customersChunkCount || 0, "customers"),
                   archiveCount > 0 ? loadArchiveChunks(archiveCount) : Promise.resolve([])
                 ]).then((res) => {
+                  if (mySnapSeq !== snapSeqRef.current) return; // 더 새 데이터가 이미 오고 있음
                   const ordOrders = res[0] !== null ? res[0] : [];
                   const archOrders = Array.isArray(res[2]) ? res[2] : [];
                   const allOrders = [...ordOrders, ...archOrders];
@@ -11993,6 +12055,11 @@ function App() {
                       if (missL.length) logDiag("restored_recent_orders", { count: missL.length });
                     }
                     if (res[1] !== null && (data.recentCustomers || []).length) res[1] = overlayRecent(res[1], data.recentCustomers, null);
+                    // v241: 다른 기기에서 지운 고객은 불러올 때도 제외
+                    if (res[1] !== null && (data.deletedCustomerIds || []).length) {
+                      const tombCL = new Set(data.deletedCustomerIds);
+                      const sg = res[1].__sigs; res[1] = res[1].filter((c) => !(c && tombCL.has(c.id))); res[1].__sigs = sg;
+                    }
                   } catch (e) {}
                   if (res[0] !== null || archOrders.length > 0) {
                     applyOrdersArray(allOrders.length > 0 ? allOrders : ordOrders);
@@ -12137,6 +12204,7 @@ function App() {
   }, [dataLoaded]);
   const saveTimerRef = useRef(null);
   const saveGenRef = useRef(0); // v221: 가장 최신 저장만 서버에 쓰기
+  const resurrectRef = useRef(new Set()); // v241: 되돌리기로 되살린 주문 번호 (서버의 '삭제됨' 표시를 지우기 위해)
   const savingRef = useRef(0); // v227: 저장 진행 중 표시
   const syncedSigRef = useRef(null); // v231: 서버와 같은 상태의 서명 (같으면 저장 생략)
   const appliedDataSigRef = useRef(null); // v231: 화면(상태)에 실제로 반영 끝난 주문/고객 서명
@@ -12240,6 +12308,7 @@ function App() {
     } catch (e) {}
     let ordersArr = data.orders || [];
     let custArr = data.customers || [];
+    const resurrectNow = new Set(resurrectRef.current);
     const baseOrderIds = new Set(((lastGoodDataRef.current || {}).orders || []).map((o) => o && o.id));
     const baseCustIds = new Set(((lastGoodDataRef.current || {}).customers || []).map((c) => c && c.id));
     const baseVendIds = new Set(((lastGoodDataRef.current || {}).vendors || []).map((v) => v && v.id));
@@ -12350,7 +12419,7 @@ function App() {
           lastOrdSigsRef.current = (rOrd0 && rOrd0.__sigs) || [];
           lastCusSigsRef.current = (rCus0 && rCus0.__sigs) || [];
           // 다른 기기에서 삭제한 주문은 여기서도 제거
-          const goneO = ordersArr.filter((o) => o && tomb.has(o.id)).map((o) => o.id);
+          const goneO = ordersArr.filter((o) => o && tomb.has(o.id) && !resurrectNow.has(o.id)).map((o) => o.id);
           if (goneO.length) {
             const goneSet = new Set(goneO);
             ordersArr = ordersArr.filter((o) => !(o && goneSet.has(o.id)));
@@ -12362,6 +12431,16 @@ function App() {
           if (repO.count) {
             ordersArr = repO.arr;
             setOrders((prev) => (prev || []).map((o) => (o && repO.replaced[o.id]) || o));
+          }
+          // v241: 다른 기기에서 지운 고객은 여기서도 제거 (지우지 않으면 내 저장 때 다시 살아남)
+          const tombC = new Set(d.deletedCustomerIds || []);
+          const goneC = custArr.filter((c) => c && tombC.has(c.id)).map((c) => c.id);
+          if (goneC.length) {
+            const goneCSet = new Set(goneC);
+            custArr = custArr.filter((c) => !(c && goneCSet.has(c.id)));
+            setCustomers((prev) => (prev || []).filter((c) => !(c && goneCSet.has(c.id))));
+            buildChunks();
+            try { logDiag("removed_remote_deleted_customers", { count: goneC.length }); } catch (e) {}
           }
           const repC = replaceRemoteEdits(custArr, rCus, baseCusArr);
           if (repC.count) {
@@ -12375,7 +12454,7 @@ function App() {
             if (o && o.id && !localO.has(o.id) && !baseOrderIds.has(o.id) && !tomb.has(o.id)) { localO.add(o.id); addO.push(o); }
           });
           const localC = new Set(custArr.map((c) => c && c.id));
-          const addC = (rCus || []).filter((c) => c && c.id && !localC.has(c.id) && !baseCustIds.has(c.id));
+          const addC = (rCus || []).filter((c) => c && c.id && !localC.has(c.id) && !baseCustIds.has(c.id) && !tombC.has(c.id));
           if (addO.length) {
             ordersArr = [...addO, ...ordersArr];
             setOrders((prev) => { const ids = new Set((prev || []).map((o) => o && o.id)); const more = addO.filter((o) => !ids.has(o.id)); return more.length ? [...more, ...prev] : prev; });
@@ -12526,7 +12605,7 @@ function App() {
           if (!forced && d.dataSig && d.dataSig !== expectedSig && d.dataSig !== dataSig) {
             const e = new Error("save_conflict"); e.conflict = true; throw e;
           }
-          const tombArr = Array.from(new Set([...(d.deletedOrderIds || []), ...myDeleted])).slice(-500);
+          const tombArr = Array.from(new Set([...(d.deletedOrderIds || []), ...myDeleted])).filter((id) => !(resurrectNow.has(id) && myIds.has(id))).slice(-500);
           const tomb = new Set(tombArr);
           const recent = []; const seen = new Set();
           const bO = {}; baseOrdArr.forEach((b) => { if (b && b.id) bO[b.id] = b; });
@@ -12534,6 +12613,9 @@ function App() {
           [...changedO, ...ordersArr.slice(0, 150), ...(d.recentOrders || [])].forEach((o) => {
             if (o && o.id && !seen.has(o.id) && !tomb.has(o.id) && recent.length < 300) { seen.add(o.id); recent.push(o); }
           });
+          const myCustIds = new Set(custArr.map((c) => c && c.id));
+          const myDeletedC = Array.from(baseCustIds).filter((id) => id && !myCustIds.has(id));
+          const tombCArr = Array.from(new Set([...(d.deletedCustomerIds || []), ...myDeletedC])).filter((id) => !myCustIds.has(id)).slice(-3000);
           const bC = {}; baseCusArr.forEach((b) => { if (b && b.id) bC[b.id] = b; });
           const changedC = custArr.filter((c) => c && c.id && (!bC[c.id] || stableStr(c) !== stableStr(bC[c.id])));
           const curCIds = new Set(custArr.map((c) => c && c.id));
@@ -12541,13 +12623,14 @@ function App() {
           [...changedC, ...(d.recentCustomers || [])].forEach((c) => {
             if (c && c.id && !seenC.has(c.id) && curCIds.has(c.id) && recentC.length < 300) { seenC.add(c.id); recentC.push(c); }
           });
-          t.set(mainRef, __spreadProps(__spreadValues({}, mainWrite), { vendors: mainPayload.vendors, products: mainPayload.products, vendSig: myVendSig, prodSig: myProdSig, fullSig: myFullSig, recentOrders: recent, recentCustomers: recentC, deletedOrderIds: tombArr, minClientVersion: Math.max(d.minClientVersion || 0, APP_VERSION), wv: APP_VERSION, wt: firebase.firestore.FieldValue.serverTimestamp() }), { merge: true });
+          t.set(mainRef, __spreadProps(__spreadValues({}, mainWrite), { vendors: mainPayload.vendors, products: mainPayload.products, vendSig: myVendSig, prodSig: myProdSig, fullSig: myFullSig, recentOrders: capByBytes(recent, 250000), recentCustomers: capByBytes(recentC, 100000), deletedOrderIds: tombArr, deletedCustomerIds: tombCArr, minClientVersion: Math.max(d.minClientVersion || 0, APP_VERSION), wv: APP_VERSION, wt: firebase.firestore.FieldValue.serverTimestamp() }), { merge: true });
         })).then(() => {
           lastMainHashRef.current = mainHash;
           lastGoodDataRef.current = { customers: custArr, orders: ordersArr, products: mainPayload.products, vendors: mainPayload.vendors };
           if (savingRef.current === myGen) savingRef.current = 0;
           if (savedFullSig) syncedSigRef.current = savedFullSig;
           try { localStorage.removeItem("joassam_unsynced_orders_" + DATA_DOC); } catch (e) {}
+          resurrectNow.forEach((id) => resurrectRef.current.delete(id));
           forceOverwriteRef.current = false;
           appliedDataSigRef.current = dataSig;
           baseMainRef.current = __spreadValues({}, mainPayload);
@@ -12883,7 +12966,18 @@ function App() {
       return false;
     }
     justSubmittedRef.current = true;
-    setOrders(u.orders);
+    // v241: 통째로 되돌리면 그 사이 다른 사람이 넣은 새 주문이 같이 지워짐 → 지운 주문만 되살리고 바꾼 것만 되돌림
+    const snapO = u.orders;
+    const snapMap = {}; snapO.forEach((o) => { if (o && o.id) snapMap[o.id] = o; });
+    setOrders((cur) => {
+      const curArr = cur || [];
+      const curIds = new Set(curArr.map((o) => o && o.id));
+      const missing = snapO.filter((o) => o && o.id && !curIds.has(o.id));
+      missing.forEach((o) => resurrectRef.current.add(o.id));
+      const onlyNew = curArr.filter((o) => o && o.id && !snapMap[o.id]);
+      const reverted = snapO.filter((o) => o && o.id);
+      return [...onlyNew, ...reverted];
+    });
     if (Array.isArray(u.invoices)) setInvoices(u.invoices);
     lastUndoRef.current = null;
     fireToast(`\u21A9\uFE0F ${u.label}\uC744(\uB97C) \uB418\uB3CC\uB838\uC5B4\uC694`);
@@ -16500,7 +16594,11 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
       if (prodList.length > 0) setProducts(prodList);
       if (vendList.length > 0) setVendors(vendList);
       // 주문: 백업에 있는 주문은 백업 내용으로, 백업 이후 생긴 주문은 그대로 유지
-      if (ordList.length > 0) setOrders((prev) => overlayRecent(prev || [], ordList, null));
+      if (ordList.length > 0) setOrders((prev) => {
+        const have = new Set((prev || []).map((o) => o && o.id));
+        ordList.forEach((o) => { if (o && o.id && !have.has(o.id)) resurrectRef.current.add(o.id); });
+        return overlayRecent(prev || [], ordList, null);
+      });
       if (data.invoices) setInvoices(data.invoices);
       if (data.supplier) setSupplier(data.supplier);
       if (data.subscriptions) setSubscriptions(data.subscriptions);
@@ -17366,8 +17464,8 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
               status: "pending",
               isBusiness: false,
               vendorId: "",
-              recipient: { name: d.name || "", phone: d.phone || "", address: d.address || "", postalCode: estimatePostalCode(d.address || "") },
-              sender: { name: sender.name || "", phone: sender.phone || "" },
+              recipient: { name: d.name || "", phone: fmtPhoneKo(d.phone || ""), address: d.address || "", postalCode: estimatePostalCode(d.address || "") },
+              sender: { name: sender.name || "", phone: fmtPhoneKo(sender.phone || "") },
               items,
               courier: courier || "",
               createdAt: stamp,
@@ -18813,14 +18911,14 @@ function MultiRegModal({ modal, customers, products, couriers, vendors, onClose,
             /* @__PURE__ */ React.createElement("div", { style: { color: "#5F5E5A", fontSize: 11, fontWeight: 700 } }, "택배사"),
             /* @__PURE__ */ React.createElement("div", { style: { fontWeight: 700, marginBottom: 8 } }, courier),
             /* @__PURE__ */ React.createElement("div", { style: { color: "#5F5E5A", fontSize: 11, fontWeight: 700 } }, "주문자"),
-            /* @__PURE__ */ React.createElement("div", { style: { fontWeight: 700, color: senderWarn ? "#C0392B" : "#1B2430" } }, (sender.name || "이름 없음") + "  " + (sender.phone || "연락처 없음"))
+            /* @__PURE__ */ React.createElement("div", { style: { fontWeight: 700, color: senderWarn ? "#C0392B" : "#1B2430" } }, (sender.name || "이름 없음") + "  " + (fmtPhoneKo(sender.phone) || "연락처 없음"))
           ),
           rows.map((r, i) => /* @__PURE__ */ React.createElement("div", { key: r.d.id || i, style: { background: "#fff", borderRadius: 12, padding: "12px 14px", marginBottom: 10, fontSize: 13, border: r.warn.length ? "1.5px solid #E8A020" : "1px solid #E2E4DD" } },
             /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 4 } },
               /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 800, color: "#2F6F4E" } }, "배송지 " + (i + 1)),
               r.sub > 0 && /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 800 } }, r.sub.toLocaleString() + "원")
             ),
-            /* @__PURE__ */ React.createElement("div", { style: { fontWeight: 700 } }, (r.d.name || "-") + "  " + (r.d.phone || "-")),
+            /* @__PURE__ */ React.createElement("div", { style: { fontWeight: 700 } }, (r.d.name || "-") + "  " + (fmtPhoneKo(r.d.phone) || "-")),
             /* @__PURE__ */ React.createElement("div", { style: { color: "#5F5E5A", marginTop: 2 } }, r.d.address || "-"),
             /* @__PURE__ */ React.createElement("div", { style: { marginTop: 6, color: "#1B6B3A", fontWeight: 700 } }, r.items.length ? r.items.map((x) => x.label).join(", ") : ""),
             r.warn.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { marginTop: 6, color: "#B7791F", fontWeight: 700, fontSize: 12 } }, "\u26A0\uFE0F 빠진 항목: " + r.warn.join(", "))
