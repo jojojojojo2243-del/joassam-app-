@@ -2341,7 +2341,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v242 (문자 유형별 이름·전화·주소 인식 강화, 대화방 이름 인식 개선)";
+const APP_BUILD = "v243 (우체국 배송 완료 자동 도착확인)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -13817,6 +13817,76 @@ function App() {
     const stampIso = `${todayStr()}T${_p(_now.getHours())}:${_p(_now.getMinutes())}`;
     setOrders((prev) => prev.map((o) => ids.includes(o.id) ? __spreadProps(__spreadValues({}, o), { deliveryConfirmed: true, deliveryConfirmedAt: stampIso }) : o));
   }
+  // v243: 우체국 배송조회 자동 확인 (키 없이: /api/epost 가 우체국 조회 페이지를 대신 읽음)
+  const [epostChecked, setEpostChecked] = useState(false);
+  const [epostInfo, setEpostInfo] = useState({});
+  const epostRunRef = useRef(false);
+  const epostLastRunRef = useRef(0);
+  const epostOrdersRef = useRef(orders);
+  epostOrdersRef.current = orders;
+  async function runEpostCheck(force) {
+    if (epostRunRef.current) return;
+    if (typeof location === "undefined" || !/^https?:/.test(location.protocol)) { setEpostChecked(true); return; }
+    if (!force && Date.now() - epostLastRunRef.current < 20 * 60 * 1e3) return;
+    epostRunRef.current = true;
+    epostLastRunRef.current = Date.now();
+    try {
+      const nowMs = Date.now();
+      const cands = (epostOrdersRef.current || []).filter((o) => {
+        if (!o || o.status !== "shipped" || !o.invoiceNo || o.deliveryConfirmed) return false;
+        const cr = String(o.courier || "");
+        if (cr && !/우체국/.test(cr)) return false;
+        const sd = new Date(o.shippedAt || o.orderDate || "").getTime();
+        if (!isNaN(sd) && nowMs - sd > 21 * 24 * 3600 * 1e3) return false;
+        const dg = String(o.invoiceNo).replace(/\D/g, "");
+        return dg.length >= 10 && dg.length <= 14;
+      });
+      const byNo = {};
+      cands.forEach((o) => { const dg = String(o.invoiceNo).replace(/\D/g, ""); (byNo[dg] = byNo[dg] || []).push(o.id); });
+      const nos = Object.keys(byNo);
+      const doneIds = [];
+      const info = {};
+      for (let i = 0; i < nos.length; i += 20) {
+        const part = nos.slice(i, i + 20);
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 25e3);
+        try {
+          const r = await fetch("/api/epost?no=" + part.join(","), { signal: ctrl.signal, cache: "no-store" });
+          if (!r.ok) continue;
+          const j = await r.json();
+          (j.results || []).forEach((x) => {
+            if (!x || !byNo[x.no]) return;
+            info[x.no] = { state: x.state, last: x.last || "" };
+            if (x.state === "delivered") byNo[x.no].forEach((id) => doneIds.push(id));
+          });
+        } catch (e) {
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      if (Object.keys(info).length) setEpostInfo((prev) => Object.assign({}, prev, info));
+      if (doneIds.length) {
+        const _now = /* @__PURE__ */ new Date();
+        const _p = (n) => String(n).padStart(2, "0");
+        const stampIso = `${todayStr()}T${_p(_now.getHours())}:${_p(_now.getMinutes())}`;
+        const idSet = new Set(doneIds);
+        setOrders((prev) => prev.map((o) => idSet.has(o.id) && !o.deliveryConfirmed ? __spreadProps(__spreadValues({}, o), { deliveryConfirmed: true, deliveryConfirmedAt: stampIso, deliveryAuto: true }) : o));
+      }
+    } catch (e) {
+    } finally {
+      epostRunRef.current = false;
+      setEpostChecked(true);
+    }
+  }
+  useEffect(() => {
+    if (!dataLoaded) return;
+    const first = setTimeout(() => runEpostCheck(true), 1500);
+    const guard = setTimeout(() => setEpostChecked(true), 15e3);
+    const iv = setInterval(() => runEpostCheck(false), 30 * 60 * 1e3);
+    const onVis = () => { if (document.visibilityState === "visible") runEpostCheck(false); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { clearTimeout(first); clearTimeout(guard); clearInterval(iv); document.removeEventListener("visibilitychange", onVis); };
+  }, [dataLoaded]);
   const [showOverdueAlert, setShowOverdueAlert] = useState(false);
   const overdueAlertShownRef = useRef(false);
   function playOverdueAlertSound() {
@@ -13845,14 +13915,14 @@ function App() {
     }
   }
   useEffect(() => {
-    if (!dataLoaded) return;
+    if (!dataLoaded || !epostChecked) return;
     if (overdueAlertShownRef.current) return;
     if (overdueDeliveries.length > 0) {
       overdueAlertShownRef.current = true;
       setShowOverdueAlert(true);
       playOverdueAlertSound();
     }
-  }, [dataLoaded, overdueDeliveries.length]);
+  }, [dataLoaded, epostChecked, overdueDeliveries.length]);
   function orderTotal(order) {
     return (order.items || []).reduce((sum, it) => {
       const p = productMap[it.productId];
@@ -17235,6 +17305,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
       {
         orders: allInTransit,
         deliveredOrders,
+        epostInfo,
         customerMap,
         onConfirm: (id) => confirmDeliveries([id]),
         onSelectOrder: (id) => {
@@ -18069,7 +18140,7 @@ function AccountsTab({ accounts, members, currentNickname, onAdd, onChangePasswo
     )));
   }), ids.length === 0 && /* @__PURE__ */ React.createElement("div", { style: { padding: "30px 0", textAlign: "center", color: "#888780", fontSize: 13 } }, "\uB4F1\uB85D\uB41C \uACC4\uC815\uC774 \uC5C6\uC5B4\uC694")));
 }
-function DeliveryTrackTab({ orders, deliveredOrders = [], customerMap, onConfirm, onSelectOrder, onBack, expectedArrivalDeadline }) {
+function DeliveryTrackTab({ orders, deliveredOrders = [], epostInfo = {}, customerMap, onConfirm, onSelectOrder, onBack, expectedArrivalDeadline }) {
   const [view, setView] = useState("transit");
   function trackingUrl(o) {
     if (!o.invoiceNo) return null;
@@ -18090,7 +18161,7 @@ function DeliveryTrackTab({ orders, deliveredOrders = [], customerMap, onConfirm
     const dl = !done && expectedArrivalDeadline(o.shippedAt || o.orderDate);
     const isLate = dl && /* @__PURE__ */ new Date() > dl;
     const accent = done ? "#185FA5" : isLate ? "#A32D2D" : "#2F6F4E";
-    return /* @__PURE__ */ React.createElement("div", { key: o.id, style: { background: "#fff", border: `1px solid ${done ? "#CFE0F2" : isLate ? "#E9B9B9" : "#D7E6DC"}`, borderLeft: `4px solid ${accent}`, borderRadius: 10, padding: "12px 14px" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 } }, /* @__PURE__ */ React.createElement("div", { onClick: () => onSelectOrder(o.id), style: { cursor: "pointer", flex: 1, minWidth: 0 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#1B2430" } }, name, " ", /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 400, color: "#888780", fontSize: 11 } }, ((_b = o.recipient) == null ? void 0 : _b.phone) || "")), ((_c = o.recipient) == null ? void 0 : _c.address) && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#888780", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, o.recipient.address)), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10, fontWeight: 700, color: done ? "#185FA5" : isLate ? "#A32D2D" : "#27500A", background: done ? "#E6F1FB" : isLate ? "#FCEEEE" : "#EAF3DE", padding: "3px 8px", borderRadius: 10, whiteSpace: "nowrap", marginLeft: 8 } }, done ? "\u2705 \uBC30\uC1A1\uC644\uB8CC" : isLate ? "\u23F0 \uD655\uC778 \uD544\uC694" : "\u{1F69A} \uBC30\uC1A1\uC911")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#5F5E5A", marginBottom: 8 } }, o.courier || "\uD0DD\uBC30", " \xB7 ", o.invoiceNo, " \xB7 \uBC1C\uC1A1\uC77C ", o.shippedAt || o.orderDate, done && o.deliveryConfirmedAt ? ` \xB7 \uB3C4\uCC29\uD655\uC778 ${String(o.deliveryConfirmedAt).slice(0, 10)}` : ""), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6 } }, url && /* @__PURE__ */ React.createElement("a", { href: url, target: "_blank", rel: "noreferrer", style: { flex: 1, textAlign: "center", padding: "9px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12, textDecoration: "none" } }, "\uBC30\uC1A1\uC870\uD68C \uC5F4\uAE30"), !done && /* @__PURE__ */ React.createElement("button", { onClick: () => onConfirm(o.id), style: { flex: 1, padding: "9px 0", borderRadius: 8, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" } }, "\uB3C4\uCC29 \uD655\uC778\uD568")));
+    return /* @__PURE__ */ React.createElement("div", { key: o.id, style: { background: "#fff", border: `1px solid ${done ? "#CFE0F2" : isLate ? "#E9B9B9" : "#D7E6DC"}`, borderLeft: `4px solid ${accent}`, borderRadius: 10, padding: "12px 14px" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 } }, /* @__PURE__ */ React.createElement("div", { onClick: () => onSelectOrder(o.id), style: { cursor: "pointer", flex: 1, minWidth: 0 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#1B2430" } }, name, " ", /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 400, color: "#888780", fontSize: 11 } }, ((_b = o.recipient) == null ? void 0 : _b.phone) || "")), ((_c = o.recipient) == null ? void 0 : _c.address) && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#888780", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, o.recipient.address)), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10, fontWeight: 700, color: done ? "#185FA5" : isLate ? "#A32D2D" : "#27500A", background: done ? "#E6F1FB" : isLate ? "#FCEEEE" : "#EAF3DE", padding: "3px 8px", borderRadius: 10, whiteSpace: "nowrap", marginLeft: 8 } }, done ? "\u2705 \uBC30\uC1A1\uC644\uB8CC" : isLate ? "\u23F0 \uD655\uC778 \uD544\uC694" : "\u{1F69A} \uBC30\uC1A1\uC911")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#5F5E5A", marginBottom: 8 } }, o.courier || "\uD0DD\uBC30", " \xB7 ", o.invoiceNo, " \xB7 \uBC1C\uC1A1\uC77C ", o.shippedAt || o.orderDate, done && o.deliveryConfirmedAt ? ` \xB7 \uB3C4\uCC29\uD655\uC778 ${String(o.deliveryConfirmedAt).slice(0, 10)}${o.deliveryAuto ? " (\uC790\uB3D9)" : ""}` : "", !done && epostInfo[String(o.invoiceNo || "").replace(/\D/g, "")] && epostInfo[String(o.invoiceNo || "").replace(/\D/g, "")].last ? ` \xB7 \uC6B0\uCCB4\uAD6D: ${epostInfo[String(o.invoiceNo || "").replace(/\D/g, "")].last}` : ""), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6 } }, url && /* @__PURE__ */ React.createElement("a", { href: url, target: "_blank", rel: "noreferrer", style: { flex: 1, textAlign: "center", padding: "9px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12, textDecoration: "none" } }, "\uBC30\uC1A1\uC870\uD68C \uC5F4\uAE30"), !done && /* @__PURE__ */ React.createElement("button", { onClick: () => onConfirm(o.id), style: { flex: 1, padding: "9px 0", borderRadius: 8, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" } }, "\uB3C4\uCC29 \uD655\uC778\uD568")));
   })));
 }
 function DeliveryCheckTab({ orders, recentlyConfirmed, customerMap, onConfirm, onConfirmMany, onSelectOrder, onBack }) {
