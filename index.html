@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 242;
+const APP_VERSION = 244;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -12202,9 +12202,11 @@ function App() {
                     if (attempt > 0) { try { logDiag(partsConsistent(res) ? "chunks_settled_after_retry" : "chunks_mismatch_gave_up", { attempt }); } catch (e) {} }
                     return res;
                   }
-                  return new Promise((r) => setTimeout(r, 600 + attempt * 300)).then(() => (mySnapSeq !== snapSeqRef.current ? res : fetchConsistent(attempt + 1)));
+                  // 기다리는 동안 내가 이미 더 새 데이터를 저장했거나 더 새 서버 데이터를 받았다면, 이 옛 데이터는 버림 (늦게 적용되어 내 최신 수정을 되돌리는 것 방지)
+                  return new Promise((r) => setTimeout(r, 600 + attempt * 300)).then(() => (mySnapSeq !== snapSeqRef.current ? res : (loadedDataSigRef.current !== sig ? null : fetchConsistent(attempt + 1))));
                 });
                 fetchConsistent(0).then((res) => {
+                  if (!res) return;
                   if (mySnapSeq !== snapSeqRef.current) return; // 더 새 데이터가 이미 오고 있음
                   const ordOrders = res[0] !== null ? res[0] : [];
                   const archOrders = Array.isArray(res[2]) ? res[2] : [];
