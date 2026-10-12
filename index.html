@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 244;
+const APP_VERSION = 245;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2341,7 +2341,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v244 (우체국 자동 도착확인 + 삭제 주문 되살아남 방지)";
+const APP_BUILD = "v245 (오류 점검: 여러 명 주문 문자·AI 분석 버튼·음성 주문 찾기 수정)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -13200,7 +13200,7 @@ function App() {
     };
     let best = null, bestScore = 0.6;
     (orders || []).forEach((o) => {
-      const vendorName = (vendorMap && vendorMap[o.vendorId] || {}).name || "";
+      const vendorName = ((vendors || []).find((v) => v && v.id === o.vendorId) || {}).name || "";
       const cand = Math.max(
         scoreName(orderRecipientName(o)),
         scoreName((customerMap[o.customerId] || {}).name),
@@ -15174,7 +15174,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
         }));
         // 어레인지식 주문등록 팝업 열기
         setMultiRegModal({
-          sender: (prev.sender && prev.sender.name) ? prev.sender : { name: "", phone: "" },
+          sender: (draft && draft.sender && draft.sender.name) ? draft.sender : { name: "", phone: "" },
           deliveries,
           courier: couriers && couriers[0] || "\uC6B0\uCCB4\uAD6D\uD0DD\uBC30",
           rawText: text || ""
@@ -17202,6 +17202,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
     ), tab === "new" && /* @__PURE__ */ React.createElement(
       NewOrderTab,
       {
+        fireToast,
         customers,
         orders,
         products,
@@ -21759,7 +21760,7 @@ function CustomerSearchPicker({ customers, orders, value, onChange, onPickRaw })
     c.address && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#888780", marginTop: 1 } }, c.address)
   ))), query.trim() && results.length === 0 && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#888780", marginTop: 4 } }, "\uC77C\uCE58\uD558\uB294 \uACE0\uAC1D\xB7\uC8FC\uBB38\uC790\uAC00 \uC5C6\uC5B4\uC694. \uC544\uB798 \uC815\uBCF4\uB97C \uC9C1\uC811 \uC785\uB825\uD574\uC8FC\uC138\uC694."));
 }
-function NewOrderTab({ customers, orders, products, vendors, draft, setDraft, changeCartQty, addDeliveryRow, removeDeliveryRow, updateDeliveryField, deliveryTotal, draftItems, draftTotal, submitOrder, analyzeMessage, handlePhotoCapture, ocrLoading, onBack, onGoProducts, geminiKey, photoAiResult, clearPhotoAiResult }) {
+function NewOrderTab({ fireToast, customers, orders, products, vendors, draft, setDraft, changeCartQty, addDeliveryRow, removeDeliveryRow, updateDeliveryField, deliveryTotal, draftItems, draftTotal, submitOrder, analyzeMessage, handlePhotoCapture, ocrLoading, onBack, onGoProducts, geminiKey, photoAiResult, clearPhotoAiResult }) {
   const isGuest = !draft.customerId;
   const [prodTab, setProdTab] = useState("all");
   const [aiModalOpen, setAiModalOpen] = React.useState(false);
