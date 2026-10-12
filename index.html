@@ -2341,7 +2341,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v243 (우체국 배송 완료 자동 도착확인)";
+const APP_BUILD = "v244 (우체국 자동 도착확인 + 삭제 주문 되살아남 방지)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11991,6 +11991,12 @@ function App() {
   }, []);
   const loadedDataSigRef = useRef(null);
   const snapSeqRef = useRef(0); // v241: 늦게 도착한 옛 데이터가 새 데이터를 덮지 않게
+  // v244: 다른 기기 데이터를 받은 직후(화면이 아직 새로 그려지기 전)에 옛 목록으로 저장이 시작되면 방금 받은 주문을 "내가 지운 것"으로 오해해 지워버리는 문제 방지
+  const applySeqRef = useRef(0);
+  const pendingSeqRef = useRef(0);
+  const latestSeqRef = useRef(0);
+  const staleDeferRef = useRef(0);
+  const renderApplySeq = applySeqRef.current;
   function fetchRecordChunks(idFn, count, key) {
     const n = count || 0;
     // count가 0이면 null 반환 (빈 배열로 덮어쓰는 것 방지)
@@ -12070,6 +12076,7 @@ function App() {
     } else {
       setOrders(list);
     }
+    applySeqRef.current++;
     lastGoodDataRef.current = __spreadProps(__spreadValues({}, lastGoodDataRef.current || {}), { orders: list });
     recordCounts({ orders: newCount });
   }
@@ -12103,6 +12110,7 @@ function App() {
     } else {
       setCustomers(list);
     }
+    applySeqRef.current++;
     lastGoodDataRef.current = __spreadProps(__spreadValues({}, lastGoodDataRef.current || {}), { customers: list });
     recordCounts({ customers: list.length });
   }
@@ -12117,6 +12125,7 @@ function App() {
       }
     }
     setVendors(list);
+    applySeqRef.current++;
     lastGoodDataRef.current = __spreadProps(__spreadValues({}, lastGoodDataRef.current || {}), { vendors: list });
     recordCounts({ vendors: list.length });
   }
@@ -12131,6 +12140,7 @@ function App() {
       }
     }
     setProducts(list);
+    applySeqRef.current++;
     lastGoodDataRef.current = __spreadProps(__spreadValues({}, lastGoodDataRef.current || {}), { products: list });
     recordCounts({ products: list.length });
   }
@@ -12172,11 +12182,29 @@ function App() {
                 loadedDataSigRef.current = sig;
                 const archiveCount = typeof data.archiveChunkCount === "number" ? data.archiveChunkCount : 0;
                 const mySnapSeq = ++snapSeqRef.current;
-                Promise.all([
+                // v244: 다른 기기가 저장하는 중이면 묶음(chunk)과 메인 서명이 잠시 어긋날 수 있음 → 아직 확정되지 않은 데이터를 "서버 데이터"로 믿지 않도록 잠시 뒤 다시 읽음
+                const fetchAllParts = () => Promise.all([
                   fetchRecordChunks(ordChunkDocId, data.ordersChunkCount || 0, "orders"),
                   fetchRecordChunks(cusChunkDocId, data.customersChunkCount || 0, "customers"),
                   archiveCount > 0 ? loadArchiveChunks(archiveCount) : Promise.resolve([])
-                ]).then((res) => {
+                ]);
+                const partsConsistent = (res) => {
+                  try {
+                    const s0 = res[0] ? res[0].__sigs : ((data.ordersChunkCount || 0) === 0 ? [] : undefined), s1 = res[1] ? res[1].__sigs : ((data.customersChunkCount || 0) === 0 ? [] : undefined);
+                    if (!data.dataSig || archiveCount > 0 || !Array.isArray(s0) || !Array.isArray(s1)) return true;
+                    if (!s0.every(Boolean) || !s1.every(Boolean)) return true; // 옛 형식(서명 없음)은 검사 생략
+                    return recordChunkSig([s0, s1]) === data.dataSig;
+                  } catch (e) { return true; }
+                };
+                const fetchConsistent = (attempt) => fetchAllParts().then((res) => {
+                  if (mySnapSeq !== snapSeqRef.current) return res;
+                  if (partsConsistent(res) || attempt >= 5) {
+                    if (attempt > 0) { try { logDiag(partsConsistent(res) ? "chunks_settled_after_retry" : "chunks_mismatch_gave_up", { attempt }); } catch (e) {} }
+                    return res;
+                  }
+                  return new Promise((r) => setTimeout(r, 600 + attempt * 300)).then(() => (mySnapSeq !== snapSeqRef.current ? res : fetchConsistent(attempt + 1)));
+                });
+                fetchConsistent(0).then((res) => {
                   if (mySnapSeq !== snapSeqRef.current) return; // 더 새 데이터가 이미 오고 있음
                   const ordOrders = res[0] !== null ? res[0] : [];
                   const archOrders = Array.isArray(res[2]) ? res[2] : [];
@@ -12190,6 +12218,11 @@ function App() {
                       const ov = overlayRecent(allOrders, data.recentOrders, tombL);
                       allOrders.length = 0; allOrders.push(...ov);
                       if (missL.length) logDiag("restored_recent_orders", { count: missL.length });
+                    }
+                    // v243: 다른 기기가 지운 주문이 (뒤늦게 덮어쓴 묶음 때문에) 목록에 다시 섞여 들어오지 않게 삭제표시(tombstone)로 한 번 더 거름
+                    if (tombL.size) {
+                      const keepL = allOrders.filter((o) => !(o && o.id && tombL.has(o.id) && !resurrectRef.current.has(o.id)));
+                      if (keepL.length !== allOrders.length) { try { logDiag("dropped_tombstoned_orders", { count: allOrders.length - keepL.length }); } catch (e) {} allOrders.length = 0; allOrders.push(...keepL); }
                     }
                     if (res[1] !== null && (data.recentCustomers || []).length) res[1] = overlayRecent(res[1], data.recentCustomers, null);
                     // v241: 다른 기기에서 지운 고객은 불러올 때도 제외
@@ -12378,13 +12411,23 @@ function App() {
     }
     return Promise.all(gets).then((parts) => parts.reduce((a, b) => a.concat(b), []));
   }
-  function flushSaveNow() {
+  function flushSaveNow(force) {
     if (saveTimerRef.current) {
       clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
     }
     const data = pendingSaveDataRef.current;
     if (!data) return;
+    // v244: 보관해 둔 저장 데이터가 방금 받은 서버 데이터보다 옛것이면 잠깐 기다렸다가(새 화면 기준으로 다시 잡힘) 저장
+    if (force !== true && pendingSeqRef.current !== applySeqRef.current) {
+      if (staleDeferRef.current < 10) {
+        staleDeferRef.current++;
+        saveTimerRef.current = setTimeout(() => flushSaveNow(), 100);
+        return;
+      }
+      pendingSeqRef.current = applySeqRef.current;
+    }
+    staleDeferRef.current = 0;
     pendingSaveDataRef.current = null;
     let storedFloor = null;
     try {
@@ -12553,6 +12596,18 @@ function App() {
           }
         }
         if (!d || typeof d.ordersChunkCount !== "number") return;
+        // v243: 서명이 같아도, 다른 기기가 지운 주문(삭제표시)이 내 목록에 남아 있으면 먼저 제거 (남은 채 저장하면 되살아남)
+        if (Array.isArray(d.deletedOrderIds) && d.deletedOrderIds.length) {
+          const tombQ = new Set(d.deletedOrderIds);
+          const leak = ordersArr.filter((o) => o && o.id && tombQ.has(o.id) && !resurrectNow.has(o.id)).map((o) => o.id);
+          if (leak.length) {
+            const leakSet = new Set(leak);
+            ordersArr = ordersArr.filter((o) => !(o && leakSet.has(o.id)));
+            setOrders((prev) => (prev || []).filter((o) => !(o && leakSet.has(o.id))));
+            buildChunks();
+            try { logDiag("removed_remote_deleted", { count: leak.length }); } catch (e) {}
+          }
+        }
         if (!d.dataSig || d.dataSig === basedOnSig) return;
         const tomb = new Set(d.deletedOrderIds || []);
         return Promise.all([
@@ -12625,7 +12680,7 @@ function App() {
     const clearSaving = () => { if (savingRef.current === myGen) savingRef.current = 0; };
     // v233: 실패 후 재시도는 '지금 최신 상태'로. 이미 예약된 새 저장이 있으면 건드리지 않음
     const scheduleRetry = (ms) => {
-      if (!pendingSaveDataRef.current) pendingSaveDataRef.current = latestDataRef.current || data;
+      if (!pendingSaveDataRef.current) { pendingSaveDataRef.current = latestDataRef.current || data; pendingSeqRef.current = latestSeqRef.current; }
       if (saveTimerRef.current) return;
       saveTimerRef.current = setTimeout(flushSaveNow, ms);
     };
@@ -12804,11 +12859,13 @@ function App() {
     if (!dataLoaded) return;
     const data = { appName, appLogo, customers, products, orders, vendors, supplier, invoices, subscriptions, integrations, customMarketplaces, couriers, smsTemplate, orderTemplate, customerTemplate, productTemplate, courierTemplates };
     latestDataRef.current = data; // v233: 항상 최신 상태 보관 (실패 후 재시도는 이 값으로)
+    latestSeqRef.current = renderApplySeq;
     countsRef.current = { customers: (customers || []).length, orders: (orders || []).length, products: (products || []).length, vendors: (vendors || []).length };
     if (firebaseReady) {
       if (!fbFirstLoadRef.current) return;
       if (isStaleVersion) return;
       pendingSaveDataRef.current = data;
+      pendingSeqRef.current = renderApplySeq;
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
       saveTimerRef.current = setTimeout(flushSaveNow, 800);
     } else if (hasSharedStorage) {
@@ -12849,7 +12906,7 @@ function App() {
             });
             localStorage.setItem("joassam_emergency_backup_" + DATA_DOC, backup);
           } catch (e) {}
-          flushSaveNow();
+          flushSaveNow(true);
         }
       } catch (e) {}
     }
@@ -16830,7 +16887,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
       // 복구 데이터를 Firebase에 즉시 저장 (onSnapshot이 다시 덮어씌우기 전에)
       setTimeout(() => {
         if (pendingSaveDataRef.current) {
-          flushSaveNow();
+          flushSaveNow(true);
         }
       }, 1500);
       fireToast(`✅ ${dateStr} \uBC31\uC5C5\uC73C\uB85C \uBCF5\uC6D0\uD588\uC5B4\uC694 (\uACE0\uAC1D ${custList.length}\uBA85 \uB4F1 \uC800\uC7A5 \uC911...)`);
