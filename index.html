@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 247;
+const APP_VERSION = 248;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2341,7 +2341,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v247 (음성: 업체 이름 말할 때 상품명이 앞에 붙던 문제 수정)";
+const APP_BUILD = "v248 (정밀 음성 인식: Gemini 받아쓰기 + 이름 힌트)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8070,6 +8070,15 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   const orderDraftRef = React.useRef(null);
   const awaitingMemoRef = React.useRef(false);
   const audioStreamRef = React.useRef(null);
+  const hiResStreamRef = React.useRef(null);
+  const hiResNodesRef = React.useRef(null);
+  const hiResCapRef = React.useRef(null);
+  const hiResFailUntilRef = React.useRef(0);
+  const [hiRes, setHiRes] = React.useState(() => {
+    try { return localStorage.getItem("joassam_hires_voice_v1") !== "0"; } catch (e) { return true; }
+  });
+  const hiResRef = React.useRef(hiRes);
+  hiResRef.current = hiRes;
   const nsDisabledRef = React.useRef(false);
   const autoListenRef = React.useRef(autoListen);
   const geminiBackoffUntilRef = React.useRef(0);
@@ -8188,6 +8197,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       stopBargeIn();
       clearTimeout(accumTimerRef.current);
       accumBufRef.current = "";
+      hiResTeardown();
       stopNoiseSuppression();
       window.speechSynthesis && window.speechSynthesis.cancel();
       clearTimeout(ttsTimerRef.current);
@@ -8382,6 +8392,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR || !activeRef.current) return;
     if (!autoListenRef.current) return;
+    if (hiResActive()) return;
     stopBargeIn();
     try {
       const rec = new SR();
@@ -8501,6 +8512,169 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     } catch (e) {
     }
   }
+  function hiResKey() {
+    try { return geminiKey || loadGeminiKey() || ""; } catch (e) { return geminiKey || ""; }
+  }
+  function hiResActive() {
+    return !!(hiResRef.current && hiResKey() && Date.now() >= hiResFailUntilRef.current && navigator.mediaDevices && navigator.mediaDevices.getUserMedia && (window.AudioContext || window.webkitAudioContext));
+  }
+  function hiResTeardown() {
+    hiResCapRef.current = null;
+    try {
+      const n = hiResNodesRef.current;
+      if (n) {
+        try { n.proc.onaudioprocess = null; n.proc.disconnect(); } catch (e) {}
+        try { n.src.disconnect(); } catch (e) {}
+        try { n.ctx.close(); } catch (e) {}
+      }
+    } catch (e) {}
+    hiResNodesRef.current = null;
+    try { if (hiResStreamRef.current) hiResStreamRef.current.getTracks().forEach((t) => t.stop()); } catch (e) {}
+    hiResStreamRef.current = null;
+  }
+  async function hiResEnsureAudio() {
+    const live = hiResStreamRef.current && hiResStreamRef.current.getTracks().some((t) => t.readyState === "live");
+    if (!live || !hiResNodesRef.current) {
+      hiResTeardown();
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      const AC = window.AudioContext || window.webkitAudioContext;
+      const ctx = new AC();
+      const src = ctx.createMediaStreamSource(stream);
+      const proc = ctx.createScriptProcessor(4096, 1, 1);
+      proc.onaudioprocess = (e) => {
+        const cap = hiResCapRef.current;
+        if (cap) cap.onData(e.inputBuffer.getChannelData(0));
+      };
+      src.connect(proc);
+      proc.connect(ctx.destination);
+      hiResStreamRef.current = stream;
+      hiResNodesRef.current = { ctx, src, proc };
+    }
+    const ctx = hiResNodesRef.current.ctx;
+    if (ctx.state === "suspended") { try { await ctx.resume(); } catch (e) {} }
+    return ctx;
+  }
+  async function beginListeningHiRes() {
+    const myId = ++recIdRef.current;
+    const isStale = () => recIdRef.current !== myId || !activeRef.current;
+    let ctx;
+    try {
+      ctx = await hiResEnsureAudio();
+    } catch (e) {
+      if (isStale()) return;
+      const name = e && e.name || "";
+      if (name === "NotAllowedError" || name === "SecurityError") {
+        const m = voiceErrorText("not-allowed");
+        try { setLastAI(m); setVoiceErr(m); } catch (x) {}
+        setPhaseSync("idle");
+        return;
+      }
+      hiResFailUntilRef.current = Date.now() + 120000;
+      setTimeout(() => { if (!isStale() && phaseRef.current === "listening") beginListening(); }, 50);
+      return;
+    }
+    if (isStale()) return;
+    const rate = ctx.sampleRate || 48000;
+    const endMs = orderModeRef.current ? 1100 : 850;
+    const cap = { chunks: [], speechMs: 0, silenceMs: 0, totalMs: 0, heard: false, floor: 1, done: false };
+    cap.onData = (buf) => {
+      if (cap.done || isStale() || hiResCapRef.current !== cap) return;
+      const copy = new Float32Array(buf);
+      let sum = 0;
+      for (let i = 0; i < copy.length; i++) sum += copy[i] * copy[i];
+      const rms = Math.sqrt(sum / copy.length);
+      const ms = copy.length / rate * 1000;
+      cap.totalMs += ms;
+      cap.floor = Math.min(cap.floor, Math.max(rms, 0.002));
+      const thr = Math.min(0.06, Math.max(0.014, cap.floor * 3.5));
+      cap.chunks.push(copy);
+      if (rms > thr) {
+        cap.speechMs += ms;
+        cap.silenceMs = 0;
+        if (!cap.heard && cap.speechMs >= 150) { cap.heard = true; try { setInterim("\u{1F399}\uFE0F \uB4E3\uB294 \uC911\u2026"); } catch (e) {} }
+      } else if (cap.heard) {
+        cap.silenceMs += ms;
+      }
+      if (!cap.heard && cap.chunks.length > 9) cap.chunks.shift();
+      if ((cap.heard && cap.silenceMs >= endMs) || cap.totalMs > 22000 || (!cap.heard && cap.totalMs > 7000)) {
+        cap.done = true;
+        hiResCapRef.current = null;
+        setTimeout(() => finishCapture(), 0);
+      }
+    };
+    const noSpeechNext = () => {
+      if (isStale() || phaseRef.current !== "listening") return;
+      if (orderModeRef.current && (accumBufRef.current || "").trim()) {
+        setTimeout(() => { if (!isStale() && activeRef.current && phaseRef.current === "listening") beginListening(); }, 300);
+        return;
+      }
+      silenceCountRef.current += 1;
+      const limit = orderModeRef.current ? 12 : 7;
+      if (!autoListenRef.current || silenceCountRef.current >= limit) {
+        setPhaseSync("idle");
+      } else {
+        setTimeout(() => { if (!isStale() && activeRef.current && phaseRef.current === "listening") beginListening(); }, 150);
+      }
+    };
+    const finishCapture = async () => {
+      if (isStale()) return;
+      if (!cap.heard) { setInterim(""); noSpeechNext(); return; }
+      setInterim("\u23F3 \uC778\uC2DD \uC911\u2026");
+      let text = "";
+      let failed = false;
+      try {
+        const b64 = hiResEncodeWav16k(cap.chunks, rate);
+        const vocab = hiResBuildVocab({ vendors, customers, products });
+        const key = hiResKey();
+        try {
+          text = await geminiTranscribeWav(b64, vocab, key);
+        } catch (e1) {
+          if (e1 && (e1.status === 429 || e1.status === 403 || e1.status === 400)) throw e1;
+          text = await geminiTranscribeWav(b64, vocab, key);
+        }
+      } catch (e) {
+        failed = true;
+        const st = e && e.status;
+        hiResFailUntilRef.current = Date.now() + (st === 429 ? 60000 : st === 400 || st === 403 ? 600000 : 90000);
+        const m = st === 429 ? "정밀 인식 사용량이 잠시 초과돼서 기본 음성 인식으로 바꿔요." : st === 400 || st === 403 ? "정밀 인식 Gemini 키에 문제가 있어 기본 음성 인식으로 바꿔요. (☰ 메뉴 → 'Gemini AI API 키' 칸에서 키 확인)" : "인터넷이 불안정해서 기본 음성 인식으로 바꿔요.";
+        try { setLastAI(m); setVoiceErr(m); } catch (x) {}
+      }
+      if (isStale()) return;
+      setInterim("");
+      if (failed) {
+        setTimeout(() => { if (!isStale() && phaseRef.current === "listening") beginListening(); }, 2800);
+        return;
+      }
+      if (text && (text.match(/[가-힣A-Za-z0-9]/g) || []).length >= 1) {
+        silenceCountRef.current = 0;
+        if (phaseRef.current === "listening") routeCapturedSpeech(text);
+      } else {
+        noSpeechNext();
+      }
+    };
+    hiResCapRef.current = cap;
+    if (wantListenCueRef.current) {
+      wantListenCueRef.current = false;
+      try { playListenCue(); } catch (e) {}
+    }
+  }
+  function toggleHiRes() {
+    if (!hiResKey()) {
+      const m = "정밀 음성 인식은 Gemini 키가 있어야 켜져요. ☰ 메뉴의 'Gemini AI API 키' 칸에 키를 넣어 주세요.";
+      try { setLastAI(m); setVoiceErr(m); setTimeout(() => setVoiceErr(""), 6000); } catch (e) {}
+      return;
+    }
+    const next = !hiResRef.current;
+    hiResRef.current = next;
+    setHiRes(next);
+    hiResFailUntilRef.current = 0;
+    try { localStorage.setItem("joassam_hires_voice_v1", next ? "1" : "0"); } catch (e) {}
+    stopRec();
+    if (!next) hiResTeardown();
+    setPhaseSync("idle");
+    setVoiceErr("");
+    setTimeout(() => { if (activeRef.current && autoListenRef.current) beginListening(); }, 250);
+  }
   function beginListening() {
     if (!activeRef.current) return;
     if (phaseRef.current === "thinking" || phaseRef.current === "speaking") return;
@@ -8519,6 +8693,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     stopRec();
     setPhaseSync("listening");
     setInterim("");
+    if (hiResActive()) { beginListeningHiRes(); return; }
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
       setLastAI("Chrome/\uC0BC\uC131\uC778\uD130\uB137 \uBE0C\uB77C\uC6B0\uC800\uC5D0\uC11C \uC0AC\uC6A9\uD574\uC8FC\uC138\uC694.");
@@ -8632,6 +8807,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   function stopRec() {
     clearTimeout(silenceTimerRef.current);
     recIdRef.current++;
+    hiResCapRef.current = null;
     try {
       recRef.current && recRef.current.abort();
     } catch (e) {
@@ -10776,6 +10952,23 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     ), /* @__PURE__ */ React.createElement(
       "button",
       {
+        onClick: toggleHiRes,
+        title: "정밀 음성 인식(Gemini) — 업체·고객·상품 이름을 같이 알려줘서 더 정확하게 받아써요",
+        style: {
+          background: hiRes && hiResKey() ? "rgba(33,150,243,0.28)" : "rgba(255,255,255,0.1)",
+          border: "none",
+          borderRadius: 8,
+          color: hiRes && hiResKey() ? "#90caf9" : "#aaa",
+          padding: "4px 10px",
+          cursor: "pointer",
+          fontSize: 12.5,
+          fontWeight: 700
+        }
+      },
+      hiRes && hiResKey() ? "\u{1F3AF} 정밀 ON" : "\u{1F3AF} 정밀 OFF"
+    ), /* @__PURE__ */ React.createElement(
+      "button",
+      {
         onClick: () => {
           stopRec();
           window.speechSynthesis && window.speechSynthesis.cancel();
@@ -10980,6 +11173,109 @@ function MicLevelBar({ phase, active, autoListen }) {
   const opacity = speaking ? 0.5 : 1;
   const bars = [0, 0.12, 0.24, 0.36, 0.48, 0.36, 0.24, 0.12, 0];
   return /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: 3, height: 26, margin: "2px 0 4px", opacity } }, bars.map((delay, i) => /* @__PURE__ */ React.createElement("span", { key: i, style: { width: 4, height: "100%", display: "flex", alignItems: "center" } }, /* @__PURE__ */ React.createElement("span", { style: { width: "100%", height: "40%", borderRadius: 3, background: color, animation: `${anim} ${dur}s ease-in-out ${delay}s infinite` } }))));
+}
+// v248: 정밀 음성 인식 — 말한 소리를 직접 녹음해 Gemini로 받아쓰기 (업체·고객·상품 이름을 힌트로 같이 보냄)
+function hiResEncodeWav16k(chunks, srcRate) {
+  let total = 0;
+  for (const c of chunks) total += c.length;
+  const all = new Float32Array(total);
+  let o = 0;
+  for (const c of chunks) { all.set(c, o); o += c.length; }
+  const outRate = 16000;
+  const ratio = srcRate / outRate;
+  const n = Math.max(1, Math.floor(all.length / ratio));
+  const pcm = new Int16Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = Math.floor(i * ratio), b = Math.min(all.length, Math.max(a + 1, Math.floor((i + 1) * ratio)));
+    let sum = 0;
+    for (let j = a; j < b; j++) sum += all[j];
+    let v = sum / (b - a);
+    v = Math.max(-1, Math.min(1, v));
+    pcm[i] = v < 0 ? v * 32768 : v * 32767;
+  }
+  const buf = new ArrayBuffer(44 + pcm.length * 2);
+  const dv = new DataView(buf);
+  const wr = (off, str) => { for (let i = 0; i < str.length; i++) dv.setUint8(off + i, str.charCodeAt(i)); };
+  wr(0, "RIFF"); dv.setUint32(4, 36 + pcm.length * 2, true); wr(8, "WAVE"); wr(12, "fmt ");
+  dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, outRate, true); dv.setUint32(28, outRate * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+  wr(36, "data"); dv.setUint32(40, pcm.length * 2, true);
+  for (let i = 0; i < pcm.length; i++) dv.setInt16(44 + i * 2, pcm[i], true);
+  const bytes = new Uint8Array(buf);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+function hiResBuildVocab({ vendors, customers, products }) {
+  const seen = new Set();
+  const out = [];
+  const add = (nm, cap, bucket) => {
+    const t = String(nm || "").trim();
+    if (t.length < 2 || t.length > 24 || seen.has(t) || bucket.n >= cap) return;
+    seen.add(t); out.push(t); bucket.n++;
+  };
+  const bv = { n: 0 }, bp = { n: 0 }, bc = { n: 0 };
+  (vendors || []).forEach((v) => v && add(v.name, 60, bv));
+  (products || []).forEach((x) => x && add(x.name, 60, bp));
+  const cs = customers || [];
+  for (let i = cs.length - 1; i >= 0 && bc.n < 40; i--) cs[i] && add(cs[i].name, 40, bc);
+  return out;
+}
+function hiResCleanText(raw) {
+  let t = String(raw || "").trim();
+  t = t.replace(/^```[a-z]*\s*|\s*```$/g, "").trim();
+  t = t.replace(/^(받아쓰기|전사|결과|텍스트|transcript)\s*[:：]\s*/i, "").trim();
+  t = t.replace(/^["'“”‘’「『]+|["'“”‘’」』]+$/g, "").trim();
+  if (!t) return "";
+  if (/^[\(\[（【<].*[\)\]）】>]$/.test(t)) return "";
+  if (/음성이?\s*(없|들리지|인식)|소리가?\s*(없|들리지)|무음|no speech|silence|inaudible|\[BLANK/i.test(t) && t.length < 40) return "";
+  return t.slice(0, 200);
+}
+async function geminiTranscribeWav(b64, vocab, apiKey) {
+  var _a, _b, _c, _d, _e;
+  const hint = (vocab || []).join(", ");
+  const prompt = "이 오디오는 한국의 농산물(쌈채소) 판매 사장님이 주문관리 앱에 대고 말한 음성입니다. 들리는 말을 한국어로 그대로 정확히 받아쓰세요.\n" +
+    "규칙: 받아쓴 문장만 출력(설명·따옴표·번역·마침표 추가 금지). 말이 없거나 잡음뿐이면 아무것도 출력하지 마세요. 들리지 않는 말을 지어내지 마세요.\n" +
+    "숫자·수량은 말한 그대로(예: 두 박스, 3키로). 아래는 자주 나오는 업체·고객·상품 이름입니다. 발음이 비슷하게 들리면 이 표기를 쓰되, 이 목록에 없는 말은 들린 대로 적으세요.\n" +
+    "이름 목록: " + hint + "\n자주 쓰는 말: 주문, 발송, 입금대기, 결제완료, 발송준비, 박스, 키로, 업체, 고객, 취소, 등록, 목록, 보여줘";
+  let model = await getGeminiModel(apiKey);
+  const doFetch = (mdl) => {
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), 12e3);
+    return fetch(`https://generativelanguage.googleapis.com/v1beta/models/${mdl}:generateContent?key=${apiKey}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: "audio/wav", data: b64 } }] }],
+        generationConfig: { temperature: 0, maxOutputTokens: 160 }
+      }),
+      signal: c.signal
+    }).finally(() => clearTimeout(t));
+  };
+  let res = await doFetch(model);
+  let tries = 0;
+  while (!res.ok && tries < 3) {
+    const probe = await res.clone().json().catch(() => ({}));
+    const msg = ((_a = probe.error) == null ? void 0 : _a.message) || "";
+    if (res.status === 404 || isGeminiModelUnavailable(msg)) {
+      blockGeminiModel(model);
+      const alt = await getGeminiModel(apiKey);
+      if (!alt || alt === model) break;
+      model = alt;
+      res = await doFetch(model);
+      tries++;
+      continue;
+    }
+    break;
+  }
+  if (!res.ok) {
+    const err = new Error("HTTP " + res.status);
+    err.status = res.status;
+    throw err;
+  }
+  const data = await res.json();
+  const txt = ((_e = (_d = (_c = (_b = data.candidates) == null ? void 0 : _b[0]) == null ? void 0 : _c.content) == null ? void 0 : _d.parts) == null ? void 0 : _e.map((p) => p.text || "").join("")) || "";
+  return hiResCleanText(txt);
 }
 function voiceErrorText(code) {
   if (code === "not-allowed" || code === "service-not-allowed") return "마이크 사용이 막혀 있어요. 주소창 왼쪽 자물쇠(또는 ⋮ 메뉴 → 설정 → 사이트 권한)에서 마이크를 '허용'으로 바꿔 주세요. 비밀 모드에서는 매번 물어볼 수 있어요.";
