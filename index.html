@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 251;
+const APP_VERSION = 252;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1181,10 +1181,10 @@ function applyOrderUtterance(draft, text, ctx) {
   }
   if (!captured) {
     if (/아니|틀렸|그게아니|잘못|안돼|이상|왜/.test(t))
-      return { draft: d, reply: "\uC5B4\uB290 \uBD80\uBD84\uC744 \uACE0\uCE60\uAE4C\uC694? \uC0C1\uD488\uC774\uB098 \uBC1C\uC1A1\uC77C\uC744 \uB2E4\uC2DC \uB9D0\uC500\uD574 \uC8FC\uC138\uC694. \uADF8\uB9CC\uD558\uB824\uBA74 \uCDE8\uC18C\uB77C\uACE0 \uD558\uC138\uC694." };
-    return { draft: d, reply: d.name ? "\uC798 \uBABB \uB4E4\uC5C8\uC5B4\uC694. \uC0C1\uD488\uACFC \uC218\uB7C9\uC744 \uB9D0\uC500\uD574 \uC8FC\uC138\uC694. \uADF8\uB9CC\uD558\uB824\uBA74 \uCDE8\uC18C\uB77C\uACE0 \uD558\uC138\uC694." : "\uB204\uAD6C \uC8FC\uBB38\uC778\uAC00\uC694? \uACE0\uAC1D\uC774\uB098 \uC5C5\uCCB4 \uC774\uB984\uC744 \uB9D0\uC500\uD574 \uC8FC\uC138\uC694." };
+      return { draft: d, captured: false, reply: "\uC5B4\uB290 \uBD80\uBD84\uC744 \uACE0\uCE60\uAE4C\uC694? \uC0C1\uD488\uC774\uB098 \uBC1C\uC1A1\uC77C\uC744 \uB2E4\uC2DC \uB9D0\uC500\uD574 \uC8FC\uC138\uC694. \uADF8\uB9CC\uD558\uB824\uBA74 \uCDE8\uC18C\uB77C\uACE0 \uD558\uC138\uC694." };
+    return { draft: d, captured: false, reply: d.name ? "\uC798 \uBABB \uB4E4\uC5C8\uC5B4\uC694. \uC0C1\uD488\uACFC \uC218\uB7C9\uC744 \uB9D0\uC500\uD574 \uC8FC\uC138\uC694. \uADF8\uB9CC\uD558\uB824\uBA74 \uCDE8\uC18C\uB77C\uACE0 \uD558\uC138\uC694." : "\uB204\uAD6C \uC8FC\uBB38\uC778\uAC00\uC694? \uACE0\uAC1D\uC774\uB098 \uC5C5\uCCB4 \uC774\uB984\uC744 \uB9D0\uC500\uD574 \uC8FC\uC138\uC694." };
   }
-  return { draft: d, reply: nextPrompt(d, products) };
+  return { draft: d, captured: true, reply: nextPrompt(d, products) };
 }
 function bundleCoreName(s) {
   return (s || "").replace(new RegExp(WEIGHT_RE, "g"), "").replace(/[0-9]/g, "").replace(/\s/g, "").trim();
@@ -2341,7 +2341,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v251 (음성 인식 비교 시험 화면 추가)";
+const APP_BUILD = "v252 (조비서 주문: 규칙 우선 인식·AI는 보조)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -9974,7 +9974,11 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     }
     setPhaseSync("thinking", "order");
     let draft = null;
+    // v252: 정해진 규칙(상품 이름 맞추기)을 먼저 쓰고, 규칙이 못 알아들었거나 모르는 상품이 있을 때만 AI에게 물어봄 → 더 정확하고 훨씬 빠름
+    const _rule = applyOrderUtterance(cur, text, { products, customers, vendors, today: /* @__PURE__ */ new Date() });
+    const _needAI = _rule.cancelled ? false : (_rule.captured === false || (_rule.draft && (_rule.draft.items || []).some((it) => !it.productId)));
     try {
+      if (!_needAI) throw new Error("rule-hit");
       const aiIn = { name: cur.name || "", items: (cur.items || []).map((i) => ({ name: i.name, qty: i.qty })), reserveDate: cur.reserveDate || "", deliveryMessage: cur.deliveryMessage || "" };
       const _vKey = text + "::" + JSON.stringify(aiIn);
       let ai = typeof aiVoiceCacheGet === "function" ? aiVoiceCacheGet(_vKey) : null;
@@ -10001,7 +10005,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     } catch (e) {
     }
     if (!draft) {
-      const res = applyOrderUtterance(cur, text, { products, customers, vendors, today: /* @__PURE__ */ new Date() });
+      const res = _rule;
       if (res.cancelled) {
         orderModeRef.current = false;
         orderDraftRef.current = null;
