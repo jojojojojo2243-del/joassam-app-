@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 246;
+const APP_VERSION = 247;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2341,7 +2341,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v246 (음성 인식 개선: 중간 결과 살리기·마이크 오류 안내·끊김 단축)";
+const APP_BUILD = "v247 (음성: 업체 이름 말할 때 상품명이 앞에 붙던 문제 수정)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8289,8 +8289,10 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     const hasExactName = names.some((n) => n.length >= 2 && t.includes(n.replace(/\s/g, "")));
     if (hasExactName) score += 4;
     else if (matchName(txt, names)) score += 3;
+    // v247: 수량(숫자·'두 박스' 등)이 함께 들린 경우에만 상품명을 크게 쳐줌 — 업체 이름만 말했는데 '케일'이 앞에 붙은 후보가 뽑히던 문제 방지
+    const _hasQty = /\d|한|두|세|네|다섯|여섯|일곱|여덟|아홉|열/.test(t) && /(개|박스|봉|팩|근|망|줄|판|kg|킬로|키로|그램|g|단|포)/.test(t);
     (products || []).forEach((p) => {
-      if (p && p.name && t.includes(p.name.replace(/\s/g, ""))) score += 2;
+      if (p && p.name && t.includes(p.name.replace(/\s/g, ""))) score += _hasQty ? 2 : 0.4;
     });
     if (/주문|발송|고객|업체|배송|상품|등록|보여|알려|오늘|미발송|목록|정보|접수|취소|검색/.test(t)) score += 1;
     return score;
@@ -8300,7 +8302,8 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     let best = primary, bestScore = scoreTranscript(primary);
     for (const a of alts) {
       const s = scoreTranscript(a);
-      if (s > bestScore) {
+      // v247: 엔진이 1순위로 고른 결과를 기본으로 하고, 다른 후보는 확실히 더 나을 때(0.9점 이상)만 교체
+      if (s > bestScore + 0.9) {
         bestScore = s;
         best = dedupCascade(a);
       }
