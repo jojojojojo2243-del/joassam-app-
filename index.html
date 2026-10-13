@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 249;
+const APP_VERSION = 250;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2341,7 +2341,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v249 (음성: 조비서 목소리 되받아쓰기 반복 방지)";
+const APP_BUILD = "v250 (조비서 창 레이아웃·크기 조절·통화처럼 빠른 대화)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8589,7 +8589,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     }
     if (isStale()) return;
     const rate = ctx.sampleRate || 48000;
-    const endMs = orderModeRef.current ? 1100 : 850;
+    const endMs = orderModeRef.current ? 950 : 700;
     const cap = { chunks: [], speechMs: 0, silenceMs: 0, totalMs: 0, heard: false, floor: 1, done: false };
     cap.onData = (buf) => {
       if (cap.done || isStale() || hiResCapRef.current !== cap) return;
@@ -10575,7 +10575,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         wantListenCueRef.current = true;
         setTimeout(() => {
           if (activeRef.current && autoListenRef.current) beginListening();
-        }, 900);
+        }, hiResActive() ? 350 : 900);
       }
     };
     if (!clean) {
@@ -10712,14 +10712,21 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     };
   }
   const SHEET_MID = 52, SHEET_FULL = 94;
+  const dragLastYRef = React.useRef(0);
+  function toggleSheetSize() {
+    setMinimized(false);
+    setSheetH((parseFloat(sheetH) || SHEET_MID) >= SHEET_FULL - 2 ? SHEET_MID + "vh" : SHEET_FULL + "vh");
+  }
   function onDragStart(e) {
     dragStartY.current = e.touches ? e.touches[0].clientY : e.clientY;
+    dragLastYRef.current = dragStartY.current;
     dragStartH.current = minimized ? 9 : parseFloat(sheetH) || SHEET_MID;
     setDragging(true);
   }
   function onDragMove(e) {
     if (dragStartY.current === null) return;
     const y = e.touches ? e.touches[0].clientY : e.clientY;
+    dragLastYRef.current = y;
     const dy = dragStartY.current - y;
     const vh = window.innerHeight / 100;
     const newH = Math.min(SHEET_FULL, Math.max(9, dragStartH.current + dy / vh));
@@ -10729,7 +10736,9 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   function onDragEnd() {
     setDragging(false);
     if (dragStartY.current === null) return;
+    const _moved = Math.abs(dragStartY.current - dragLastYRef.current);
     dragStartY.current = null;
+    if (_moved < 8 && !minimized) { toggleSheetSize(); return; }
     const cur = parseFloat(sheetH) || SHEET_MID;
     if (cur < 24) {
       setMinimized(true);
@@ -10900,15 +10909,23 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       },
       /* @__PURE__ */ React.createElement("div", { style: { width: 56, height: 5, borderRadius: 3, background: "rgba(255,255,255,0.5)" } }),
       /* @__PURE__ */ React.createElement("div", { style: { fontSize: 9.5, color: "rgba(255,255,255,0.35)", marginTop: 3 } }, parseFloat(sheetH) >= SHEET_FULL - 2 ? "\u2193 \uB0B4\uB824\uC11C \uC904\uC774\uAE30" : "\u2191 \uBC00\uC5B4\uC11C \uD06C\uAC8C")
-    ), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", padding: "2px 14px 4px", gap: 8 } }, /* @__PURE__ */ React.createElement(
+    ), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", flexWrap: "wrap", padding: "2px 14px 4px", gap: 6 } }, /* @__PURE__ */ React.createElement(
       "span",
       {
         onMouseDown: onDragStart,
         onTouchStart: onDragStart,
-        style: { fontSize: 18, fontWeight: 700, color: "#fff", flex: 1, cursor: "grab", touchAction: "none" }
+        style: { fontSize: 17, fontWeight: 700, color: "#fff", flex: "1 1 100%", cursor: "grab", touchAction: "none", whiteSpace: "nowrap" }
       },
       "\u{1F916} \uC870\uBE44\uC11C AI ",
-      /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10, fontWeight: 600, color: "#7fd1a0", verticalAlign: "middle" } }, APP_BUILD)
+      /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10, fontWeight: 600, color: "#7fd1a0", verticalAlign: "middle" } }, "v" + APP_VERSION)
+    ), /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        onClick: toggleSheetSize,
+        title: "대화 화면 크게/작게",
+        style: { background: "rgba(255,255,255,0.12)", border: "none", borderRadius: 8, color: "#cfe8d5", padding: "4px 10px", cursor: "pointer", fontSize: 13, fontWeight: 700 }
+      },
+      parseFloat(sheetH) >= SHEET_FULL - 2 ? "\u2B07 작게" : "\u2B06 크게"
     ), /* @__PURE__ */ React.createElement(
       "button",
       {
@@ -10974,7 +10991,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
           fontWeight: 700
         }
       },
-      autoListen ? "\u{1F504} \uC790\uB3D9\uB300\uD654 ON" : "\u{1F446} \uBC84\uD2BC\uC2DD"
+      autoListen ? "\u{1F504} 자동 ON" : "\u{1F446} 버튼식"
     ), /* @__PURE__ */ React.createElement(
       "button",
       {
@@ -11023,6 +11040,13 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       boxShadow: `0 0 12px ${orbColor}cc, 0 0 24px ${orbColor}55, inset 0 0 10px rgba(255,255,255,0.15)`,
       animation: orbAnim,
       transition: "background 0.4s, box-shadow 0.4s"
+    }, onClick: () => {
+      // 통화처럼: 조비서가 말하는 중에 동그라미를 누르면 바로 말을 끊고 내 말을 들음
+      if (phaseRef.current === "speaking") {
+        try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
+      } else if (phaseRef.current === "idle") {
+        beginListening();
+      }
     } })), /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "#ddd", fontSize: 13, marginBottom: 2, fontWeight: 500 } }, statusText, retryCountdown > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: "#FF9800", marginLeft: 8 } }, retryCountdown, "\uCD08 \uD6C4 \uC7AC\uC2DC\uB3C4")), thinkHint && phase === "thinking" ? /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "#7fd1a0", fontSize: 12.5, marginBottom: 2, fontStyle: "italic" } }, "\u{1F4AC} ", thinkHint) : null, awayReturn ? /* @__PURE__ */ React.createElement(
       "div",
       {
@@ -11257,6 +11281,27 @@ function hiResCleanText(raw) {
   if (/음성이?\s*(없|들리지|인식)|소리가?\s*(없|들리지)|무음|no speech|silence|inaudible|\[BLANK/i.test(t) && t.length < 40) return "";
   return t.slice(0, 200);
 }
+let _sttModelCache = null, _sttModelKey = null;
+async function getGeminiSttModel(apiKey) {
+  // 받아쓰기는 속도가 중요 → 가볍고 빠른 모델(flash-lite)을 우선 사용, 없으면 기본 모델
+  if (_sttModelCache && _sttModelKey === apiKey && !_geminiBlockedModels.has(_sttModelCache)) return _sttModelCache;
+  try {
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), 6e3);
+    let r;
+    try { r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`, { signal: c.signal }); } finally { clearTimeout(t); }
+    if (r.ok) {
+      const d = await r.json();
+      const names = (d.models || []).filter((m) => (m.supportedGenerationMethods || []).includes("generateContent")).map((m) => m.name.replace("models/", ""));
+      const lite = ["gemini-3.5-flash-lite", "gemini-flash-lite-latest", "gemini-3.6-flash-lite", "gemini-2.5-flash-lite"];
+      for (const l of lite) {
+        const f = names.find((n) => n === l) || names.find((n) => n.startsWith(l));
+        if (f && !_geminiBlockedModels.has(f)) { _sttModelCache = f; _sttModelKey = apiKey; return f; }
+      }
+    }
+  } catch (e) {}
+  return getGeminiModel(apiKey);
+}
 async function geminiTranscribeWav(b64, vocab, apiKey) {
   var _a, _b, _c, _d, _e;
   const hint = (vocab || []).join(", ");
@@ -11264,7 +11309,7 @@ async function geminiTranscribeWav(b64, vocab, apiKey) {
     "규칙: 받아쓴 문장만 출력(설명·따옴표·번역·마침표 추가 금지). 말이 없거나 잡음뿐이면 아무것도 출력하지 마세요. 들리지 않는 말을 지어내지 마세요.\n" +
     "숫자·수량은 말한 그대로(예: 두 박스, 3키로). 아래는 자주 나오는 업체·고객·상품 이름입니다. 발음이 비슷하게 들리면 이 표기를 쓰되, 이 목록에 없는 말은 들린 대로 적으세요.\n" +
     "이름 목록: " + hint + "\n자주 쓰는 말: 주문, 발송, 입금대기, 결제완료, 발송준비, 박스, 키로, 업체, 고객, 취소, 등록, 목록, 보여줘";
-  let model = await getGeminiModel(apiKey);
+  let model = await getGeminiSttModel(apiKey);
   const doFetch = (mdl) => {
     const c = new AbortController();
     const t = setTimeout(() => c.abort(), 12e3);
@@ -11285,7 +11330,8 @@ async function geminiTranscribeWav(b64, vocab, apiKey) {
     const msg = ((_a = probe.error) == null ? void 0 : _a.message) || "";
     if (res.status === 404 || isGeminiModelUnavailable(msg)) {
       blockGeminiModel(model);
-      const alt = await getGeminiModel(apiKey);
+      _sttModelCache = null;
+      const alt = await getGeminiSttModel(apiKey);
       if (!alt || alt === model) break;
       model = alt;
       res = await doFetch(model);
