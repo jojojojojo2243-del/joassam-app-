@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 252;
+const APP_VERSION = 253;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2341,7 +2341,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v252 (조비서 주문: 규칙 우선 인식·AI는 보조)";
+const APP_BUILD = "v253 (주문할 때 인식·용량 다른 상품 오매칭 방지)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -9105,6 +9105,12 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       if (!prod && typeof fuzzyProductMatch === "function") {
         prod = fuzzyProductMatch(it.name || "", products, 0.52);
         viaFuzzy = !!prod;
+        if (prod) {
+          const _nw = (s) => String(s || "").replace(/\s/g, "").toLowerCase().replace(/킬로그램|킬로그람|킬로|키로그램|키로그람|키로/g, "kg").replace(/그램|그람/g, "g");
+          const _wi = (it.name || "").match(new RegExp(WEIGHT_RE));
+          const _wp = (prod.name || "").match(new RegExp(WEIGHT_RE));
+          if (_wi && _wp && _nw(_wi[0]) !== _nw(_wp[0])) prod = null;
+        }
       }
       if (prod) {
         if (viaFuzzy) {
@@ -10107,6 +10113,10 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     text = dedupCascade(text).slice(0, 200);
     try {
       text = applyLearnedAliasesToText(text);
+    } catch (e) {
+    }
+    try {
+      if (!orderModeRef.current) text = text.replace(/주문\s*할\s*때\s*[.!?]*$/, "주문할게").replace(/주문\s*할\s*때\s*(?=\S)/, "주문할게 ");
     } catch (e) {
     }
     setLastUser(text);
