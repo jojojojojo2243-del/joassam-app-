@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 245;
+const APP_VERSION = 246;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2341,7 +2341,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v245 (오류 점검: 여러 명 주문 문자·AI 분석 버튼·음성 주문 찾기 수정)";
+const APP_BUILD = "v246 (음성 인식 개선: 중간 결과 살리기·마이크 오류 안내·끊김 단축)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8038,6 +8038,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   const [lastUser, setLastUser] = React.useState("");
   const [lastAI, setLastAI] = React.useState("\uC548\uB155\uD558\uC138\uC694! \uC800\uB294 \uC870\uBE44\uC11C\uC608\uC694. \uAD81\uAE08\uD55C \uAC83\uC744 \uB9D0\uC500\uD574 \uBCF4\uC138\uC694.");
   const [history, setHistory] = React.useState([]);
+  const [voiceErr, setVoiceErr] = React.useState("");
   const [retryCountdown, setRetryCountdown] = React.useState(0);
   const [sheetH, setSheetH] = React.useState("42vh");
   const [textMode, setTextMode] = React.useState(false);
@@ -8510,6 +8511,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     }
     clearInterval(countdownRef.current);
     setRetryCountdown(0);
+    setVoiceErr("");
     stopBargeIn();
     stopRec();
     setPhaseSync("listening");
@@ -8528,6 +8530,8 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     const isStale = () => recIdRef.current !== myId;
     let finalText = "";
     let finalAlts = [];
+    let lastInterim = "";
+    let fatalErr = "";
     rec.onresult = (e) => {
       if (isStale()) return;
       let finals = "";
@@ -8544,10 +8548,18 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       }
       finalText = dedupCascade(finals.trim());
       const disp = dedupCascade((finals + interim2).trim());
+      lastInterim = disp;
       setInterim(disp);
     };
     rec.onerror = (e) => {
       if (isStale() || !activeRef.current) return;
+      // v246: 마이크 권한/인터넷 문제는 조용히 넘기지 않고 화면에 이유를 알려줌 (계속 재시도하며 헛돌지 않도록 멈춤)
+      const _msg = voiceErrorText(e.error);
+      if (_msg && (e.error === "not-allowed" || e.error === "service-not-allowed" || e.error === "language-not-supported" || e.error === "network" || (e.error === "audio-capture" && !audioStreamRef.current))) {
+        fatalErr = e.error;
+        try { setLastAI(_msg); setVoiceErr(_msg); } catch (x) {}
+        return;
+      }
       if (e.error === "aborted" || e.error === "not-allowed") return;
       if (e.error === "no-speech") return;
       if (e.error === "audio-capture" && audioStreamRef.current) {
@@ -8561,11 +8573,19 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     };
     rec.onend = () => {
       if (isStale() || !activeRef.current) return;
+      if (fatalErr) {
+        // 권한/네트워크 문제: 자동 재시작 중단 (사용자가 해결 후 마이크를 다시 누르면 시작)
+        if (phaseRef.current === "listening") setPhaseSync("idle");
+        return;
+      }
       setTimeout(() => {
         if (isStale() || !activeRef.current) return;
-        const text = pickBestTranscript(dedupCascade(finalText.trim()), finalAlts);
+        let text = pickBestTranscript(dedupCascade(finalText.trim()), finalAlts);
+        // v246: 안드로이드는 말이 끝나도 '확정' 없이 끝나는 경우가 있어 → 들린 만큼(중간 결과)이라도 사용
+        if (!text && lastInterim && (lastInterim.match(/[가-힣A-Za-z0-9]/g) || []).length >= 2) text = dedupCascade(lastInterim.trim());
         finalText = "";
         finalAlts = [];
+        lastInterim = "";
         if (text && phaseRef.current === "listening") {
           silenceCountRef.current = 0;
           routeCapturedSpeech(text);
@@ -8582,7 +8602,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
             } else {
               setTimeout(() => {
                 if (!isStale() && activeRef.current && phaseRef.current === "listening") beginListening();
-              }, 800);
+              }, 250);
             }
           }
         }
@@ -10519,7 +10539,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   }
   const orbColor = phase === "listening" ? "#4CAF50" : phase === "thinking" ? "#FF9800" : phase === "speaking" ? "#2196F3" : retryCountdown > 0 ? "#FF9800" : "#3d7a54";
   const orbAnim = phase === "listening" ? "jsOrbListen 0.9s ease-in-out infinite" : phase === "thinking" ? "jsOrbSpin 1.0s linear infinite" : phase === "speaking" ? "jsOrbSpeak 0.4s ease-in-out infinite" : "jsOrbIdle 2s ease-in-out infinite";
-  const statusText = phase === "listening" ? interim ? "\u{1F3A4} \uB4E3\uACE0 \uC788\uC5B4\uC694\u2026" : "\u{1F3A4} \uC9C0\uAE08 \uB9D0\uC500\uD558\uC138\uC694" : phase === "thinking" ? "\u{1F4AD} \uC0DD\uAC01 \uC911\u2026 (\uC7A0\uC2DC\uB9CC\uC694)" : phase === "speaking" ? autoListen ? "\u{1F50A} \uB2F5\uBCC0 \uC911 \u2014 \uB07C\uC5B4\uB4E4\uC5B4 \uB9D0\uC500\uD558\uC154\uB3C4 \uB3FC\uC694" : "\u{1F50A} \uB2F5\uBCC0 \uC911\u2026 (\uB05D\uB098\uBA74 \uB9D0\uC500\uD558\uC138\uC694)" : retryCountdown > 0 ? "\uC7A0\uC2DC \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD569\uB2C8\uB2E4" : autoListen ? "\uB300\uAE30 \uC911 \u2014 \uB9D0\uC500\uD574 \uBCF4\uC138\uC694" : "\uB20C\uB7EC \uB9D0\uD558\uAE30 \u2014 \uB9C8\uC774\uD06C \uBC84\uD2BC\uC744 \uB204\uB974\uC138\uC694";
+  const statusText = voiceErr ? "\u26A0\uFE0F " + voiceErr : phase === "listening" ? interim ? "\u{1F3A4} \uB4E3\uACE0 \uC788\uC5B4\uC694\u2026" : "\u{1F3A4} \uC9C0\uAE08 \uB9D0\uC500\uD558\uC138\uC694" : phase === "thinking" ? "\u{1F4AD} \uC0DD\uAC01 \uC911\u2026 (\uC7A0\uC2DC\uB9CC\uC694)" : phase === "speaking" ? autoListen ? "\u{1F50A} \uB2F5\uBCC0 \uC911 \u2014 \uB07C\uC5B4\uB4E4\uC5B4 \uB9D0\uC500\uD558\uC154\uB3C4 \uB3FC\uC694" : "\u{1F50A} \uB2F5\uBCC0 \uC911\u2026 (\uB05D\uB098\uBA74 \uB9D0\uC500\uD558\uC138\uC694)" : retryCountdown > 0 ? "\uC7A0\uC2DC \uD6C4 \uB2E4\uC2DC \uC2DC\uB3C4\uD569\uB2C8\uB2E4" : autoListen ? "\uB300\uAE30 \uC911 \u2014 \uB9D0\uC500\uD574 \uBCF4\uC138\uC694" : "\uB20C\uB7EC \uB9D0\uD558\uAE30 \u2014 \uB9C8\uC774\uD06C \uBC84\uD2BC\uC744 \uB204\uB974\uC138\uC694";
   return /* @__PURE__ */ React.createElement("div", { style: {
     position: "fixed",
     left: 0,
@@ -10958,6 +10978,13 @@ function MicLevelBar({ phase, active, autoListen }) {
   const bars = [0, 0.12, 0.24, 0.36, 0.48, 0.36, 0.24, 0.12, 0];
   return /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "center", gap: 3, height: 26, margin: "2px 0 4px", opacity } }, bars.map((delay, i) => /* @__PURE__ */ React.createElement("span", { key: i, style: { width: 4, height: "100%", display: "flex", alignItems: "center" } }, /* @__PURE__ */ React.createElement("span", { style: { width: "100%", height: "40%", borderRadius: 3, background: color, animation: `${anim} ${dur}s ease-in-out ${delay}s infinite` } }))));
 }
+function voiceErrorText(code) {
+  if (code === "not-allowed" || code === "service-not-allowed") return "마이크 사용이 막혀 있어요. 주소창 왼쪽 자물쇠(또는 ⋮ 메뉴 → 설정 → 사이트 권한)에서 마이크를 '허용'으로 바꿔 주세요. 비밀 모드에서는 매번 물어볼 수 있어요.";
+  if (code === "audio-capture") return "마이크를 쓸 수 없어요. 통화·녹음·다른 음성 앱이 마이크를 쓰고 있는지 확인해 주세요.";
+  if (code === "network") return "인터넷 연결이 불안정해서 음성 인식이 안 돼요. 와이파이/데이터를 확인하고 다시 눌러 주세요.";
+  if (code === "language-not-supported") return "이 폰은 한국어 음성 인식을 지원하지 않아요. 크롬 또는 삼성 인터넷의 최신 버전을 써 주세요.";
+  return "";
+}
 function JarvisButton({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onAppCommand, subscriptions, openBundlePlanner, openPersonPicker, openBulkModeChoice, closeOrderPickers, onSetOrderMemo }) {
   const [sheetOpen, setSheetOpen] = React.useState(false);
   const [wakeActive, setWakeActive] = React.useState(false);
@@ -11002,7 +11029,13 @@ function JarvisButton({ orders, customers, products, tab, setTab, geminiKey, set
       if (wakeActiveRef.current && !sheetOpenRef.current)
         wakeRestartRef.current = setTimeout(() => startWakeListen(), 3e3);
     };
-    rec.onerror = () => {
+    rec.onerror = (e) => {
+      if (e && (e.error === "not-allowed" || e.error === "service-not-allowed")) {
+        wakeActiveRef.current = false;
+        setWakeActive(false);
+        showToast("마이크 사용이 막혀 있어서 음성대기를 껐어요");
+        return;
+      }
       if (wakeActiveRef.current && !sheetOpenRef.current)
         wakeRestartRef.current = setTimeout(() => startWakeListen(), 5e3);
     };
@@ -22204,21 +22237,29 @@ function VoiceInputButton({ onResult }) {
     const rec = new SpeechRecognition();
     rec.lang = "ko-KR";
     rec.continuous = true;
-    rec.interimResults = false;
+    rec.interimResults = true;
     rec.maxAlternatives = 1;
     let acc = "";
     rec.onresult = (e) => {
+      let tmp = "";
       for (let i = e.resultIndex; i < e.results.length; i++) {
         if (e.results[i].isFinal) acc += e.results[i][0].transcript + " ";
+        else tmp += e.results[i][0].transcript;
       }
+      interimAcc = (acc + tmp).trim();
     };
-    rec.onerror = () => {
+    let interimAcc = "";
+    rec.onerror = (e) => {
+      const m = voiceErrorText(e && e.error);
+      if (m) { try { alert(m); } catch (x) {} }
       setListening(false);
     };
     rec.onend = () => {
       setListening(false);
-      const finalText = acc.trim();
+      let finalText = acc.trim();
+      if (!finalText && interimAcc.trim()) finalText = interimAcc.trim();
       acc = "";
+      interimAcc = "";
       if (finalText) onResult(finalText);
     };
     recognitionRef.current = rec;
