@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 248;
+const APP_VERSION = 249;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2341,7 +2341,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v248 (정밀 음성 인식: Gemini 받아쓰기 + 이름 힌트)";
+const APP_BUILD = "v249 (음성: 조비서 목소리 되받아쓰기 반복 방지)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8093,6 +8093,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   const accumBufRef = React.useRef("");
   const accumTimerRef = React.useRef(null);
   const speakTextRef = React.useRef("");
+  const lastSpokenRef = React.useRef({ text: "", at: 0 });
   const bargeRecRef = React.useRef(null);
   const bargedRef = React.useRef(false);
   const repeatAssistRef = React.useRef({ text: "", count: 0 });
@@ -8512,6 +8513,19 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     } catch (e) {
     }
   }
+  // v249: 조비서가 방금 한 말을 마이크가 다시 들은 것(에코)인지 확인 — 같은 말이 계속 반복되던 문제 방지
+  function isRecentEcho(heard) {
+    const ls = lastSpokenRef.current;
+    if (!ls || !ls.text || Date.now() - ls.at > 7000) return false;
+    const norm = (x) => String(x || "").toLowerCase().replace(/키로그램|킬로그램|키로|킬로/g, "kg").replace(/네\s*개/g, "4개").replace(/[^0-9a-z가-힣]/g, "");
+    const h = norm(heard), sp = norm(ls.text);
+    if (h.length < 5 || !sp) return false;
+    const grams = new Set();
+    for (let i = 0; i < sp.length - 1; i++) grams.add(sp.slice(i, i + 2));
+    let hit = 0, tot = 0;
+    for (let i = 0; i < h.length - 1; i++) { tot++; if (grams.has(h.slice(i, i + 2))) hit++; }
+    return tot > 0 && hit / tot >= 0.75;
+  }
   function hiResKey() {
     try { return geminiKey || loadGeminiKey() || ""; } catch (e) { return geminiKey || ""; }
   }
@@ -8641,6 +8655,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       }
       if (isStale()) return;
       setInterim("");
+      if (text && isRecentEcho(text)) text = "";
       if (failed) {
         setTimeout(() => { if (!isStale() && phaseRef.current === "listening") beginListening(); }, 2800);
         return;
@@ -8761,6 +8776,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         let text = pickBestTranscript(dedupCascade(finalText.trim()), finalAlts);
         // v246: 안드로이드는 말이 끝나도 '확정' 없이 끝나는 경우가 있어 → 들린 만큼(중간 결과)이라도 사용
         if (!text && lastInterim && (lastInterim.match(/[가-힣A-Za-z0-9]/g) || []).length >= 2) text = dedupCascade(lastInterim.trim());
+        if (text && isRecentEcho(text)) text = "";
         finalText = "";
         finalAlts = [];
         lastInterim = "";
@@ -10548,6 +10564,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       if (done) return;
       done = true;
       clearTimeout(ttsTimerRef.current);
+      lastSpokenRef.current = { text: clean, at: Date.now() };
       speakTextRef.current = "";
       if (bargedRef.current) {
         return;
@@ -10596,7 +10613,16 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         }, 350);
       };
       const ms = Math.max(1500, clean.length * 65 + 800);
-      ttsTimerRef.current = setTimeout(afterSpeak, ms);
+      // v249: 예상 시간이 지났어도 아직 말하는 중이면 끝날 때까지 기다림 (말하는 도중에 듣기 시작해서 자기 목소리를 받아쓰던 문제)
+      const t0 = Date.now();
+      const waitTick = () => {
+        if (done) return;
+        let still = false;
+        try { still = !!(window.speechSynthesis && window.speechSynthesis.speaking); } catch (e) {}
+        if (still && Date.now() - t0 < ms * 2 + 5000) { ttsTimerRef.current = setTimeout(waitTick, 500); return; }
+        afterSpeak();
+      };
+      ttsTimerRef.current = setTimeout(waitTick, ms);
       window.speechSynthesis.speak(u);
       setTimeout(() => {
         if (!done && phaseRef.current === "speaking" && !bargeRecRef.current) startBargeIn();
