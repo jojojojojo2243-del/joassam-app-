@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 262;
+const APP_VERSION = 263;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2386,7 +2386,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v262 (주문 중 업체 바뀜 확인·정밀 받아쓰기 힌트 조정)";
+const APP_BUILD = "v263 (붙여쓴 지점 이름·대솔/채소 문맥 판단·빠진 글자 확인)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8097,7 +8097,7 @@ null       : \uC774\uB3D9 \uBD88\uD544\uC694\uD55C \uC77C\uBC18 \uB300\uD654
   const stripped = cleaned.replace(/^[^{]*\{/, "").replace(/["']?\s*text\s*["']?\s*:\s*["']?/i, "").replace(/["']?\s*,?\s*["']?action["']?\s*:[\s\S]*$/i, "").replace(/[{}"]/g, "").trim();
   return { text: stripped || "\uB2E4\uC2DC \uB9D0\uC500\uD574 \uC8FC\uC138\uC694.", action: null };
 }
-// ===== VO2: 대화형 음성 주문 엔진 (v262) =====
+// ===== VO2: 대화형 음성 주문 엔진 (v263) =====
 // 말 → 정규화 → 의도/항목 추출 → 등록된 DB(상품·고객·업체·지점)에서 후보 검색 → 현재 주문 상태에 '바뀐 것만' 반영 → 답변
 // 주문 상태는 문자열이 아니라 구조화된 객체로 관리하고, 애매하면 추측하지 않고 질문함.
 var VO2 = (function () {
@@ -8308,6 +8308,28 @@ var VO2 = (function () {
       var cb = splitCompanyBranch(v.name);
       return { id: v.id, name: String(v.name).trim(), company: cb.company, companyNS: ns(cb.company), branch: cb.branch, branchNS: ns(cb.branch), phone: v.phone || "", address: v.address || "", aliases: (v.aliases || []).map(ns), raw: v };
     });
+    // v263: 띄어쓰기 없이 등록된 지점 이름("대솔동남점", "대솔본점")도 업체+지점으로 나눔
+    //  ① 다른 업체에서 쓰는 지점 이름으로 끝나면 그 앞부분이 업체 ② 같은 앞부분을 가진 '…점' 업체가 2곳 이상이면 그 앞부분이 업체
+    var knownBr = {};
+    vendors.forEach(function (v) { if (v.branch) knownBr[v.branchNS] = 1; });
+    var noBr = vendors.filter(function (v) { return !v.branch && /점$/.test(ns(v.name)); });
+    noBr.forEach(function (v) {
+      var n = ns(v.name);
+      var hit = Object.keys(knownBr).filter(function (b) { return n.length - b.length >= 2 && n.slice(-b.length) === b; }).sort(function (a, b) { return b.length - a.length; })[0];
+      var comp = hit ? n.slice(0, n.length - hit.length) : "";
+      if (!comp) {
+        noBr.forEach(function (u) {
+          if (u === v) return;
+          var m2 = ns(u.name), k = 0;
+          while (k < n.length && k < m2.length && n[k] === m2[k]) k++;
+          var r1 = n.slice(k), r2 = m2.slice(k);
+          if (k >= 2 && /^[가-힣A-Za-z0-9]{1,6}점$/.test(r1) && /^[가-힣A-Za-z0-9]{1,6}점$/.test(r2) && k > comp.length) comp = n.slice(0, k);
+        });
+      }
+      if (comp && comp.length >= 2) {
+        v.company = comp; v.companyNS = comp; v.branch = n.slice(comp.length); v.branchNS = v.branch;
+      }
+    });
     var companies = {};
     vendors.forEach(function (v) {
       var c = companies[v.companyNS] = companies[v.companyNS] || { name: v.company, nameNS: v.companyNS, vendors: [], aliases: companyAliases(v.company) };
@@ -8330,12 +8352,18 @@ var VO2 = (function () {
       Object.keys(pair[1]).forEach(function (from) { aliasSrc.push({ from: from, to: pair[1][from], src: pair[0] }); });
     });
     var aliasLog = [];
+    var weakAlias = {};
     aliasSrc.forEach(function (a) {
       var f = ns(a.from), toRaw = ns(a.to);
       if (!f || !toRaw || f === toRaw) return;
       var fCore = f.replace(/\d+(?:\.\d+)?(kg|g|키로|킬로|그램|개|박스)?/gi, "");
       if ((fCore.match(/[가-힣]/g) || []).length < 2) { aliasLog.push({ from: a.from, to: a.to, src: a.src, used: "무시(숫자·무게만 있는 말)" }); return; }
-      if (/^(최소|최대|이상|이하|정도|주문|취소|확정|추가|메모|주소|전화|번호|등록|그대로|이대로|박스|키로|킬로|그램|받는|보내는|아니|말고|빼|빼줘|바꿔|변경|처음|다시)/.test(f)) { aliasLog.push({ from: a.from, to: a.to, src: a.src, used: "무시(앱 명령어와 겹치는 말)" }); return; }
+      if (/^(최소|최대|이상|이하|정도|주문|취소|확정|추가|메모|주소|전화|번호|등록|그대로|이대로|박스|키로|킬로|그램|받는|보내는|아니|말고|빼|빼줘|바꿔|변경|처음|다시)/.test(f)) {
+        // 앱 명령어와 겹치는 말은 평소엔 무시하고, 문장 맨 앞에 와서 상품 없이 수량만 있을 때만 상품으로 씀 ("최소 2키로 네 개" = 채소 2kg 4개)
+        weakAlias[f] = toRaw.replace(/(\d+(?:\.\d+)?)(kg|g)/g, "");
+        aliasLog.push({ from: a.from, to: a.to, src: a.src, used: "문장 맨 앞일 때만(명령어와 겹치는 말)" });
+        return;
+      }
       var to = toRaw.replace(/(\d+(?:\.\d+)?)(kg|g)/g, "");
       var used = "";
       if (groups[to]) { if (!groups[f]) { prodAlias[f] = to; used = "상품:" + groups[to].base; } }
@@ -8358,7 +8386,7 @@ var VO2 = (function () {
       var n = ns((o.recipient && o.recipient.name) || (o.sender && o.sender.name) || "");
       if (n) recent[n] = (recent[n] || 0) + 1;
     });
-    return { products: products, groups: groups, prodAlias: prodAlias, prodAliasMulti: prodAliasMulti, vendors: vendors, companies: companies, customers: customers, custByName: custByName, custAlias: custAlias, aliasLog: aliasLog, recent: recent };
+    return { products: products, groups: groups, prodAlias: prodAlias, prodAliasMulti: prodAliasMulti, vendors: vendors, companies: companies, customers: customers, custByName: custByName, custAlias: custAlias, aliasLog: aliasLog, weakAlias: weakAlias, recent: recent };
   }
 
   // ---------- 후보 검색 ----------
@@ -8417,6 +8445,19 @@ var VO2 = (function () {
           if (sc.length) {
             sc.sort(function (a, b) { return b.s - a.s; });
             if (sc.length && (sc.length === 1 || sc[0].s - sc[1].s >= 0.06 || sc[0].k === sc[1].k)) best = { baseNS: sc[0].k, score: sc[0].s, how: "similar" };
+          }
+        }
+        if (!best && L === 1) {
+          // 받아쓰기에서 가운데 글자가 빠진 경우("로인"→로메인): 첫 글자가 같고 글자 순서가 그대로 들어 있으면 후보로 (확인 질문)
+          var wp = vs[vs.length - 1];
+          if (wp.length >= 2 && !ITEM_STOP.test(wp)) {
+            var subs = keys.filter(function (k) {
+              if (k[0] !== wp[0] || k.length > wp.length + 2 || k.length <= wp.length) return false;
+              var j = 0;
+              for (var q = 0; q < k.length && j < wp.length; q++) if (k[q] === wp[j]) j++;
+              return j === wp.length;
+            });
+            if (subs.length >= 1 && subs.length <= 3) best = { ambiguous: subs, score: 0.6, how: "partial" };
           }
         }
         if (best) {
@@ -8748,9 +8789,12 @@ var VO2 = (function () {
     var anyPersonOrCompany = false;
     for (var ci = 0; ci < clauses.length; ci++) {
       var c = clauses[ci];
+      R._consumed = [];
       var r1 = handlePeopleAndCompany(st, c, idx, R, logChange, ci === 0 ? norm : c);
       if (r1) anyPersonOrCompany = true;
       if (r1 === "skipItems") continue;
+      // 업체·지점 이름으로 쓰인 말은 상품 찾기에서 제외
+      (R._consumed || []).forEach(function (sf) { if (sf) c = c.split(sf).join(" ").replace(/\s+/g, " ").trim(); });
       handleShipping(st, c, idx, R, logChange);
       handleItems(st, c, idx, R, logChange, clauses.length > 1);
     }
@@ -8959,6 +9003,7 @@ var VO2 = (function () {
       var k5 = pickByOrdinal(norm, opts2.length);
       var base = k5 >= 0 ? opts2[k5] : null;
       if (!base) { var fp2 = findProducts(norm, idx); if (fp2.length && fp2[0].baseNS && opts2.indexOf(fp2[0].baseNS) >= 0) base = fp2[0].baseNS; }
+      if (!base && yes && opts2.length === 1) base = opts2[0];
       if (!base) { var tk = opts2.filter(function (o) { return tokensOf(norm).some(function (w) { w = stripParticles(w); return w.length >= 2 && o.indexOf(w) >= 0; }); }); if (tk.length === 1) base = tk[0]; }
       if (base) {
         st.ctx.pending = null;
@@ -8992,6 +9037,15 @@ var VO2 = (function () {
         return "handled";
       }
       if (no) { st.ctx.pending = null; return "handled"; }
+      return "pass";
+    }
+    if (p.type === "vendorPick") {
+      var vlist = p.options.map(function (id) { return idx.vendors.find(function (v) { return v.id === id; }); }).filter(Boolean);
+      var kk = pickByOrdinal(norm, vlist.length);
+      var vch = kk >= 0 ? vlist[kk] : null;
+      if (!vch) { var cs2 = findCompanies(norm, idx); if (cs2.length) vch = vlist.find(function (v) { return v.companyNS === cs2[0].company.nameNS; }) || null; }
+      if (vch) { st.ctx.pending = null; setVendor(st, vch, R, logChange, "select"); return "handled"; }
+      if (no) { st.ctx.pending = null; R.notes.push("알겠습니다. 업체 이름을 말씀해 주세요."); return "handled"; }
       return "pass";
     }
     if (p.type === "switchVendor") {
@@ -9051,7 +9105,7 @@ var VO2 = (function () {
     logChange(prevBranch && v.branch ? "branch" : "vendor", before, v.name);
     if (st.ctx.pending && st.ctx.pending.type === "branch") st.ctx.pending = null;
     if (prevBranch && v.branch && prevBranch !== v.branch && before && ns(st.vendor.company) === ns(v.company)) R.changes.push(ro(v.branch) + " 변경했습니다");
-    else if (how === "select" && v.branch) R.changes.push(ro(v.branch) + " 선택했습니다");
+    else if (how === "select" && v.branch) R.changes.push(ro(prevBranch || !before ? v.company + " " + v.branch : v.branch) + " 선택했습니다");
     else R.changes.push("네, " + v.company + (v.branch ? " " + v.branch : "") + " 주문을 시작할게요");
     st.ctx.lastPersonRole = "company";
   }
@@ -9062,7 +9116,15 @@ var VO2 = (function () {
     // 업체·지점
     var cos = findCompanies(c, idx);
     var company = cos.length ? cos[cos.length - 1] : null; // "A 말고 B"면 뒤엣것
+    // v263: 업체 이름이면서 상품 별칭(사전)이기도 한 말("대솔"→채소)은 문맥으로 판단:
+    //  이미 주문 중이고 수량·무게가 함께 있으면 상품으로 봄 ("대솔 2키로 4개" = 채소 2kg 4개)
+    if (company && !company.vendor && (st.vendor || st.orderer) && parseQuantities(c).length && !RX.start.test(c) && !/(업체|거래처|바꿔|변경|점)/.test(c)) {
+      var sw = variants(ns(company.surface));
+      var isProdWord = sw.some(function (w) { return idx.groups[w] || idx.prodAlias[w] || (idx.prodAliasMulti && idx.prodAliasMulti[w]); });
+      if (isProdWord) company = null;
+    }
     if (company) {
+      R._consumed = (R._consumed || []).concat([company.surface]);
       var co = company.company;
       // v262: 주문 중에 다른 업체 이름이 '들리기만' 한 경우(예: "채소 2키로"가 "대솔동남점 4개"로 잘못 받아써짐)는 바로 바꾸지 않고 물어봄
       var curName = st.vendor ? st.vendor.name : st.company ? st.company.name : "";
@@ -9100,6 +9162,18 @@ var VO2 = (function () {
     } else {
       // 지점만 말한 경우 ("군산점이야", "군산점 말고 수복점")
       var coCur = st.company ? idx.companies[st.company.nameNS] : null;
+      if (!coCur && !st.vendor && /점/.test(c)) {
+        // 업체를 아직 모르는데 지점 이름만 들림 → 그 지점이 있는 업체가 하나면 바로, 여러 곳이면 질문
+        var allBr = findBranches(c, idx, null);
+        var pk = allBr.length ? allBr[allBr.length - 1] : null;
+        var exactBr = pk ? idx.vendors.filter(function (v) { return v.branch && pk.vendor && v.branchNS === pk.vendor.branchNS; }) : [];
+        if (pk && pk.vendor && exactBr.length === 1) { setVendor(st, pk.vendor, R, logChange); R._consumed = (R._consumed || []).concat([pk.surface]); return true; }
+        var opts = exactBr.length > 1 ? exactBr : pk && pk.ambiguous ? pk.ambiguous : [];
+        if (opts.length > 1) {
+          queueAsk(st, R, { type: "vendorPick", options: opts.map(function (v) { return v.id; }) }, "어느 업체인가요? " + opts.map(function (v, i) { return (i + 1) + "번 " + v.name; }).join(", ") + ".");
+          return "skipItems";
+        }
+      }
       if (coCur) {
         var brs = findBranches(c, idx, coCur);
         var pick = brs.length ? brs[brs.length - 1] : null;
@@ -9395,6 +9469,14 @@ var VO2 = (function () {
   function handleItems(st, c, idx, R, logChange, multiClause) {
     var prevTurnKeys = st.ctx._prevTurnKeys || [];
     var mentions = findProducts(c, idx);
+    if (!mentions.length && idx.weakAlias) {
+      var t0 = tokensOf(c)[0] || "";
+      var w0 = idx.weakAlias[t0] ? t0 : idx.weakAlias[stripParticles(t0)] ? stripParticles(t0) : null;
+      if (w0 && parseQuantities(c).length && !/^(최소|최대)\s*\d/.test(c.replace(w0, "").trim() + " x") ) {
+        c = c.replace(t0, idx.weakAlias[w0]);
+        mentions = findProducts(c, idx);
+      }
+    }
     var qtys = parseQuantities(c);
     var t = ns(c);
     var isDel = RX.del.test(t) && !/(메모|메시지)/.test(t);
@@ -9495,10 +9577,10 @@ var VO2 = (function () {
         if (weight) { var byW = cands.filter(function (b) { return idx.groups[b].skus.some(function (s) { return s.grams === weight.grams; }); }); if (byW.length) cands = byW; }
         var inCart = cands.filter(function (b) { return findItem(st, b); });
         if (inCart.length === 1) cands = inCart;
-        if (cands.length === 1) m.baseNS = cands[0];
+        if (cands.length === 1 && m.how !== "partial") m.baseNS = cands[0];
         else {
           var addA = { quantity: count ? count.value : 1, quantityUnit: count ? count.unit : "개", countGiven: !!count, wantGrams: weight ? weight.grams : null, condition: condQ ? condQ.cond : null, condGrams: condQ ? condQ.grams : null, more: isMore };
-          queueAsk(st, R, { type: "productPick", options: cands, add: addA }, "'" + m.surface + "'는 " + cands.map(function (b, i) { return (i + 1) + "번 " + idx.groups[b].base; }).join(", ") + " 중 어느 상품인가요?");
+          queueAsk(st, R, { type: "productPick", options: cands, add: addA }, cands.length === 1 ? "'" + m.surface + "'(이)라고 들렸어요. " + idx.groups[cands[0]].base + " 말씀이세요?" : "'" + m.surface + "'는 " + cands.map(function (b, i) { return (i + 1) + "번 " + idx.groups[b].base; }).join(", ") + " 중 어느 상품인가요?");
           return;
         }
       }
