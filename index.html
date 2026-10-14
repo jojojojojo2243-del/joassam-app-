@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 257;
+const APP_VERSION = 258;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2386,7 +2386,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v257 (조비서 멈춤 방지)";
+const APP_BUILD = "v258 (잘못 배운 말 정리·몰래 학습 끔·끼어들기)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -5823,6 +5823,15 @@ const PRODUCT_ALIASES = {
 };
 const LEARNED_ALIAS_KEY = "joassam_learned_aliases_v1";
 let _learnedAliasCache = null;
+// v258: "1kg → 카이피라"처럼 숫자·무게만 있는 말이나, 바꿔도 똑같은 말은 학습하면 모든 문장을 망가뜨림 → 막고 기존 것도 정리
+function isBadLearnedAlias(from, to) {
+  const f = String(from || "").replace(/\s/g, "");
+  const t = String(to || "").replace(/\s/g, "");
+  if (!f || !t || f === t) return true;
+  const core = f.replace(/\d+(?:\.\d+)?\s*(kg|키로|킬로|그램|g|개|박스|봉|팩|근|망|줄|판)?/gi, "");
+  if ((core.match(/[가-힣]/g) || []).length < 2) return true;
+  return false;
+}
 function getLearnedAliases() {
   if (_learnedAliasCache) return _learnedAliasCache;
   try {
@@ -5832,12 +5841,21 @@ function getLearnedAliases() {
     _learnedAliasCache = {};
   }
   if (!_learnedAliasCache || typeof _learnedAliasCache !== "object") _learnedAliasCache = {};
+  try {
+    let dropped = 0;
+    for (const k of Object.keys(_learnedAliasCache)) {
+      if (isBadLearnedAlias(k, _learnedAliasCache[k])) { delete _learnedAliasCache[k]; dropped++; }
+    }
+    if (dropped && typeof localStorage !== "undefined") localStorage.setItem(LEARNED_ALIAS_KEY, JSON.stringify(_learnedAliasCache));
+  } catch (e) {
+  }
   return _learnedAliasCache;
 }
 function learnAlias(from, to) {
   const f = String(from || "").replace(/\s/g, "").trim();
   const t = String(to || "").replace(/\s/g, "").trim();
   if (!f || !t || f === t) return false;
+  if (isBadLearnedAlias(f, t)) return false;
   const map = getLearnedAliases();
   map[f] = t;
   _learnedAliasCache = map;
@@ -6044,6 +6062,8 @@ function ignoreWord(w) {
   clearWordFreq(w);
 }
 function autoLearnFreqProducts(products) {
+  // v258: 묻지 않고 혼자 배우는 기능은 끔 (잘못 들은 말이 규칙으로 쌓여 인식이 점점 나빠짐). 학습센터에서 '승인'한 것만 배움
+  if (!products || products !== "__manual__") return [];
   const learned = [];
   let cands = [];
   try {
@@ -6107,6 +6127,7 @@ function applyLearnedAliasesToText(text) {
     if (/^\s*$/.test(tok)) return tok;
     const compact = tok.replace(/\s/g, "");
     if (compact.length < 2) return tok;
+    if (/^[\d.]+\s*(kg|키로|킬로|그램|g|개|박스)?$/i.test(compact)) return tok;
     if (learned[compact]) {
       changed = true;
       return learned[compact];
@@ -8442,7 +8463,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR || !activeRef.current) return;
     if (!autoListenRef.current) return;
-    if (hiResActive()) return;
+    if (hiResActive()) { startHiResBarge(); return; }
     stopBargeIn();
     try {
       const rec = new SR();
@@ -8519,6 +8540,51 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     } catch (e) {
       bargeRecRef.current = null;
     }
+  }
+  // v258: 정밀 모드에서도 끼어들기 — 조비서가 말하는 동안 마이크 소리 크기를 보고, 사장님 목소리가 조비서 소리보다 확실히 크게 이어지면 바로 멈추고 받아씀
+  async function startHiResBarge() {
+    if (!activeRef.current || !autoListenRef.current) return;
+    if (hiResCapRef.current && hiResCapRef.current.barge) return;
+    let ctx;
+    try { ctx = await hiResEnsureAudio(); } catch (e) { return; }
+    if (phaseRef.current !== "speaking" || !activeRef.current) return;
+    const rate = ctx.sampleRate || 48000;
+    const b = { barge: true, chunks: [], echo: 0.01, t: 0, loudMs: 0 };
+    b.onData = (buf) => {
+      if (hiResCapRef.current !== b) return;
+      if (phaseRef.current !== "speaking") { hiResCapRef.current = null; return; }
+      const copy = new Float32Array(buf);
+      let sum = 0;
+      for (let i = 0; i < copy.length; i++) sum += copy[i] * copy[i];
+      const rms = Math.sqrt(sum / copy.length);
+      const ms = copy.length / rate * 1000;
+      b.t += ms;
+      b.chunks.push(copy);
+      if (b.chunks.length > 14) b.chunks.shift();
+      if (b.t < 600) { b.echo = Math.max(b.echo, rms); return; }
+      const thr = Math.min(0.25, Math.max(0.045, b.echo * 2.2));
+      if (rms > thr) b.loudMs += ms;
+      else { b.loudMs = Math.max(0, b.loudMs - ms); b.echo = Math.max(b.echo * 0.995, rms); }
+      if (b.loudMs >= 250) {
+        hiResCapRef.current = null;
+        bargedRef.current = true;
+        try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
+        clearTimeout(ttsTimerRef.current);
+        setPhaseSync("listening");
+        beginListeningHiRes({ preroll: b.chunks.slice(), speechMs: b.loudMs });
+      }
+    };
+    hiResCapRef.current = b;
+  }
+  // 버튼(또는 동그라미)을 누르면 바로 끊고 내 말을 들음
+  function bargeNow() {
+    bargedRef.current = true;
+    try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
+    clearTimeout(ttsTimerRef.current);
+    stopBargeIn();
+    if (hiResCapRef.current && hiResCapRef.current.barge) hiResCapRef.current = null;
+    setPhaseSync("listening");
+    beginListening();
   }
   function stopBargeIn() {
     const r = bargeRecRef.current;
@@ -8617,7 +8683,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     if (ctx.state === "suspended") { try { await ctx.resume(); } catch (e) {} }
     return ctx;
   }
-  async function beginListeningHiRes() {
+  async function beginListeningHiRes(opts) {
     const myId = ++recIdRef.current;
     const isStale = () => recIdRef.current !== myId || !activeRef.current;
     let ctx;
@@ -8640,6 +8706,13 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     const rate = ctx.sampleRate || 48000;
     const endMs = orderModeRef.current ? 950 : 700;
     const cap = { chunks: [], speechMs: 0, silenceMs: 0, totalMs: 0, heard: false, floor: 1, done: false };
+    if (opts && opts.preroll && opts.preroll.length) {
+      cap.chunks = opts.preroll;
+      cap.heard = true;
+      cap.speechMs = opts.speechMs || 250;
+      cap.floor = 0.01;
+      try { setInterim("\u{1F399}\uFE0F \uB4E3\uB294 \uC911\u2026"); } catch (e) {}
+    }
     cap.onData = (buf) => {
       if (cap.done || isStale() || hiResCapRef.current !== cap) return;
       const copy = new Float32Array(buf);
@@ -10668,6 +10741,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         return;
       }
       stopBargeIn();
+      if (hiResCapRef.current && hiResCapRef.current.barge) hiResCapRef.current = null;
       setPhaseSync("idle");
       if (autoListenRef.current) {
         wantListenCueRef.current = true;
@@ -11141,11 +11215,11 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     }, onClick: () => {
       // 통화처럼: 조비서가 말하는 중에 동그라미를 누르면 바로 말을 끊고 내 말을 들음
       if (phaseRef.current === "speaking") {
-        try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
+        bargeNow();
       } else if (phaseRef.current === "idle") {
         beginListening();
       }
-    } })), /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "#ddd", fontSize: 13, marginBottom: 2, fontWeight: 500 } }, statusText, retryCountdown > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: "#FF9800", marginLeft: 8 } }, retryCountdown, "\uCD08 \uD6C4 \uC7AC\uC2DC\uB3C4")), thinkHint && phase === "thinking" ? /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "#7fd1a0", fontSize: 12.5, marginBottom: 2, fontStyle: "italic" } }, "\u{1F4AC} ", thinkHint) : null, awayReturn ? /* @__PURE__ */ React.createElement(
+    } })), /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "#ddd", fontSize: 13, marginBottom: 2, fontWeight: 500 } }, statusText, retryCountdown > 0 && /* @__PURE__ */ React.createElement("span", { style: { color: "#FF9800", marginLeft: 8 } }, retryCountdown, "\uCD08 \uD6C4 \uC7AC\uC2DC\uB3C4")), phase === "speaking" ? /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", margin: "4px 0 6px" } }, /* @__PURE__ */ React.createElement("button", { onClick: bargeNow, style: { padding: "9px 22px", borderRadius: 22, border: "none", background: "#E65100", color: "#fff", fontSize: 15, fontWeight: 800, cursor: "pointer", boxShadow: "0 2px 8px rgba(0,0,0,0.35)" } }, "\u270B \uB04A\uACE0 \uB9D0\uD558\uAE30")) : null, thinkHint && phase === "thinking" ? /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", color: "#7fd1a0", fontSize: 12.5, marginBottom: 2, fontStyle: "italic" } }, "\u{1F4AC} ", thinkHint) : null, awayReturn ? /* @__PURE__ */ React.createElement(
       "div",
       {
         onClick: resumeAfterAway,
