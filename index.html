@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 254;
+const APP_VERSION = 255;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1115,7 +1115,23 @@ function applyOrderUtterance(draft, text, ctx) {
   }
   let captured = false;
   const removedIds = /* @__PURE__ */ new Set();
-  const nm = findKnownNameIn(text, customers, vendors, products);
+  let nm = findKnownNameIn(text, customers, vendors, products);
+  let _complaint = false;
+  if (/왜|어째서|나오는거|뭐야|뭔데|이상해|이상하/.test(t) || nm && /아니/.test(t) && !/\d|개|박스|kg|키로|킬로/.test(t)) {
+    nm = "";
+    _complaint = true;
+  }
+  if (nm && d.name && d.name.replace(/\s/g, "") !== nm.replace(/\s/g, "")) {
+    const _rest = text.split(nm).join(" ").replace(/\s/g, "");
+    const _hasOther = !!weightIn(text) || /\d/.test(_rest) || !!parseDate(text, today) || /(개|박스|봉|팩|근|망|판|kg|키로|킬로|빼|삭제|제외|추가|주문)/.test(_rest);
+    const _wantsSwitch = /변경|바꿔|바꾸|으로해|로해|님으로|주문자|말고|아니고/.test(_rest);
+    if (!_hasOther && !_wantsSwitch) {
+      return { draft: d, captured: true, reply: `주문자는 지금 ${d.name} 님이에요. ${nm} 님으로 바꾸려면 "${nm} 님으로 변경"이라고 말씀해 주세요. 아니면 상품·수량을 이어서 말씀하세요.` };
+    }
+  }
+  if (_complaint) {
+    return { draft: d, captured: true, reply: `죄송해요. 주문자는 ${d.name || "아직 정해지지 않았"}${d.name ? " 님 그대로 둘게요" : "어요"}. ${d.name ? "상품과 수량을 말씀해 주세요." : "누구 주문인지 다시 말씀해 주세요."}` };
+  }
   if (nm) {
     const mp = matchPerson(nm, customers, vendors);
     d.name = mp.name;
@@ -1124,6 +1140,35 @@ function applyOrderUtterance(draft, text, ctx) {
     d.customerId = mp.customerId || null;
     if (mp.vendorId) d.vendorId = mp.vendorId;
     captured = true;
+  }
+  let _segRemoved = false;
+  let _textNoRm = text;
+  if (/빼|삭제|제외|없애/.test(t)) {
+    const _segs = String(text).split(/[,，、]|그리고|하고|이랑|랑\s/);
+    const _keep = [];
+    const _core = (x) => String(x || "").replace(new RegExp(WEIGHT_RE, "g"), "").replace(/(\d+|한|두|세|네|다섯|여섯)\s*(?:개|박스|봉|팩|근|망|줄|판)/g, "").replace(/빼줘|빼주세요|빼고|빼요|빼|삭제해줘|삭제해|삭제|제외해줘|제외|없애줘|없애|난|은|는|을|를|좀|도|만|하나|한개|줘|주세요|요/g, "").replace(/[\s\d]/g, "");
+    for (const sg of _segs) {
+      if (!/빼|삭제|제외|없애/.test(sg.replace(/\s/g, ""))) { _keep.push(sg); continue; }
+      const c = _core(sg);
+      if (c.length < 1) continue;
+      let bestIdx = -1, bestS = 0;
+      d.items.forEach((it, ix) => {
+        const ic = _core(it.name);
+        if (!ic) return;
+        let sc = ic.includes(c) || c.includes(ic) ? 1 : (typeof simJamo === "function" ? simJamo(c, ic) : 0);
+        if (sc > bestS) { bestS = sc; bestIdx = ix; }
+      });
+      if (bestIdx >= 0 && bestS >= 0.45) {
+        const gone = d.items.splice(bestIdx, 1)[0];
+        if (gone && gone.productId) removedIds.add(gone.productId);
+        _segRemoved = true;
+        captured = true;
+      } else {
+        captured = true;
+        _segRemoved = true;
+      }
+    }
+    _textNoRm = _keep.join(", ");
   }
   if (/빼|삭제|제외|없애/.test(t)) {
     for (const p of products || []) if (p && p.name && t.includes(p.name.replace(/\s/g, ""))) {
@@ -1139,7 +1184,7 @@ function applyOrderUtterance(draft, text, ctx) {
       }
     }
   }
-  let itemText = text;
+  let itemText = _textNoRm;
   if (nm) {
     itemText = itemText.split(nm).join(" ");
   }
@@ -2341,7 +2386,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v254 (거래처+주문 말하면 주문 시작·할께 인식)";
+const APP_BUILD = "v255 (빼기 정확도·엉뚱한 이름 방지·없는 상품 삭제 방지)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8636,9 +8681,10 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       setInterim("\u23F3 \uC778\uC2DD \uC911\u2026");
       let text = "";
       let failed = false;
+      let vocab = [];
       try {
         const b64 = hiResEncodeWav16k(cap.chunks, rate);
-        const vocab = hiResBuildVocab({ vendors, customers, products });
+        vocab = hiResBuildVocab({ vendors, customers, products });
         const key = hiResKey();
         try {
           text = await geminiTranscribeWav(b64, vocab, key);
@@ -8656,6 +8702,10 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       if (isStale()) return;
       setInterim("");
       if (text && isRecentEcho(text)) text = "";
+      if (text && cap.speechMs < 450) {
+        const _tn = text.replace(/[\s.,!?]/g, "");
+        if (vocab.some((v) => String(v).replace(/\s/g, "") === _tn)) text = "";
+      }
       if (failed) {
         setTimeout(() => { if (!isStale() && phaseRef.current === "listening") beginListening(); }, 2800);
         return;
@@ -9749,7 +9799,8 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       };
       const hasProdName = (products || []).some((p) => p && nameInText(p.name)) || (cur.items || []).some((it) => nameInText(it.name));
       const incIntent = /(더넣|더줘|더담|더주문|하나더|한개더|두개더|세개더|조금더|더시켜|늘려|늘리|추가)/.test(t) && !/빼|줄|삭제|덜|없애/.test(t);
-      const decIntent = /(빼|줄여|줄이|덜어|덜|내려|적게)/.test(t);
+      const _multiSeg = /[,，、]|그리고|하고/.test(String(text || ""));
+      const decIntent = !_multiSeg && /(줄여|줄이|덜어|덜|내려|적게)/.test(t) || !_multiSeg && /빼/.test(t) && /(\d|한개|하나|두개|세개|네개|다섯개|한박스|두박스)/.test(t);
       const numMap = { \uD55C: 1, \uD558\uB098: 1, \uD55C\uAC1C: 1, \uB450: 2, \uB458: 2, \uB450\uAC1C: 2, \uC138: 3, \uC14B: 3, \uC138\uAC1C: 3, \uB124: 4, \uB137: 4, \uB124\uAC1C: 4, \uB2E4\uC12F: 5, \uB2E4\uC12F\uAC1C: 5 };
       const numFrom = (s) => {
         const m = s.match(/(\d+)/);
@@ -9787,7 +9838,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         }
       }
     }
-    if (/(빼|삭제|제외|없애|지워|빼고|빼줘|빼주|취소)/.test(t) && (cur.items || []).length) {
+    if (/(빼|삭제|제외|없애|지워|빼고|빼줘|빼주|취소)/.test(t) && (cur.items || []).length && !/[,，、]|그리고|하고/.test(String(text || ""))) {
       const clearAll = /(전부|전체|모두|모조리|싹다|다빼|다삭제|전부삭제|모두삭제|전부빼|모두빼|다지워|전체삭제|전체빼|전부취소|전체취소|모두취소)/.test(t);
       const stripRm = (s) => s.replace(/(빼주세요|빼줘|빼주|빼고|빼기|빼|삭제해줘|삭제해|삭제|제외해줘|제외해|제외|없애줘|없애|지워줘|지워|취소해줘|취소해|취소)/g, "").replace(/(모든|모두|전부|전체|모조리|싹|좀|주문|상품|그거|이거|저거|그것|이것|저것|것|거)/g, "").replace(new RegExp("(\\d+|\uD55C|\uB450|\uC138|\uB124|\uB2E4\uC12F|\uC5EC\uC12F|\uC77C\uACF1|\uC5EC\uB35F|\uC544\uD649|\uC5F4)\\s*(?:" + COUNT_UNIT + ")", "g"), "").replace(/\d+개/g, "");
       const coreOf = (s) => String(s || "").replace(new RegExp(WEIGHT_RE, "g"), "").replace(/[\s\d]/g, "").trim();
@@ -9803,7 +9854,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
           if (hit) removed.push(it);
           return !hit;
         });
-        if (!removed.length && cur.items.length === 1) {
+        if (!removed.length && cur.items.length === 1 && spokenCore.length < 2) {
           removed = cur.items.slice();
           kept = [];
         }
@@ -11329,7 +11380,7 @@ async function geminiTranscribeWav(b64, vocab, apiKey) {
   var _a, _b, _c, _d, _e;
   const hint = (vocab || []).join(", ");
   const prompt = "이 오디오는 한국의 농산물(쌈채소) 판매 사장님이 주문관리 앱에 대고 말한 음성입니다. 들리는 말을 한국어로 그대로 정확히 받아쓰세요.\n" +
-    "규칙: 받아쓴 문장만 출력(설명·따옴표·번역·마침표 추가 금지). 말이 없거나 잡음뿐이면 아무것도 출력하지 마세요. 들리지 않는 말을 지어내지 마세요.\n" +
+    "규칙: 받아쓴 문장만 출력(설명·따옴표·번역·마침표 추가 금지). 말이 없거나 잡음뿐이면 아무것도 출력하지 마세요. 들리지 않는 말을 지어내지 마세요. 이름 목록에서 임의로 골라 적지 마세요(실제로 그 이름을 말한 경우만 적기).\n" +
     "숫자·수량은 말한 그대로(예: 두 박스, 3키로). 아래는 자주 나오는 업체·고객·상품 이름입니다. 발음이 비슷하게 들리면 이 표기를 쓰되, 이 목록에 없는 말은 들린 대로 적으세요.\n" +
     "이름 목록: " + hint + "\n자주 쓰는 말: 주문, 발송, 입금대기, 결제완료, 발송준비, 박스, 키로, 업체, 고객, 취소, 등록, 목록, 보여줘";
   let model = await getGeminiSttModel(apiKey);
