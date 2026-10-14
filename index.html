@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 255;
+const APP_VERSION = 256;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2386,7 +2386,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v255 (빼기 정확도·엉뚱한 이름 방지·없는 상품 삭제 방지)";
+const APP_BUILD = "v256 (빈 데이터 불러오기 방지)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -11714,6 +11714,7 @@ function App() {
   const sessionStartRef = useRef(Date.now());
   const [diagLog, setDiagLog] = useState(null);
   const [isStaleVersion, setIsStaleVersion] = useState(false);
+  const emptyRetryRef = useRef(0);
   const [reloadTick, setReloadTick] = useState(0); // v233: 불러오기 실패 시 다시 구독
   const [updateAvailable, setUpdateAvailable] = useState(false);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
@@ -12514,7 +12515,8 @@ function App() {
     // 빈 배열이면 기존 주문 보호
     if (list.length === 0) {
       const prevGood = lastGoodDataRef.current;
-      const prevGoodCount = prevGood && prevGood.orders ? prevGood.orders.length : 0;
+      let prevGoodCount = prevGood && prevGood.orders ? prevGood.orders.length : 0;
+      try { if (!prevGoodCount && (emptyRetryRef.current || 0) < 4) prevGoodCount = (JSON.parse(localStorage.getItem("joassam_last_counts_" + DATA_DOC) || "{}").orders) || 0; } catch (e) {}
       if (prevGoodCount > 5) {
         // 이전에 주문이 있었는데 빈 배열이 오면 무시
         prevOrderCountRef.current = prevGoodCount;
@@ -12712,6 +12714,20 @@ function App() {
                       const sg = res[1].__sigs; res[1] = res[1].filter((c) => !(c && tombCL.has(c.id))); res[1].__sigs = sg;
                     }
                   } catch (e) {}
+                  // v256: 예전엔 주문이 있었는데 이번에 0건으로 불러와졌다면 '불러오기 실패'로 보고 적용하지 않고 다시 시도 (빈 화면으로 시작·저장 방지)
+                  try {
+                    let seenO = 0, seenC = 0;
+                    try { const lc = JSON.parse(localStorage.getItem("joassam_last_counts_" + DATA_DOC) || "{}"); seenO = lc.orders || 0; seenC = lc.customers || 0; } catch (e0) {}
+                    const gotO = allOrders.length, gotC = res[1] ? res[1].length : 0;
+                    const lastGoodO = ((lastGoodDataRef.current || {}).orders || []).length;
+                    const suspicious = (gotO === 0 && (seenO > 5 || lastGoodO > 5)) || (res[1] !== null && gotC === 0 && seenC > 5);
+                    if (suspicious && (emptyRetryRef.current || 0) < 4) {
+                      emptyRetryRef.current = (emptyRetryRef.current || 0) + 1;
+                      try { logDiag("empty_load_rejected", { gotO, gotC, seenO, seenC, n: emptyRetryRef.current }); } catch (e1) {}
+                      throw new Error("empty_load_suspicious");
+                    }
+                    emptyRetryRef.current = 0;
+                  } catch (e2) { if (e2 && e2.message === "empty_load_suspicious") throw e2; }
                   if (res[0] !== null || archOrders.length > 0) {
                     applyOrdersArray(allOrders.length > 0 ? allOrders : ordOrders);
                   }
