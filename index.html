@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 259;
+const APP_VERSION = 260;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2386,7 +2386,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v259 (소음에 덜 민감·인터넷 느릴 때 빨리 전환·끼어들기 오작동 방지)";
+const APP_BUILD = "v260 (대화형 음성 주문 새로 구현: 주문 카드·정정·받는 사람·메모)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8097,6 +8097,1532 @@ null       : \uC774\uB3D9 \uBD88\uD544\uC694\uD55C \uC77C\uBC18 \uB300\uD654
   const stripped = cleaned.replace(/^[^{]*\{/, "").replace(/["']?\s*text\s*["']?\s*:\s*["']?/i, "").replace(/["']?\s*,?\s*["']?action["']?\s*:[\s\S]*$/i, "").replace(/[{}"]/g, "").trim();
   return { text: stripped || "\uB2E4\uC2DC \uB9D0\uC500\uD574 \uC8FC\uC138\uC694.", action: null };
 }
+// ===== VO2: 대화형 음성 주문 엔진 (v260) =====
+// 말 → 정규화 → 의도/항목 추출 → 등록된 DB(상품·고객·업체·지점)에서 후보 검색 → 현재 주문 상태에 '바뀐 것만' 반영 → 답변
+// 주문 상태는 문자열이 아니라 구조화된 객체로 관리하고, 애매하면 추측하지 않고 질문함.
+var VO2 = (function () {
+  "use strict";
+  // ---------- 한글 자모 유사도 ----------
+  var CHO = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ";
+  var JUNG = "ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ";
+  var JONG = " ㄱㄲㄳㄴㄵㄶㄷㄹㄺㄻㄼㄽㄾㄿㅀㅁㅂㅄㅅㅆㅇㅈㅊㅋㅌㅍㅎ";
+  function jamo(s) {
+    var out = [];
+    s = String(s || "");
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if (c >= 0xac00 && c <= 0xd7a3) {
+        var k = c - 0xac00;
+        out.push(CHO[Math.floor(k / 588)]);
+        out.push(JUNG[Math.floor((k % 588) / 28)]);
+        var j = k % 28;
+        if (j) out.push(JONG[j]);
+      } else if (!/\s/.test(s[i])) out.push(s[i].toLowerCase());
+    }
+    return out;
+  }
+  function lev(a, b) {
+    var m = a.length, n = b.length;
+    if (!m) return n;
+    if (!n) return m;
+    var prev = new Array(n + 1), cur = new Array(n + 1);
+    for (var j = 0; j <= n; j++) prev[j] = j;
+    for (var i = 1; i <= m; i++) {
+      cur[0] = i;
+      for (var j2 = 1; j2 <= n; j2++) {
+        cur[j2] = Math.min(prev[j2] + 1, cur[j2 - 1] + 1, prev[j2 - 1] + (a[i - 1] === b[j2 - 1] ? 0 : 1));
+      }
+      var t = prev; prev = cur; cur = t;
+    }
+    return prev[n];
+  }
+  function sim(a, b) {
+    var A = jamo(a), B = jamo(b);
+    if (!A.length || !B.length) return 0;
+    return 1 - lev(A, B) / Math.max(A.length, B.length);
+  }
+  function ns(s) { return String(s || "").replace(/\s+/g, ""); }
+  function hasJong(word) {
+    var s = String(word || "").trim();
+    if (!s) return false;
+    var ch = s.charCodeAt(s.length - 1);
+    if (ch >= 0xac00 && ch <= 0xd7a3) return (ch - 0xac00) % 28 !== 0;
+    if (/[0-9]$/.test(s)) return /[013678]$/.test(s); // 영 일 삼 육 칠 팔 (공은 예외 무시)
+    if (/(kg|g)$/i.test(s)) return true; // 킬로그램/그램 → 받침 있음 (2kg을, 500g으로)
+    return false;
+  }
+  function eul(w) { return w + (hasJong(w) ? "을" : "를"); }
+  function eun(w) { return w + (hasJong(w) ? "은" : "는"); }
+  function ro(w) {
+    var s = String(w || "").trim();
+    var ch = s.charCodeAt(s.length - 1);
+    if (ch >= 0xac00 && ch <= 0xd7a3) { var j = (ch - 0xac00) % 28; return w + (j === 0 || j === 8 ? "로" : "으로"); }
+    return w + (hasJong(w) ? "으로" : "로");
+  }
+  function nim(w) { return w + "님"; }
+
+  // ---------- 숫자·단위 정규화 ----------
+  var NATIVE = { "열하나": 11, "열한": 11, "열둘": 12, "열두": 12, "열세": 13, "열셋": 13, "열네": 14, "열넷": 14, "열다섯": 15, "스물": 20, "스무": 20, "하나": 1, "한": 1, "둘": 2, "두": 2, "셋": 3, "세": 3, "석": 3, "넷": 4, "네": 4, "넉": 4, "다섯": 5, "여섯": 6, "일곱": 7, "여덟": 8, "아홉": 9, "열": 10 };
+  var SINO = { "일": 1, "이": 2, "삼": 3, "사": 4, "오": 5, "육": 6, "칠": 7, "팔": 8, "구": 9, "십": 10 };
+  var COUNT_UNITS = ["박스", "상자", "봉지", "봉", "팩", "단", "묶음", "망", "판", "근", "통", "세트", "개", "box"];
+  var COUNT_UNIT_RE = "박스|상자|봉지|봉|팩|단|묶음|망|판|근|통|세트|개|box";
+  var NATIVE_RE = Object.keys(NATIVE).sort(function (a, b) { return b.length - a.length; }).join("|");
+  function normUnitWord(u) {
+    if (/^(키로그램|킬로그램|키로그람|킬로그람|키로|킬로|kg)$/i.test(u)) return "kg";
+    if (/^(그램|그람|g)$/i.test(u)) return "g";
+    if (u === "상자" || /^box$/i.test(u)) return "박스";
+    if (u === "봉지") return "봉";
+    return u;
+  }
+  function normalize(text) {
+    var t = " " + String(text || "").replace(/(\d)\.(\d)/g, "$1\u2024$2").replace(/[.?!~]+/g, " ").replace(/\u2024/g, ".").replace(/[,，、]/g, " , ") + " ";
+    t = t.replace(/(\d),(\d{3})/g, "$1$2");
+    // 반 키로 → 0.5kg
+    t = t.replace(/반\s*(키로그램|킬로그램|키로|킬로|kg)/gi, " 0.5kg ");
+    // 숫자 + 무게 단위
+    t = t.replace(/(\d+(?:\.\d+)?)\s*(키로그램|킬로그램|키로그람|킬로그람|키로|킬로|kg|KG|Kg)/g, function (_, n) { return " " + n + "kg "; });
+    t = t.replace(/(\d+(?:\.\d+)?)\s*(그램|그람|g)(?![a-z가-힣])/g, function (_, n) { return " " + n + "g "; });
+    // 고유어 수사 + 단위 (두 박스, 네 개, 두 키로)
+    t = t.replace(new RegExp("(^|[\\s,])(" + NATIVE_RE + ")\\s*(키로그램|킬로그램|키로|킬로|kg|그램|" + COUNT_UNIT_RE + ")(?=[\\s,]|[가-힣])", "g"), function (_, pre, w, u) {
+      return pre + NATIVE[w] + normUnitWord(u) + " ";
+    });
+    // 한자어 수사 + 키로/킬로 (이 키로, 삼 키로) — 앞에 공백이 있을 때만
+    t = t.replace(/(^|\s)(일|이|삼|사|오|육|칠|팔|구|십)\s*(키로|킬로)(?=\s|[가-힣])/g, function (_, pre, w) { return pre + SINO[w] + "kg "; });
+    // 숫자 + 개수 단위
+    t = t.replace(new RegExp("(\\d+)\\s*(" + COUNT_UNIT_RE + ")(?![가-힣]*(?:점|원))", "g"), function (_, n, u) { return " " + n + normUnitWord(u) + " "; });
+    // 단독 수사: 하나 더, 로메인 하나 빼, 두 개 빼 (위에서 처리 안 된 것)
+    t = t.replace(/(^|\s)(하나|둘|셋|넷|다섯)(?=\s|$|더|만|빼|추가|씩)/g, function (_, pre, w) { return pre + NATIVE[w] + "개 "; });
+    t = t.replace(/(\d+(?:kg|g|박스|봉|팩|단|묶음|망|판|근|통|세트|개))(하고|이랑|랑|과|와|에|도|씩|만|은|는|이|가|을|를|으로|로|요|야|이요|이야)(?=\s|$)/g, "$1 $2 ");
+    t = t.replace(/(kg|g|박스|봉|팩|단|묶음|망|판|근|통|세트|개)\s+(하고|이랑|랑)(?=\s)/g, "$1 ,");
+    return t.replace(/\s+/g, " ").trim();
+  }
+  var QTY_RE = /(\d+(?:\.\d+)?)(kg|g|박스|봉|팩|단|묶음|망|판|근|통|세트|개)(?![a-z])/g;
+  function gramsOf(v, u) { return u === "kg" ? Math.round(v * 1000) : u === "g" ? Math.round(v) : null; }
+  function fmtWeight(g) {
+    if (g == null) return "";
+    if (g >= 1000 && g % 100 === 0) return (g / 1000).toString() + "kg";
+    return g + "g";
+  }
+  function parseQuantities(seg) {
+    var out = [];
+    var m;
+    QTY_RE.lastIndex = 0;
+    while ((m = QTY_RE.exec(seg))) {
+      var v = parseFloat(m[1]), u = m[2];
+      var before = seg.slice(Math.max(0, m.index - 6), m.index);
+      var after = seg.slice(m.index + m[0].length, m.index + m[0].length + 6);
+      var cond = null;
+      if (/최소|적어도/.test(before) || /^\s*이상/.test(after)) cond = "MIN";
+      else if (/최대/.test(before) || /^\s*(이하|까지|미만)/.test(after)) cond = "MAX";
+      else if (/^\s*(정도|쯤|가량|내외|안팎)/.test(after) || /대략|약\s*$/.test(before)) cond = "TARGET";
+      var isW = u === "kg" || u === "g";
+      out.push({ value: v, unit: u, kind: isW ? "weight" : "count", grams: isW ? gramsOf(v, u) : null, cond: cond, index: m.index, end: m.index + m[0].length, text: m[0] });
+    }
+    return out;
+  }
+
+  // ---------- 조사 떼기 ----------
+  var SUFFIXES = ["이에요", "이예요", "예요", "에요", "이라고", "라고", "이야", "이요", "이고", "이랑", "한테서", "한테", "에게", "께서", "께", "에서", "으로", "고객님", "고객", "씨", "님", "이가", "이는", "이", "가", "은", "는", "을", "를", "도", "만", "로", "야", "요", "랑", "과", "와", "의", "에"];
+  function stripParticles(tok) {
+    var s = String(tok || "");
+    var changed = true, guard = 0;
+    while (changed && guard++ < 4) {
+      changed = false;
+      for (var i = 0; i < SUFFIXES.length; i++) {
+        var suf = SUFFIXES[i];
+        if (s.length - suf.length >= 2 && s.slice(-suf.length) === suf) { s = s.slice(0, -suf.length); changed = true; break; }
+      }
+    }
+    return s;
+  }
+  function variants(tok) {
+    // 조사를 하나씩 떼어낸 모든 형태 (이름 끝 글자가 조사처럼 생긴 경우도 살리기 위해)
+    var out = [tok];
+    var s = tok, guard = 0;
+    while (guard++ < 4) {
+      var hit = false;
+      for (var i = 0; i < SUFFIXES.length; i++) {
+        var suf = SUFFIXES[i];
+        if (s.length - suf.length >= 2 && s.slice(-suf.length) === suf) { s = s.slice(0, -suf.length); out.push(s); hit = true; break; }
+      }
+      if (!hit) break;
+    }
+    return out;
+  }
+
+  // ---------- DB 색인 ----------
+  function splitCompanyBranch(name) {
+    var n = String(name || "").trim();
+    var m = n.match(/^(.*?)[\s(（]*([가-힣A-Za-z0-9]{1,10}점)[)）]?$/);
+    if (m && ns(m[1]).length >= 2 && !/^(본|지)$/.test(m[2])) return { company: m[1].replace(/[\s(（]+$/, "").trim(), branch: m[2] };
+    return { company: n, branch: "" };
+  }
+  function companyAliases(company) {
+    var c = ns(company);
+    var out = [c];
+    var bare = c.replace(/\(주\)|㈜|주식회사|\(유\)|유한회사|농업회사법인|영농조합법인/g, "");
+    if (bare && bare !== c) out.push(bare);
+    var noCafe = bare.replace(/(카페|베이커리카페)$/, "");
+    if (noCafe && noCafe.length >= 2 && out.indexOf(noCafe) < 0) out.push(noCafe);
+    var noBakery = noCafe.replace(/(베이커리|제과|빵집)$/, "");
+    if (noBakery && noBakery.length >= 3 && out.indexOf(noBakery) < 0) out.push(noBakery);
+    return out;
+  }
+  function buildIndex(db) {
+    db = db || {};
+    var products = (db.products || []).filter(function (p) { return p && p.name; }).map(function (p) {
+      var name = String(p.name).trim();
+      var wm = name.match(/(\d+(?:\.\d+)?)\s*(kg|키로|킬로|g|그램)/i);
+      var grams = wm ? gramsOf(parseFloat(wm[1]), normUnitWord(wm[2].toLowerCase())) : null;
+      var base = name.replace(/(\d+(?:\.\d+)?)\s*(kg|키로|킬로|g|그램)/gi, "").replace(/[\/·]/g, " ").replace(/\s+/g, " ").trim();
+      return { id: p.id, name: name, base: base || name, baseNS: ns(base || name), grams: grams, raw: p };
+    });
+    var groups = {};
+    products.forEach(function (p) { (groups[p.baseNS] = groups[p.baseNS] || { base: p.base, baseNS: p.baseNS, skus: [] }).skus.push(p); });
+    // 상품 별칭: 내장 별칭 + 사장님이 승인한 사전 + 상품 자체의 aliases 필드
+    var prodAlias = {};
+    var addPA = function (from, toBase) { var f = ns(from); if (f.length >= 2 && groups[toBase] && !groups[f]) prodAlias[f] = toBase; };
+    var builtIn = db.productAliases || {};
+    Object.keys(builtIn).forEach(function (canon) {
+      var tb = Object.keys(groups).filter(function (b) { return b === ns(canon) || b.indexOf(ns(canon)) >= 0; });
+      if (tb.length === 1) (builtIn[canon] || []).forEach(function (a) { addPA(a, tb[0]); });
+    });
+    var learned = db.learnedAliases || {};
+    Object.keys(learned).forEach(function (from) {
+      var to = ns(learned[from]).replace(/(\d+(?:\.\d+)?)(kg|g)/g, "");
+      if (groups[to]) addPA(from, to);
+    });
+    products.forEach(function (p) { (p.raw.aliases || []).forEach(function (a) { addPA(a, p.baseNS); }); });
+    // 업체·지점
+    var vendors = (db.vendors || []).filter(function (v) { return v && v.name; }).map(function (v) {
+      var cb = splitCompanyBranch(v.name);
+      return { id: v.id, name: String(v.name).trim(), company: cb.company, companyNS: ns(cb.company), branch: cb.branch, branchNS: ns(cb.branch), phone: v.phone || "", address: v.address || "", aliases: (v.aliases || []).map(ns), raw: v };
+    });
+    var companies = {};
+    vendors.forEach(function (v) {
+      var c = companies[v.companyNS] = companies[v.companyNS] || { name: v.company, nameNS: v.companyNS, vendors: [], aliases: companyAliases(v.company) };
+      c.vendors.push(v);
+      v.aliases.forEach(function (a) { if (c.aliases.indexOf(a) < 0) c.aliases.push(a); });
+    });
+    Object.keys(learned).forEach(function (from) {
+      var to = ns(learned[from]);
+      if (companies[to] && companies[to].aliases.indexOf(ns(from)) < 0) companies[to].aliases.push(ns(from));
+    });
+    // 고객
+    var custByName = {};
+    var customers = (db.customers || []).filter(function (c) { return c && c.name; });
+    customers.forEach(function (c) { var k = ns(c.name); (custByName[k] = custByName[k] || []).push(c); });
+    var recent = {};
+    (db.orders || []).slice(-3000).forEach(function (o) {
+      var n = ns((o.recipient && o.recipient.name) || (o.sender && o.sender.name) || "");
+      if (n) recent[n] = (recent[n] || 0) + 1;
+    });
+    return { products: products, groups: groups, prodAlias: prodAlias, vendors: vendors, companies: companies, customers: customers, custByName: custByName, recent: recent };
+  }
+
+  // ---------- 후보 검색 ----------
+  function tokensOf(text) { return String(text || "").split(/\s+/).filter(Boolean); }
+  function isQtyTok(tok) { return /^\d/.test(tok) || tok === ","; }
+  // 상품 찾기: 1~3 어절 묶음을 DB 상품명(무게 제외)·별칭과 비교
+  function findProducts(text, idx) {
+    var toks = tokensOf(text);
+    var found = [];
+    var keys = Object.keys(idx.groups);
+    for (var i = 0; i < toks.length; i++) {
+      if (isQtyTok(toks[i])) continue;
+      for (var L = 3; L >= 1; L--) {
+        if (i + L > toks.length) continue;
+        var seg = toks.slice(i, i + L);
+        if (seg.some(isQtyTok)) continue;
+        var joined = seg.join("");
+        var vs = variants(joined);
+        var best = null;
+        for (var vi = 0; vi < vs.length; vi++) {
+          var w = vs[vi];
+          if (w.length < 2) continue;
+          if (idx.groups[w]) { best = { baseNS: w, score: 1, how: "exact" }; break; }
+          if (idx.prodAlias[w]) { best = { baseNS: idx.prodAlias[w], score: 0.97, how: "alias" }; break; }
+        }
+        if (!best) {
+          // 포함 관계(예: '채소' ⊂ '모듬쌈채소') — 여러 개면 애매함으로 표시
+          var w0 = vs[vs.length - 1];
+          if (w0.length >= 2 && L === 1) {
+            var cont = keys.filter(function (k) { return k.indexOf(w0) >= 0 && w0.length >= Math.min(3, k.length - 1); });
+            var cont2 = keys.filter(function (k) { return k.indexOf(w0) >= 0; });
+            if (cont.length === 1) best = { baseNS: cont[0], score: 0.85, how: "contains" };
+            else if (cont2.length >= 2 && w0.length >= 2) best = { ambiguous: cont2, score: 0.8, how: "contains-multi" };
+            else if (cont2.length === 1 && w0.length >= 2) best = { baseNS: cont2[0], score: 0.8, how: "contains" };
+          }
+        }
+        if (!best) {
+          var w1 = vs[vs.length - 1];
+          if (w1.length >= 2) {
+            var sc = [];
+            keys.forEach(function (k) {
+              if (Math.abs(k.length - w1.length) > 2) return;
+              var s = sim(w1, k);
+              if (s >= (w1.length <= 2 ? 0.9 : 0.75)) sc.push({ k: k, s: s });
+            });
+            Object.keys(idx.prodAlias).forEach(function (a) {
+              if (Math.abs(a.length - w1.length) > 1) return;
+              var s = sim(w1, a);
+              if (s >= 0.82) sc.push({ k: idx.prodAlias[a], s: s - 0.02 });
+            });
+            sc.sort(function (a, b) { return b.s - a.s; });
+            if (sc.length && (sc.length === 1 || sc[0].s - sc[1].s >= 0.06 || sc[0].k === sc[1].k)) best = { baseNS: sc[0].k, score: sc[0].s, how: "similar" };
+          }
+        }
+        if (best) {
+          found.push({ start: i, end: i + L, surface: seg.join(" "), baseNS: best.baseNS, ambiguous: best.ambiguous || null, score: best.score + L * 0.01, how: best.how });
+          i += L - 1;
+          break;
+        }
+      }
+    }
+    return found;
+  }
+  // 고객 찾기 (정확 일치 우선, 필요하면 비슷한 이름 후보)
+  function findPersons(text, idx, opts) {
+    opts = opts || {};
+    var toks = tokensOf(text);
+    var found = [];
+    for (var i = 0; i < toks.length; i++) {
+      if (isQtyTok(toks[i])) continue;
+      for (var L = 2; L >= 1; L--) {
+        if (i + L > toks.length) continue;
+        var seg = toks.slice(i, i + L);
+        if (seg.some(isQtyTok)) continue;
+        var vs = variants(seg.join(""));
+        var hit = null;
+        for (var vi = 0; vi < vs.length; vi++) {
+          var w = vs[vi];
+          if (w.length < 2 || w.length > 12) continue;
+          if (idx.custByName[w]) { hit = { nameNS: w, list: idx.custByName[w], exact: true }; break; }
+        }
+        if (hit) { found.push({ start: i, end: i + L, surface: seg.join(" "), nameNS: hit.nameNS, list: hit.list, exact: true }); i += L - 1; break; }
+      }
+    }
+    if (!found.length && opts.fuzzy) {
+      for (var i2 = 0; i2 < toks.length; i2++) {
+        if (isQtyTok(toks[i2])) continue;
+        var w2 = stripParticles(toks[i2]);
+        if (w2.length < 2 || w2.length > 5 || /^(받는|보내는|주문|아니|그거|사람|고객|업체|지점|전화|주소|메모|배송|번호)/.test(w2)) continue;
+        var cands = [];
+        Object.keys(idx.custByName).forEach(function (k) {
+          if (Math.abs(k.length - w2.length) > 1) return;
+          var s = sim(w2, k);
+          if (s >= 0.7) cands.push({ nameNS: k, s: s + Math.min(0.03, (idx.recent[k] || 0) * 0.005) });
+        });
+        cands.sort(function (a, b) { return b.s - a.s; });
+        if (cands.length) found.push({ start: i2, end: i2 + 1, surface: toks[i2], nameNS: cands[0].nameNS, list: idx.custByName[cands[0].nameNS], exact: false, candidates: cands.slice(0, 4) });
+      }
+    }
+    return found;
+  }
+  // 업체(회사)·지점 찾기
+  function findCompanies(text, idx) {
+    var toks = tokensOf(text);
+    var out = [];
+    var cos = Object.keys(idx.companies).map(function (k) { return idx.companies[k]; });
+    for (var i = 0; i < toks.length; i++) {
+      if (isQtyTok(toks[i])) continue;
+      for (var L = 4; L >= 1; L--) {
+        if (i + L > toks.length) continue;
+        var seg = toks.slice(i, i + L);
+        if (seg.some(isQtyTok)) continue;
+        var vs = variants(seg.join(""));
+        var best = null;
+        for (var vi = 0; vi < vs.length && !best; vi++) {
+          var w = vs[vi];
+          if (w.length < 2) continue;
+          // 업체+지점 전체 이름
+          for (var x = 0; x < idx.vendors.length; x++) {
+            var v = idx.vendors[x];
+            if (ns(v.name) === w || v.aliases.indexOf(w) >= 0) { best = { company: idx.companies[v.companyNS], vendor: v, score: 1 }; break; }
+          }
+          if (best) break;
+          for (var y = 0; y < cos.length; y++) {
+            if (cos[y].aliases.indexOf(w) >= 0) { best = { company: cos[y], score: 0.98 }; break; }
+          }
+        }
+        if (!best && L >= 1) {
+          var w1 = vs[vs.length - 1];
+          if (w1.length >= 3) {
+            var sc = [];
+            cos.forEach(function (c) {
+              c.aliases.forEach(function (a) {
+                if (a.length < 3) return;
+                var s = a.indexOf(w1) === 0 && w1.length >= 4 ? 0.9 : sim(w1, a);
+                if (s >= 0.78) sc.push({ c: c, s: s });
+              });
+            });
+            sc.sort(function (a, b) { return b.s - a.s; });
+            if (sc.length && (sc.length === 1 || sc[0].s - sc[1].s >= 0.05 || sc[0].c === sc[1].c)) best = { company: sc[0].c, score: sc[0].s };
+          }
+        }
+        if (best) {
+          out.push({ start: i, end: i + L, surface: seg.join(" "), company: best.company, vendor: best.vendor || null, score: best.score });
+          i += L - 1;
+          break;
+        }
+      }
+    }
+    return out;
+  }
+  function findBranches(text, idx, company) {
+    var toks = tokensOf(text);
+    var pool = company ? company.vendors.filter(function (v) { return v.branch; }) : idx.vendors.filter(function (v) { return v.branch; });
+    if (!pool.length) return [];
+    var out = [];
+    for (var i = 0; i < toks.length; i++) {
+      var vs = variants(toks[i]);
+      var w = vs[vs.length - 1];
+      var raw = vs[0];
+      var looksBranch = /점$/.test(w) || /점/.test(raw) || /(공장|지점|점이야|점으로)/.test(raw);
+      var sc = [];
+      pool.forEach(function (v) {
+        var b = v.branchNS, bs = b.replace(/점$/, "");
+        var s = 0;
+        if (w === b || w === bs) s = 1;
+        else if (bs.length >= 2 && w.indexOf(bs) === 0) s = 0.92;
+        else if (looksBranch) s = sim(w, b);
+        else if (w.length >= 2 && w.length <= bs.length + 1) s = sim(w, bs) - 0.08;
+        if (s >= 0.66) sc.push({ v: v, s: s });
+      });
+      sc.sort(function (a, b) { return b.s - a.s; });
+      if (sc.length && (sc.length === 1 || sc[0].s - sc[1].s >= 0.08)) out.push({ start: i, end: i + 1, surface: toks[i], vendor: sc[0].v, score: sc[0].s });
+      else if (sc.length >= 2 && looksBranch) out.push({ start: i, end: i + 1, surface: toks[i], ambiguous: sc.slice(0, 4).map(function (x) { return x.v; }), score: sc[0].s });
+    }
+    return out;
+  }
+
+  // ---------- 주문 상태 ----------
+  function newState() {
+    return {
+      status: "collecting", // collecting | confirming | confirmed | cancelled
+      company: null, // { name, nameNS }
+      vendor: null, // 지점까지 정해진 업체 레코드 { id, name, company, branch, phone, address }
+      orderer: null, // { name, phone, customerId, address }
+      recipient: null, // { name, phone, address, recipientId, kind } (없으면 주문자/업체와 같음)
+      items: [], // OrderItem
+      shipping: { memo: "", senderName: "", senderAuto: true, addressOverride: null, phoneOverride: null },
+      reserveDate: "",
+      ctx: { lastItemKey: null, lastTurnKeys: [], lastPersonRole: null, pending: null, turn: 0 },
+      log: []
+    };
+  }
+  function clone(o) { return JSON.parse(JSON.stringify(o)); }
+  var _seq = 0;
+  function itemKey() { return "i" + Date.now().toString(36) + (++_seq); }
+  function itemLabel(it, idx) {
+    // 등록된 상품 이름(무게 포함)을 그대로 보여줌 → 어떤 상품이 들어갔는지 헷갈리지 않게
+    var name = it.productName || it.baseName;
+    var explicitCount = it.countGiven || it.quantity !== 1 || (it.quantityUnit && it.quantityUnit !== "개");
+    var cond = it.condition ? " (" + (it.condition === "MIN" ? "최소 " : it.condition === "MAX" ? "최대 " : "약 ") + fmtWeight(it.condGrams) + ")" : "";
+    if (!explicitCount && it.weightGrams) return name + cond;
+    return name + " " + it.quantity + (it.quantityUnit || "개") + cond;
+  }
+  function itemsText(items, idx) { return items.map(function (it) { return itemLabel(it, idx); }).join(", "); }
+  function effRecipient(st) {
+    var r = st.recipient;
+    var base = r ? { name: r.name, phone: r.phone || "", address: r.address || "", id: r.recipientId || null, kind: r.kind || "customer" }
+      : st.vendor ? { name: st.vendor.name, phone: st.vendor.phone || "", address: st.vendor.address || "", id: st.vendor.id, kind: "vendor" }
+      : st.orderer ? { name: st.orderer.name, phone: st.orderer.phone || "", address: st.orderer.address || "", id: st.orderer.customerId || null, kind: "customer" }
+      : null;
+    if (!base) return null;
+    if (st.shipping.addressOverride) base.address = st.shipping.addressOverride;
+    if (st.shipping.phoneOverride) base.phone = st.shipping.phoneOverride;
+    return base;
+  }
+  function senderNameOf(st) {
+    return st.shipping.senderName || (st.orderer && st.orderer.name) || (st.vendor && st.vendor.name) || "";
+  }
+  function deliveryMemoText(st) {
+    var parts = [];
+    var rec = effRecipient(st);
+    var snd = senderNameOf(st);
+    var differ = rec && snd && ns(rec.name) !== ns(snd);
+    if (st.shipping.senderName || (st.shipping.senderAuto && differ && st.orderer)) {
+      if (snd) parts.push("보내는 분: " + snd);
+    }
+    if (st.shipping.memo) parts.push(st.shipping.memo);
+    return parts.join(" / ");
+  }
+  function summaryLines(st, idx) {
+    var L = [];
+    if (st.vendor || st.company) {
+      L.push("업체: " + (st.vendor ? st.vendor.company : st.company.name));
+      if (st.vendor && st.vendor.branch) L.push("지점: " + st.vendor.branch);
+    }
+    if (st.orderer) L.push("주문자: " + st.orderer.name);
+    var rec = effRecipient(st);
+    if (rec) L.push("받는 사람: " + rec.name);
+    L.push("상품: " + (st.items.length ? itemsText(st.items, idx) : "(없음)"));
+    if (rec) {
+      L.push("배송지: " + (rec.address || "(주소 없음)"));
+      L.push("전화번호: " + (rec.phone || "(없음)"));
+    }
+    var memo = deliveryMemoText(st);
+    if (memo) L.push("배송 메모: " + memo);
+    if (st.reserveDate) L.push("발송일: " + st.reserveDate);
+    return L;
+  }
+  // 기존 앱의 주문 생성(createVoiceOrder)에 넘길 형태로 변환 — 기존 데이터 형식 그대로 사용
+  function toLegacyOrder(st) {
+    var rec = effRecipient(st);
+    var senderName = senderNameOf(st);
+    var senderPhone = (st.orderer && st.orderer.phone) || (st.vendor && st.vendor.phone) || "";
+    var notes = st.items.filter(function (it) { return it.condition || it.note; }).map(function (it) {
+      return it.baseName + " " + (it.condition ? (it.condition === "MIN" ? "최소 " : it.condition === "MAX" ? "최대 " : "약 ") + fmtWeight(it.condGrams) : "") + (it.note ? " " + it.note : "");
+    });
+    var vo = {
+      name: senderName || (rec && rec.name) || "",
+      phone: senderPhone,
+      address: (rec && rec.address) || "",
+      customerId: (st.recipient && st.recipient.kind !== "vendor" && st.recipient.recipientId) || (st.orderer && st.orderer.customerId) || null,
+      vendorId: st.vendor ? st.vendor.id : "",
+      items: st.items.map(function (it) { return { productId: it.productId, name: it.productName, qty: it.quantity }; }),
+      reserveDate: st.reserveDate || "",
+      deliveryMessage: deliveryMemoText(st),
+      memo: notes.join(" / "),
+      forceNew: true,
+      _senderName: senderName,
+      _senderPhone: senderPhone,
+      _recipientName: rec ? rec.name : "",
+      _recipientPhone: rec ? rec.phone : "",
+      _recipientAddress: rec ? rec.address : ""
+    };
+    return vo;
+  }
+
+  // ---------- 의도 단서 ----------
+  var RX = {
+    start: /(주문\s*(할게|할께|할래|할거|하려|합니다|해요|이요|입니다|받아|시작|넣을게|넣을께|들어갑니다)|주문이야|주문\s*요$)/,
+    cancel: /(주문\s*취소|취소\s*할게|취소해\s*줘|그만\s*할|그만해|관둬|관두|중단|안\s*할래|주문\s*안\s*해)/,
+    clear: /(처음부터|다\s*지워|전부\s*지워|싹\s*지워|모두\s*지워|리셋|새로\s*할게|다시\s*할게)/,
+    confirm: /(그대로|이대로|확정|주문\s*해|주문해\s*줘|주문\s*넣어|등록\s*해|등록해|접수\s*해|그렇게\s*해|그렇게\s*해\s*줘|좋아|오케이|오케|ok|맞아|맞습니다|응|네|예|어\s*그래|그래)/i,
+    no: /^(아니|아니요|아니오|아냐|노|안\s*돼|틀려)/,
+    del: /(빼|삭제|취소|없애|제외|지워)/,
+    more: /(더|추가)/,
+    change: /(바꿔|바꾸|변경|수정|로\s*해|으로\s*해|로\s*할|으로\s*할|아니|말고|아니고|아니라|이야|야$|였어|했잖아|라고\s*했)/,
+    correction: /(아니|말고|아니고|아니라|잘못|틀렸|했잖아|라고\s*했)/,
+    replace: /\s(말고|아니고|아니라|대신에?|가\s*아니라|이\s*아니라|가\s*아니고|이\s*아니고)\s/,
+    that: /(그거|그것|그건|방금|아까|마지막|그\s*상품|이거)/,
+    recipient: /(받는\s*(사람|분|이)|받으실\s*분|받으시는\s*분|수령인|수취인|한테|에게|께\s*보내|께\s*배송|앞으로\s*보내|로\s*보내|으로\s*보내|로\s*배송|으로\s*배송)/,
+    sender: /(보내는\s*(분|사람|이)|보낸\s*(분|사람))/,
+    orderer: /(주문자|주문하는\s*(분|사람)|주문\s*하신\s*분)/,
+    memo: /(메모|배송\s*메시지|요청\s*사항|요청사항|문\s*앞|경비실|부재\s*시|부재시|배송\s*전|도착\s*전|파손|깨지|조심|택배함|무인함)/,
+    address: /(주소|배송지)/,
+    phone: /(전화|번호|연락처|핸드폰|휴대폰)/,
+    registered: /(등록된|원래|기존|저장된|그대로|같은)/,
+    other: /(다른\s*(데|곳|주소)|다른데|바꿔|변경|새\s*주소)/
+  };
+
+  // ---------- 핵심: 한 번의 말 처리 ----------
+  function handle(stIn, utterance, db, opts) {
+    opts = opts || {};
+    var idx = db && db.__vo2idx ? db.__vo2idx : buildIndex(db);
+    var st = stIn ? clone(stIn) : newState();
+    st.ctx.turn = (st.ctx.turn || 0) + 1;
+    var raw = String(utterance || "").trim();
+    var norm = normalize(raw);
+    var tNS = ns(norm);
+    var R = { changes: [], asks: [], notes: [] };
+    var res = { state: st, reply: "", understood: false, confirmed: false, cancelled: false, order: null, summary: null };
+    var logChange = function (field, before, after) {
+      st.log.push({ t: Date.now(), utter: raw, field: field, before: before, after: after });
+      if (st.log.length > 80) st.log.shift();
+    };
+    if (!raw) { res.reply = ""; return res; }
+
+    // 0) 확정된 주문은 함부로 바꾸지 않음
+    if (st.status === "confirmed") {
+      if (RX.start.test(norm)) { st = newState(); res.state = st; }
+      else {
+        res.understood = true;
+        res.reply = "이미 주문이 확정되었습니다. 바꾸시려면 주문 목록에서 수정하시거나, 새 주문은 '주문할게'라고 말씀해 주세요.";
+        return res;
+      }
+    }
+
+    // 1) 확인 대기 중인 질문에 대한 답
+    if (st.ctx.pending) {
+      var pr = resolvePending(st, norm, raw, idx, R, logChange);
+      if (pr === "handled") { popQueue(st, R); return finish(st, res, R, idx, raw); }
+      if (pr === "cancel-pending") st.ctx.pending = null;
+    }
+
+    // 1-1) 불평·질문("왜 ~가 나와?")은 주문 내용으로 처리하지 않음
+    if (/(왜|어째서|뭐야|뭔데|이상해|이상하|나오는\s*거|나오냐|나와\?)/.test(norm) && !RX.del.test(norm)) {
+      if (st.ctx.pending) { st.ctx.pending = null; st.ctx.queue = []; }
+      res.understood = true; res.state = st; res.summary = summaryLines(st, idx);
+      res.reply = "죄송해요, 제가 잘못 알아들었나 봐요. 지금 주문은 " + (summaryLines(st, idx).filter(function (l) { return /^(업체|지점|주문자|받는 사람|상품)/.test(l); }).join(", ") || "비어 있어요") + ". 고칠 부분을 말씀해 주세요.";
+      return res;
+    }
+    // 2) 전체 취소 / 처음부터
+    var prods0 = findProducts(norm, idx);
+    if (RX.cancel.test(norm) && !prods0.length && !/취소\s*(안|하지\s*마|말아|말고|아니)/.test(norm)) {
+      res.understood = true; res.cancelled = true;
+      st.status = "cancelled";
+      logChange("status", "collecting", "cancelled");
+      res.reply = "주문을 취소했어요.";
+      res.state = st;
+      return res;
+    }
+    if (RX.clear.test(norm) && !prods0.length) {
+      var keepCompany = null;
+      logChange("clear", itemsText(st.items, idx), "");
+      var fresh = newState();
+      fresh.ctx.turn = st.ctx.turn;
+      fresh.log = st.log;
+      st = fresh; res.state = st;
+      res.understood = true;
+      res.reply = "네, 처음부터 다시 할게요. 누구 주문인가요?";
+      return res;
+    }
+
+    // 3) 날짜
+    if (typeof opts.parseDate === "function") {
+      try { var dt = opts.parseDate(raw); if (dt && dt !== st.reserveDate) { logChange("reserveDate", st.reserveDate, dt); st.reserveDate = dt; R.changes.push("발송일을 " + dt + "로 정했습니다"); } } catch (e) {}
+    }
+
+    // 4) 절 나누기 (쉼표·그리고·하고)
+    var clauses = norm.split(/\s,\s|\s,|,\s|,|\s그리고\s|\s또\s/).map(function (s) { return s.trim(); }).filter(Boolean);
+    if (!clauses.length) clauses = [norm];
+    st.ctx.lastTurnKeys = [];
+    var anyPersonOrCompany = false;
+    for (var ci = 0; ci < clauses.length; ci++) {
+      var c = clauses[ci];
+      var r1 = handlePeopleAndCompany(st, c, idx, R, logChange, ci === 0 ? norm : c);
+      if (r1) anyPersonOrCompany = true;
+      handleShipping(st, c, idx, R, logChange);
+      handleItems(st, c, idx, R, logChange, clauses.length > 1);
+    }
+
+    // 5) 확정 의사
+    var touched = R.changes.length > 0 || R.asks.length > 0 || (R._added && R._added.length > 0) || R.notes.length > 0;
+    if (!touched && RX.confirm.test(norm) && !RX.no.test(norm)) {
+      return confirmFlow(st, res, R, idx, raw);
+    }
+    if (touched && st.status === "confirming") st.status = "collecting";
+    popQueue(st, R);
+
+    // 6) 주문 시작만 말한 경우
+    if (!touched && RX.start.test(norm)) {
+      R.changes.push("네, 주문을 시작할게요");
+    }
+    return finish(st, res, R, idx, raw);
+  }
+
+  function finish(st, res, R, idx, raw) {
+    if (R._added && R._added.length) {
+      var addTxt = eul(R._added.join(", ")) + " 추가했습니다";
+      var at = R._addAt != null ? R._addAt : R.changes.length;
+      R.changes.splice(at, 0, addTxt);
+      R._added = [];
+    }
+    res.state = st;
+    res.understood = R.changes.length > 0 || R.asks.length > 0 || R.notes.length > 0;
+    var parts = [];
+    if (R.changes.length) parts.push(R.changes.join(". ") + ".");
+    if (R.notes.length) parts.push(R.notes.join(" "));
+    if (R.asks.length) parts.push(R.asks[0]);
+    else if (res.understood) {
+      var np = nextPrompt(st, idx);
+      if (np) parts.push(np);
+    }
+    res.reply = parts.join(" ").replace(/\.\./g, ".").trim();
+    res.summary = summaryLines(st, idx);
+    return res;
+  }
+  function nextPrompt(st, idx) {
+    if (st.ctx.pending) return "";
+    if (!st.vendor && !st.orderer && !st.company) return "누구 주문인가요?";
+    if (st.company && !st.vendor) return askBranch(st, st.company);
+    if (!st.items.length) return "어떤 상품을 얼마나 드릴까요?";
+    return "";
+  }
+  function askBranch(st, company) {
+    var vs = company.vendors.filter(function (v) { return v.branch; });
+    if (!vs.length) return "";
+    st.ctx.pending = { type: "branch", companyNS: company.nameNS, options: vs.map(function (v) { return v.id; }) };
+    return "어느 지점인가요? " + vs.slice(0, 6).map(function (v) { return v.branch; }).join(", ") + (vs.length > 6 ? " 등" : "") + ".";
+  }
+  function confirmFlow(st, res, R, idx, raw) {
+    if (st.ctx.pending && st.ctx.pending.q) {
+      res.understood = true; res.state = st; res.summary = summaryLines(st, idx);
+      res.reply = "먼저 확인할 게 있어요. " + st.ctx.pending.q;
+      return res;
+    }
+    var missing = [];
+    if (!st.vendor && !st.orderer) missing.push(st.company ? "지점" : "주문하시는 분");
+    if (!st.items.length) missing.push("상품");
+    var unresolved = st.items.filter(function (it) { return !it.productId; });
+    if (missing.length) {
+      res.understood = true;
+      res.reply = missing.join("과 ") + "이 아직 없어요. " + (nextPrompt(st, idx) || "");
+      res.state = st; res.summary = summaryLines(st, idx);
+      return res;
+    }
+    if (unresolved.length) {
+      res.understood = true;
+      res.reply = unresolved.map(function (u) { return u.productName; }).join(", ") + "은 등록된 상품이 아니에요. 상품을 다시 말씀해 주세요.";
+      res.state = st; res.summary = summaryLines(st, idx);
+      return res;
+    }
+    if (st.status !== "confirming") {
+      st.status = "confirming";
+      res.understood = true;
+      res.state = st;
+      res.summary = summaryLines(st, idx);
+      var rec = effRecipient(st);
+      res.reply = "주문 내용을 확인해 주세요. " + summaryLines(st, idx).filter(function (l) { return !/^(배송지|전화번호)/.test(l); }).join(", ") + ". 이대로 주문할까요?" + (rec && !rec.address ? " (받는 분 주소가 없어요)" : "");
+      return res;
+    }
+    st.status = "confirmed";
+    st.log.push({ t: Date.now(), utter: raw, field: "status", before: "confirming", after: "confirmed" });
+    res.understood = true;
+    res.confirmed = true;
+    res.order = toLegacyOrder(st);
+    res.state = st;
+    res.summary = summaryLines(st, idx);
+    res.reply = "주문을 확정했습니다. " + itemsText(st.items, idx) + ".";
+    return res;
+  }
+
+  // 질문은 한 번에 하나씩: 이미 묻고 있는 게 있으면 줄 세워 두었다가 답을 받은 뒤 이어서 물음
+  function queueAsk(st, R, p, q) {
+    p.q = q || "";
+    if (!st.ctx.pending) { st.ctx.pending = p; if (q) R.asks.push(q); }
+    else { st.ctx.queue = st.ctx.queue || []; st.ctx.queue.push(p); }
+  }
+  function popQueue(st, R) {
+    if (st.ctx.pending || !st.ctx.queue || !st.ctx.queue.length) return;
+    var nx = st.ctx.queue.shift();
+    st.ctx.pending = nx;
+    if (nx.q) R.asks.push(nx.q);
+  }
+  // ---------- 확인 질문 답 처리 ----------
+  function pickByOrdinal(text, n) {
+    var m = text.match(/(\d+)\s*번/) || text.match(/(첫|두|세|네|다섯)\s*(번째|번)/);
+    if (!m) return -1;
+    var map = { "첫": 1, "두": 2, "세": 3, "네": 4, "다섯": 5 };
+    var k = /^\d+$/.test(m[1]) ? parseInt(m[1], 10) : map[m[1]];
+    return k >= 1 && k <= n ? k - 1 : -1;
+  }
+  function resolvePending(st, norm, raw, idx, R, logChange) {
+    var p = st.ctx.pending;
+    var t = ns(norm);
+    var yes = RX.confirm.test(norm) && !RX.no.test(norm) && t.length <= 8;
+    var no = RX.no.test(norm) && t.length <= 6;
+    if (p.type === "branch") {
+      var co = idx.companies[p.companyNS];
+      var vs = (co ? co.vendors : []).filter(function (v) { return p.options.indexOf(v.id) >= 0; });
+      var k = pickByOrdinal(norm, vs.length);
+      var chosen = k >= 0 ? vs[k] : null;
+      if (!chosen) {
+        var br = findBranches(norm, idx, co);
+        if (br.length && br[0].vendor) chosen = br[0].vendor;
+      }
+      if (chosen) {
+        st.ctx.pending = null;
+        setVendor(st, chosen, R, logChange, "select");
+        // 같은 말에 상품 등이 같이 있으면 계속 처리
+        var rest = norm.replace(chosen.branch, " ");
+        if (findProducts(rest, idx).length || parseQuantities(rest).length) { handleItems(st, rest, idx, R, logChange, false); }
+        return "handled";
+      }
+      return "pass";
+    }
+    if (p.type === "person") {
+      var opts = p.options || [];
+      var k2 = pickByOrdinal(norm, opts.length);
+      if (k2 < 0) {
+        var digits = (norm.match(/\d{4}/) || [])[0];
+        if (digits) k2 = opts.findIndex(function (o) { return String(o.phone || "").replace(/\D/g, "").slice(-4) === digits; });
+      }
+      if (k2 < 0 && opts.length === 1 && yes) k2 = 0;
+      if (k2 < 0 && opts.length > 1) {
+        // 주소 일부로 고르기
+        var hits = opts.map(function (o, i) { return { i: i, hit: o.address && tokensOf(norm).some(function (tk) { tk = stripParticles(tk); return tk.length >= 2 && o.address.indexOf(tk) >= 0; }) }; }).filter(function (x) { return x.hit; });
+        if (hits.length === 1) k2 = hits[0].i;
+      }
+      if (k2 >= 0) {
+        st.ctx.pending = null;
+        setPerson(st, p.role, opts[k2], R, logChange);
+        return "handled";
+      }
+      if (no) { st.ctx.pending = null; R.notes.push("알겠습니다. 이름을 다시 말씀해 주세요."); return "handled"; }
+      return "pass";
+    }
+    if (p.type === "itemTarget") {
+      var items = st.items.filter(function (it) { return p.options.indexOf(it.key) >= 0; });
+      var k3 = pickByOrdinal(norm, items.length);
+      var target = k3 >= 0 ? items[k3] : null;
+      if (!target) {
+        var fp = findProducts(norm, idx);
+        if (fp.length) target = items.find(function (it) { return it.baseNS === fp[0].baseNS; }) || null;
+      }
+      if (target) {
+        st.ctx.pending = null;
+        applyQtyToItem(st, target, p.op, R, logChange, idx);
+        return "handled";
+      }
+      if (no) { st.ctx.pending = null; R.notes.push("알겠습니다."); return "handled"; }
+      return "pass";
+    }
+    if (p.type === "sku") {
+      var g = idx.groups[p.baseNS];
+      var skus = g ? g.skus : [];
+      var q = parseQuantities(norm).filter(function (x) { return x.kind === "weight"; });
+      var sku = null;
+      if (q.length) sku = skus.find(function (s) { return s.grams === q[0].grams; }) || null;
+      if (!sku) { var k4 = pickByOrdinal(norm, skus.length); if (k4 >= 0) sku = skus[k4]; }
+      if (!sku && yes && p.suggest) sku = skus.find(function (s) { return s.id === p.suggest; }) || null;
+      if (sku) {
+        st.ctx.pending = null;
+        var add = p.add;
+        if (p.mult && sku.grams && p.wantGrams && p.wantGrams % sku.grams === 0 && !add.countGiven) add.quantity = p.wantGrams / sku.grams;
+        addOrMergeItem(st, Object.assign({}, add, { productId: sku.id, productName: sku.name, weightGrams: sku.grams }), R, logChange, idx);
+        return "handled";
+      }
+      if (no) { st.ctx.pending = null; R.notes.push("알겠습니다. 다른 상품이나 무게를 말씀해 주세요."); return "handled"; }
+      // 무게는 안 말하고 수량만 고친 경우("아니 적상추 5박스야") → 기다리는 질문의 수량만 고치고 다시 물음
+      var cq = parseQuantities(norm).filter(function (x) { return x.kind === "count"; });
+      var fpS = findProducts(norm, idx);
+      if (cq.length && (!fpS.length || fpS[0].baseNS === p.baseNS)) {
+        p.add.quantity = cq[cq.length - 1].value; p.add.quantityUnit = cq[cq.length - 1].unit; p.add.countGiven = true;
+        R.notes.push("수량은 " + p.add.quantity + p.add.quantityUnit + "로 할게요.");
+        R.asks.push(p.q);
+        return "handled";
+      }
+      return "pass";
+    }
+    if (p.type === "productPick") {
+      var opts2 = p.options || [];
+      var k5 = pickByOrdinal(norm, opts2.length);
+      var base = k5 >= 0 ? opts2[k5] : null;
+      if (!base) { var fp2 = findProducts(norm, idx); if (fp2.length && fp2[0].baseNS && opts2.indexOf(fp2[0].baseNS) >= 0) base = fp2[0].baseNS; }
+      if (!base) { var tk = opts2.filter(function (o) { return tokensOf(norm).some(function (w) { w = stripParticles(w); return w.length >= 2 && o.indexOf(w) >= 0; }); }); if (tk.length === 1) base = tk[0]; }
+      if (base) {
+        st.ctx.pending = null;
+        resolveAndAdd(st, base, p.add, R, logChange, idx);
+        return "handled";
+      }
+      if (no) { st.ctx.pending = null; R.notes.push("알겠습니다."); return "handled"; }
+      return "pass";
+    }
+    if (p.type === "address") {
+      if (no) { st.ctx.pending = null; R.notes.push("주소는 그대로 둘게요."); return "handled"; }
+      var addr = raw.replace(/(주소는|주소|배송지는|배송지|로\s*바꿔.*|으로\s*바꿔.*|로\s*해.*|으로\s*해.*|이야|예요|입니다)$/g, "").replace(/^(주소는|주소|배송지는|배송지)\s*/, "").trim();
+      if (addr.length >= 5 && /(\d|시|도|구|군|동|읍|면|리|로|길|아파트|빌라)/.test(addr)) {
+        st.ctx.pending = null;
+        var before = (effRecipient(st) || {}).address || "";
+        st.shipping.addressOverride = addr;
+        logChange("address", before, addr);
+        R.changes.push("주소를 '" + addr + "'(으)로 변경했습니다");
+        return "handled";
+      }
+      return "pass";
+    }
+    if (p.type === "phone") {
+      var ph = extractPhone(norm);
+      if (ph) {
+        st.ctx.pending = null;
+        var b2 = (effRecipient(st) || {}).phone || "";
+        st.shipping.phoneOverride = ph;
+        logChange("phone", b2, ph);
+        R.changes.push("전화번호를 " + ph + "로 변경했습니다");
+        return "handled";
+      }
+      if (no) { st.ctx.pending = null; return "handled"; }
+      return "pass";
+    }
+    if (p.type === "role") {
+      var person = p.person;
+      if (/(받는|받으)/.test(t)) { st.ctx.pending = null; setPerson(st, "recipient", person, R, logChange); return "handled"; }
+      if (/(주문자|주문하는|주문한|주문하신)/.test(t)) { st.ctx.pending = null; setPerson(st, "orderer", person, R, logChange); return "handled"; }
+      if (no) { st.ctx.pending = null; R.notes.push("알겠습니다."); return "handled"; }
+      return "pass";
+    }
+    return "pass";
+  }
+
+  // ---------- 사람·업체·지점 ----------
+  function personRecord(c) { return { name: String(c.name).trim(), phone: c.phone || "", address: c.address || "", id: c.id, kind: "customer" }; }
+  function setPerson(st, role, c, R, logChange) {
+    var rec = personRecord(c);
+    if (role === "recipient") {
+      var before = st.recipient ? st.recipient.name : "";
+      st.recipient = { name: rec.name, phone: rec.phone, address: rec.address, recipientId: rec.id, kind: "customer" };
+      st.shipping.addressOverride = null; st.shipping.phoneOverride = null;
+      logChange("recipient", before, rec.name);
+      var got = [];
+      if (rec.address) got.push("주소");
+      if (rec.phone) got.push("전화번호");
+      R.changes.push("받는 분을 " + rec.name + "님으로 " + (before ? "변경" : "정") + "했습니다" + (got.length ? ". 등록된 " + got.join("와 ") + "를 불러왔어요" : ". 등록된 주소가 없어요, 주소를 말씀해 주세요"));
+      if (!rec.address) queueAsk(st, R, { type: "address" }, "");
+      st.ctx.lastPersonRole = "recipient";
+    } else {
+      var b = st.orderer ? st.orderer.name : "";
+      st.orderer = { name: rec.name, phone: rec.phone, address: rec.address, customerId: rec.id };
+      logChange("orderer", b, rec.name);
+      R.changes.push(b ? "주문자를 " + rec.name + "님으로 변경했습니다" : "네, " + rec.name + "님 주문을 시작할게요");
+      st.ctx.lastPersonRole = "orderer";
+    }
+  }
+  function setVendor(st, v, R, logChange, how) {
+    var before = st.vendor ? st.vendor.name : "";
+    var prevBranch = st.vendor ? st.vendor.branch : "";
+    st.vendor = { id: v.id, name: v.name, company: v.company, branch: v.branch, phone: v.phone, address: v.address };
+    st.company = { name: v.company, nameNS: v.companyNS };
+    logChange(prevBranch && v.branch ? "branch" : "vendor", before, v.name);
+    if (st.ctx.pending && st.ctx.pending.type === "branch") st.ctx.pending = null;
+    if (prevBranch && v.branch && prevBranch !== v.branch && before && ns(st.vendor.company) === ns(v.company)) R.changes.push(ro(v.branch) + " 변경했습니다");
+    else if (how === "select" && v.branch) R.changes.push(ro(v.branch) + " 선택했습니다");
+    else R.changes.push("네, " + v.company + (v.branch ? " " + v.branch : "") + " 주문을 시작할게요");
+    st.ctx.lastPersonRole = "company";
+  }
+  function handlePeopleAndCompany(st, c, idx, R, logChange, whole) {
+    var did = false;
+    var isCorrection = RX.correction.test(c);
+    var replaceM = c.match(RX.replace);
+    // 업체·지점
+    var cos = findCompanies(c, idx);
+    var company = cos.length ? cos[cos.length - 1] : null; // "A 말고 B"면 뒤엣것
+    if (company) {
+      var co = company.company;
+      if (company.vendor) setVendor(st, company.vendor, R, logChange);
+      else {
+        var sameCo = st.company && st.company.nameNS === co.nameNS;
+        var brs0 = findBranches(c.split(company.surface).join(" "), idx, co).filter(function (b) { return b.vendor; });
+        if (brs0.length) setVendor(st, brs0[brs0.length - 1].vendor, R, logChange);
+        else if (co.vendors.length === 1) setVendor(st, co.vendors[0], R, logChange);
+        else if (!sameCo) {
+          // 업체가 바뀜: 같은 이름의 지점이 있으면 유지, 없으면 질문
+          var keepBranch = st.vendor && st.vendor.branch ? co.vendors.find(function (v) { return v.branch === st.vendor.branch; }) : null;
+          var beforeC = st.company ? st.company.name : "";
+          st.company = { name: co.name, nameNS: co.nameNS };
+          if (keepBranch) setVendor(st, keepBranch, R, logChange);
+          else {
+            st.vendor = null;
+            logChange("company", beforeC, co.name);
+            R.changes.push(beforeC ? "업체를 " + ro(co.name) + " 변경했습니다" : "네, " + co.name + " 주문을 시작할게요");
+            var q = askBranch(st, co);
+            if (q) R.asks.push(q);
+          }
+        }
+      }
+      did = true;
+      st.ctx.lastPersonRole = "company";
+    } else {
+      // 지점만 말한 경우 ("군산점이야", "군산점 말고 수복점")
+      var coCur = st.company ? idx.companies[st.company.nameNS] : null;
+      if (coCur) {
+        var brs = findBranches(c, idx, coCur);
+        var pick = brs.length ? brs[brs.length - 1] : null;
+        if (pick && pick.vendor && (!st.vendor || st.vendor.id !== pick.vendor.id)) { setVendor(st, pick.vendor, R, logChange); did = true; }
+        else if (pick && pick.ambiguous) {
+          queueAsk(st, R, { type: "branch", companyNS: coCur.nameNS, options: pick.ambiguous.map(function (v) { return v.id; }) }, "어느 지점인가요? " + pick.ambiguous.map(function (v) { return v.branch; }).join(", ") + ".");
+          did = true;
+        }
+      }
+    }
+    // 사람
+    var roleHint = RX.sender.test(c) ? "sender" : RX.recipient.test(c) ? "recipient" : RX.orderer.test(c) ? "orderer" : null;
+    var cText = company ? c.split(company.surface).join(" ") : c;
+    var wantFuzzy = !!roleHint || isCorrection || RX.start.test(c) || /(씨|님|고객)/.test(c);
+    var persons = findPersons(cText, idx, { fuzzy: wantFuzzy });
+    // 상품 이름과 겹치는 사람 이름은 제외
+    var pnames = findProducts(cText, idx).map(function (m) { return m.surface; });
+    persons = persons.filter(function (p) { return pnames.indexOf(p.surface) < 0; });
+    if (!persons.length) return did;
+    var person = persons[persons.length - 1];
+    // 주소·전화 얘기 속 이름("배수련 씨 등록된 주소")은 참고용 → 역할 바꾸지 않음
+    if (!roleHint && (RX.address.test(c) || RX.phone.test(c))) return did;
+    if (roleHint === "sender") {
+      // "보내는 분 이인경이라고 메모해줘" → 배송 메모 + (주문자 비어 있으면) 주문자
+      var nm = person.list && person.list[0] ? String(person.list[0].name).trim() : person.surface;
+      var b0 = st.shipping.senderName;
+      st.shipping.senderName = nm;
+      logChange("senderName", b0, nm);
+      R.changes.push("배송 메모에 '보내는 분: " + nm + "'을 넣었습니다");
+      if (!st.orderer && person.list && person.list.length === 1 && person.exact) {
+        st.orderer = { name: nm, phone: person.list[0].phone || "", address: person.list[0].address || "", customerId: person.list[0].id };
+        logChange("orderer", "", nm);
+      }
+      return true;
+    }
+    // 이미 주문자/받는 분인 사람을 다시 말한 것뿐이면 그대로
+    if (!isCorrection && !replaceM && ((st.recipient && ns(st.recipient.name) === person.nameNS && roleHint !== "orderer") || (st.orderer && ns(st.orderer.name) === person.nameNS && roleHint !== "recipient"))) {
+      if (roleHint) R.notes.push((roleHint === "recipient" ? "받는 분은" : "주문자는") + " 이미 " + String(person.list[0].name).trim() + "님이에요.");
+      return true;
+    }
+    var role = roleHint;
+    if (!role) {
+      if (isCorrection || replaceM) role = st.ctx.lastPersonRole === "recipient" ? "recipient" : st.recipient && !st.orderer ? "recipient" : "orderer";
+      else if (!st.orderer && !st.vendor) role = "orderer";
+      else if (st.vendor && !st.orderer && !st.recipient && RX.start.test(c)) role = "orderer";
+      else role = "ask";
+    }
+    if (role === "ask") {
+      var only = person.list && person.list.length === 1 && person.exact ? person.list[0] : null;
+      if (only) {
+        queueAsk(st, R, { type: "role", person: only }, String(only.name).trim() + "님을 받는 분으로 할까요, 주문자로 할까요?");
+        return true;
+      }
+      return did;
+    }
+    if (!person.exact) {
+      var opts = (person.candidates || []).slice(0, 3).map(function (cd) { return idx.custByName[cd.nameNS][0]; });
+      queueAsk(st, R, { type: "person", role: role, options: opts }, opts.length === 1 ? String(opts[0].name).trim() + " 고객으로 " + (role === "recipient" ? "받는 분을 " : "") + "할까요?" : "어느 분인가요? " + opts.map(function (o, i) { return (i + 1) + "번 " + String(o.name).trim(); }).join(", ") + ".");
+      return true;
+    }
+    if (person.list.length >= 2) {
+      queueAsk(st, R, { type: "person", role: role, options: person.list.slice(0, 5) }, String(person.list[0].name).trim() + "님이 여러 분 계세요. " + person.list.slice(0, 5).map(function (o, i) {
+        var tail = String(o.phone || "").replace(/\D/g, "").slice(-4);
+        return (i + 1) + "번(" + (tail ? "전화 뒷자리 " + tail : "") + (o.address ? (tail ? ", " : "") + String(o.address).split(/\s+/).slice(0, 2).join(" ") : "") + ")";
+      }).join(", ") + ". 몇 번인가요?");
+      return true;
+    }
+    var already = role === "recipient" ? st.recipient && ns(st.recipient.name) === person.nameNS : st.orderer && ns(st.orderer.name) === person.nameNS;
+    if (!already) setPerson(st, role, person.list[0], R, logChange);
+    return true;
+  }
+
+  // ---------- 배송 정보 (주소·전화·메모) ----------
+  var KDIG = { "공": "0", "영": "0", "일": "1", "이": "2", "삼": "3", "사": "4", "오": "5", "육": "6", "륙": "6", "칠": "7", "팔": "8", "구": "9" };
+  function extractPhone(text) {
+    var t = String(text || "");
+    var digits = t.replace(/[^0-9]/g, "");
+    if (digits.length < 9) {
+      var conv = t.replace(/\s/g, "").split("").map(function (ch) { return KDIG[ch] != null ? KDIG[ch] : /\d/.test(ch) ? ch : ""; }).join("");
+      if (conv.length >= 10) digits = conv;
+    }
+    var m = digits.match(/(01[016789])(\d{3,4})(\d{4})/);
+    if (m) return m[1] + "-" + m[2] + "-" + m[3];
+    var m2 = digits.match(/^(0\d{1,2})(\d{3,4})(\d{4})$/);
+    if (m2) return m2[1] + "-" + m2[2] + "-" + m2[3];
+    return null;
+  }
+  function handleShipping(st, c, idx, R, logChange) {
+    var t = ns(c);
+    // 전화번호
+    if (RX.phone.test(c) || /01[016789][\s-]?\d{3,4}/.test(c)) {
+      var ph = extractPhone(c);
+      var rec = effRecipient(st);
+      if (ph) {
+        st.shipping.phoneOverride = ph;
+        logChange("phone", rec ? rec.phone : "", ph);
+        R.changes.push("전화번호를 " + ph + "로 변경했습니다");
+        return;
+      }
+      if (RX.registered.test(c) || /(번호로)/.test(t)) {
+        var who = findPersons(c, idx, {});
+        if (who.length && who[0].list.length === 1) {
+          var p = who[0].list[0];
+          st.shipping.phoneOverride = p.phone || null;
+          logChange("phone", rec ? rec.phone : "", p.phone || "");
+          R.changes.push(String(p.name).trim() + "님 번호(" + (p.phone || "없음") + ")로 했습니다");
+          return;
+        }
+        if (RX.registered.test(c)) {
+          st.shipping.phoneOverride = null;
+          R.changes.push("전화번호는 등록된 번호" + (rec && rec.phone ? "(" + rec.phone + ")" : "") + "로 둘게요");
+          return;
+        }
+      }
+      if (/(잘못|틀렸|바꿔|변경|다른)/.test(t)) {
+        queueAsk(st, R, { type: "phone" }, "새 전화번호를 말씀해 주세요.");
+        return;
+      }
+    }
+    // 주소
+    if (RX.address.test(c) && !RX.memo.test(c)) {
+      var rec2 = effRecipient(st);
+      if (RX.registered.test(c)) {
+        st.shipping.addressOverride = null;
+        R.changes.push("주소는 등록된 주소" + (rec2 && rec2.address ? "(" + rec2.address + ")" : "") + "로 할게요");
+        return;
+      }
+      var addrTxt = c.replace(/^(주소는|주소|배송지는|배송지)\s*/, "").replace(/\s*(로|으로)\s*(바꿔|변경|해).*$/, "").replace(/(이야|예요|입니다)$/, "").trim();
+      if (addrTxt.length >= 6 && /\d/.test(addrTxt) && /(시|도|구|군|동|읍|면|리|로|길)/.test(addrTxt)) {
+        st.shipping.addressOverride = addrTxt;
+        logChange("address", rec2 ? rec2.address : "", addrTxt);
+        R.changes.push("주소를 '" + addrTxt + "'(으)로 변경했습니다");
+        return;
+      }
+      if (RX.other.test(c) || /(바꿔|변경)/.test(t)) {
+        queueAsk(st, R, { type: "address" }, "새 주소를 말씀해 주세요.");
+        return;
+      }
+    }
+    // 배송 메모
+    if (RX.memo.test(c) && !RX.sender.test(c)) {
+      if (/(메모|메시지).*(지워|빼|삭제|없애)/.test(t) || /(지워|빼|삭제).*(메모)/.test(t)) {
+        var bm = st.shipping.memo;
+        st.shipping.memo = "";
+        logChange("memo", bm, "");
+        R.changes.push("배송 메모를 지웠습니다");
+        return;
+      }
+      var memo = c.replace(/(배송\s*메모|배송\s*메시지|요청\s*사항|메모)(에|는|로|를)?\s*/g, "").replace(/\s*(이?라고)?\s*(넣어\s*줘|넣어줘|넣어|적어\s*줘|적어줘|적어|써\s*줘|써줘|남겨\s*줘|남겨줘|해\s*줘|해줘|추가해\s*줘|추가해줘|추가)\s*$/g, "").trim();
+      if (memo.length >= 2) {
+        var b3 = st.shipping.memo;
+        st.shipping.memo = b3 ? b3 + " / " + memo : memo;
+        logChange("memo", b3, st.shipping.memo);
+        R.changes.push("배송 메모에 '" + memo + "'을 넣었습니다");
+      } else {
+        R.asks.push("배송 메모에 무엇을 적을까요?");
+      }
+    }
+    if (/보내는\s*(분|사람)\s*(표시|메모)?\s*(빼|지워|하지\s*마|안\s*해)/.test(c)) {
+      st.shipping.senderAuto = false;
+      st.shipping.senderName = "";
+      logChange("senderAuto", true, false);
+      R.changes.push("보내는 분 표시를 뺐습니다");
+    }
+  }
+
+  // ---------- 상품 ----------
+  function findItem(st, baseNS) { return st.items.find(function (it) { return it.baseNS === baseNS; }) || null; }
+  function addOrMergeItem(st, add, R, logChange, idx) {
+    var ex = st.items.find(function (it) { return it.productId && it.productId === add.productId; });
+    if (ex) {
+      var b = itemLabel(ex, idx);
+      if (add.more) ex.quantity += add.quantity;
+      else { ex.quantity = add.quantity; if (add.quantityUnit) ex.quantityUnit = add.quantityUnit; }
+      if (add.condition) { ex.condition = add.condition; ex.condGrams = add.condGrams; }
+      logChange("item.quantity", b, itemLabel(ex, idx));
+      var nmS = ex.productId && idx.groups[ex.baseNS] && idx.groups[ex.baseNS].skus.length > 1 ? ex.productName : ex.baseName;
+      R.changes.push(add.more ? nmS + " " + add.quantity + (ex.quantityUnit || "개") + " 더해서 " + ex.quantity + (ex.quantityUnit || "개") + "가 됐습니다" : eul(nmS) + " " + ro(ex.quantity + (ex.quantityUnit || "개")) + " 변경했습니다");
+      st.ctx.lastItemKey = ex.key;
+      st.ctx.lastTurnKeys.push(ex.key);
+      return ex;
+    }
+    var it = {
+      key: itemKey(), productId: add.productId, productName: add.productName, baseName: add.baseName, baseNS: add.baseNS,
+      quantity: add.quantity || 1, quantityUnit: add.quantityUnit || "개", countGiven: !!add.countGiven,
+      weightGrams: add.weightGrams || null, condition: add.condition || null, condGrams: add.condGrams || null, note: add.note || ""
+    };
+    st.items.push(it);
+    logChange("item.add", "", itemLabel(it, idx));
+    R._added = R._added || [];
+    if (!R._added.length) R._addAt = R.changes.length;
+    R._added.push(itemLabel(it, idx));
+    st.ctx.lastItemKey = it.key;
+    st.ctx.lastTurnKeys.push(it.key);
+    return it;
+  }
+  function resolveAndAdd(st, baseNS, add, R, logChange, idx) {
+    var g = idx.groups[baseNS];
+    if (!g) return;
+    add = Object.assign({}, add, { baseNS: baseNS, baseName: g.base });
+    var skus = g.skus;
+    var sku = null;
+    if (add.wantGrams) {
+      sku = skus.find(function (s) { return s.grams === add.wantGrams; }) || null;
+      if (!sku) {
+        // 요청한 무게의 상품이 없음 → 임의로 만들지 않고 물어봄
+        var divisible = skus.filter(function (s) { return s.grams && add.wantGrams % s.grams === 0 && add.wantGrams > s.grams; });
+        var sug = divisible[0] || skus.slice().sort(function (a, b) { return Math.abs((a.grams || 0) - add.wantGrams) - Math.abs((b.grams || 0) - add.wantGrams); })[0];
+        var pq = { type: "sku", baseNS: baseNS, add: add, suggest: sug ? sug.id : null, wantGrams: add.wantGrams, mult: !!divisible.length };
+        var q = g.base + " " + fmtWeight(add.wantGrams) + " 상품은 없어요. 등록된 건 " + skus.map(function (s) { return s.name; }).join(", ") + "이에요. ";
+        if (divisible.length && !add.countGiven) q += divisible[0].name + " " + add.wantGrams / divisible[0].grams + "개로 할까요?";
+        else if (sug) q += ro(sug.name) + " 할까요?";
+        queueAsk(st, R, pq, q);
+        return;
+      }
+    } else {
+      var ex = findItem(st, baseNS);
+      if (ex && ex.productId) sku = skus.find(function (s) { return s.id === ex.productId; });
+      else if (skus.length === 1) sku = skus[0];
+      else {
+        queueAsk(st, R, { type: "sku", baseNS: baseNS, add: add }, eun(g.base) + " " + skus.map(function (s) { return s.grams ? fmtWeight(s.grams) : s.name; }).join(", ") + " 중 어느 걸로 할까요?");
+        return;
+      }
+    }
+    addOrMergeItem(st, Object.assign({}, add, { productId: sku.id, productName: sku.name, weightGrams: sku.grams }), R, logChange, idx);
+  }
+  function applyQtyToItem(st, it, op, R, logChange, idx) {
+    var before = itemLabel(it, idx);
+    var nmShown = idx.groups[it.baseNS] && idx.groups[it.baseNS].skus.length > 1 ? it.productName : it.baseName;
+    if (op.kind === "remove") {
+      st.items = st.items.filter(function (x) { return x.key !== it.key; });
+      logChange("item.remove", before, "");
+      R.changes.push(eul(nmShown) + " 뺐습니다");
+      if (st.ctx.lastItemKey === it.key) st.ctx.lastItemKey = st.items.length ? st.items[st.items.length - 1].key : null;
+      return;
+    }
+    if (op.kind === "dec") {
+      it.quantity -= op.n;
+      if (it.quantity <= 0) { st.items = st.items.filter(function (x) { return x.key !== it.key; }); logChange("item.remove", before, ""); R.changes.push(eul(nmShown) + " 뺐습니다"); return; }
+      logChange("item.quantity", before, itemLabel(it, idx));
+      R.changes.push(nmShown + " " + op.n + (it.quantityUnit || "개") + " 빼서 " + it.quantity + (it.quantityUnit || "개") + "가 됐습니다");
+    } else if (op.kind === "inc") {
+      it.quantity += op.n;
+      it.countGiven = true;
+      logChange("item.quantity", before, itemLabel(it, idx));
+      R.changes.push(nmShown + " " + op.n + (it.quantityUnit || "개") + " 더해서 " + it.quantity + (it.quantityUnit || "개") + "가 됐습니다");
+    } else if (op.kind === "set") {
+      if (!(op.n > 0)) { applyQtyToItem(st, it, { kind: "remove" }, R, logChange, idx); return; }
+      it.quantity = op.n;
+      it.countGiven = true;
+      if (op.unit) it.quantityUnit = op.unit;
+      logChange("item.quantity", before, itemLabel(it, idx));
+      R.changes.push(eul(nmShown) + " " + ro(it.quantity + (it.quantityUnit || "개")) + " 변경했습니다");
+    } else if (op.kind === "weight") {
+      var g = idx.groups[it.baseNS];
+      var sku = g ? g.skus.find(function (s) { return s.grams === op.grams; }) : null;
+      if (!sku) {
+        R.asks.push(it.baseName + " " + fmtWeight(op.grams) + " 상품은 없어요. 등록된 건 " + (g ? g.skus.map(function (s) { return s.name; }).join(", ") : "") + "이에요.");
+        return;
+      }
+      it.productId = sku.id; it.productName = sku.name; it.weightGrams = sku.grams;
+      logChange("item.weight", before, itemLabel(it, idx));
+      R.changes.push(eul(it.baseName) + " " + ro(fmtWeight(sku.grams)) + " 변경했습니다");
+    } else if (op.kind === "cond") {
+      it.condition = op.cond; it.condGrams = op.grams;
+      logChange("item.condition", before, itemLabel(it, idx));
+      R.changes.push(it.baseName + " 조건을 " + (op.cond === "MIN" ? "최소 " : op.cond === "MAX" ? "최대 " : "약 ") + fmtWeight(op.grams) + "로 했습니다");
+    }
+    st.ctx.lastItemKey = it.key;
+    st.ctx.lastTurnKeys.push(it.key);
+  }
+  function pickTarget(st, c, op, R, prevTurnKeys) {
+    if (!st.items.length) { R.notes.push("아직 담긴 상품이 없어요. 상품 이름과 수량을 말씀해 주세요."); return null; }
+    if (RX.that.test(c) && st.ctx.lastItemKey) return st.items.find(function (it) { return it.key === st.ctx.lastItemKey; }) || null;
+    if (st.items.length === 1) return st.items[0];
+    // 단위가 맞는 상품이 하나뿐이면 그것
+    if (op.unit) {
+      var su = st.items.filter(function (it) { return (it.countGiven || it.quantityUnit !== "개") && it.quantityUnit === op.unit; });
+      if (su.length === 1) return su[0];
+    }
+    if (op.kind === "weight") {
+      var sw = st.items.filter(function (it) { return it.weightGrams && !it.countGiven; });
+      if (sw.length === 1) return sw[0];
+    }
+    if (RX.correction.test(c) && prevTurnKeys && prevTurnKeys.length === 1) return st.items.find(function (it) { return it.key === prevTurnKeys[0]; }) || null;
+    var opts = st.items.slice(0, 6);
+    var pqi = { type: "itemTarget", op: op, options: opts.map(function (it) { return it.key; }) };
+    var what = op.kind === "set" ? op.n + (op.unit || "개") : op.kind === "inc" ? op.n + (op.unit || "개") + " 더" : op.kind === "dec" ? op.n + (op.unit || "개") + " 빼기" : op.kind === "weight" ? fmtWeight(op.grams) : "변경";
+    queueAsk(st, R, pqi, opts.map(function (it) { return eul(it.baseName); }).join(" 아니면 ") + " " + (op.kind === "set" || op.kind === "weight" ? ro(what) + " 바꿀까요?" : what + " 할까요?"));
+    return null;
+  }
+  function handleItems(st, c, idx, R, logChange, multiClause) {
+    var prevTurnKeys = st.ctx._prevTurnKeys || [];
+    var mentions = findProducts(c, idx);
+    var qtys = parseQuantities(c);
+    var t = ns(c);
+    var isDel = RX.del.test(t) && !/(메모|메시지)/.test(t);
+    var isMore = /(더|추가)/.test(t) && !/(더\s*없|그만)/.test(t);
+    var rep = c.match(RX.replace);
+    // 사람/업체 이름만 있고 상품·수량이 없으면 상품 처리 없음
+    if (!mentions.length && !qtys.length) {
+      if (isDel && (RX.that.test(c) || /(마지막|방금)/.test(t)) && st.items.length) {
+        var last = st.items.find(function (it) { return it.key === st.ctx.lastItemKey; }) || st.items[st.items.length - 1];
+        applyQtyToItem(st, last, { kind: "remove" }, R, logChange, idx);
+      }
+      return;
+    }
+    // 애매한 상품 이름 (예: '채소' → 모듬쌈채소/샐러드채소)
+    // "A 말고 B": 상품 교체
+    if (rep && mentions.length >= 2) {
+      var pos = c.indexOf(rep[0]);
+      var leftM = mentions.filter(function (m) { return tokIndexPos(c, m.start) < pos; });
+      var rightM = mentions.filter(function (m) { return tokIndexPos(c, m.start) > pos; });
+      if (leftM.length && rightM.length && leftM[0].baseNS && rightM[0].baseNS) {
+        var old = findItem(st, leftM[0].baseNS);
+        if (old) {
+          var rq = parseQuantities(c.slice(pos));
+          var qty = rq.find(function (q) { return q.kind === "count"; });
+          var wq = rq.find(function (q) { return q.kind === "weight"; });
+          st.items = st.items.filter(function (x) { return x.key !== old.key; });
+          logChange("item.replace", itemLabel(old, idx), rightM[0].baseNS);
+          R.changes.push(eul(old.baseName) + " 빼고");
+          resolveAndAdd(st, rightM[0].baseNS, { quantity: qty ? qty.value : old.quantity, quantityUnit: qty ? qty.unit : old.quantityUnit, countGiven: !!qty || old.countGiven, wantGrams: wq ? wq.grams : null }, R, logChange, idx);
+          return;
+        }
+      }
+    }
+    if (!mentions.length && qtys.length) {
+      // 수량은 있는데 상품 이름처럼 보이는 말을 못 찾은 경우 → 등록 상품이 아니라고 알림 (임의로 다른 상품에 적용하지 않음)
+      var STOP = /^(아니|아니요|아니야|아냐|그거|그것|그건|이거|방금|아까|마지막|그|저|바꿔|바꿔줘|변경|변경해|수정|해|해줘|줘|주세요|로|으로|말고|아니고|아니라|더|빼|빼줘|추가|추가해|추가해줘|야|이야|요|만|씩|각|박스|개|정도|쯤|최소|최대|이상|이하|내가|라고|했잖아|했어|할게|할께|해요|하고|하나|넣어|넣어줘|담아|담아줘|주문|주문해|좀|다시|그리고|또|네|응|예|좋아|대신|각각|전부|모두|다)$/;
+      var unknown = tokensOf(c).filter(function (tk) { return !isQtyTok(tk); }).map(stripParticles).filter(function (w) { return w.length >= 2 && !STOP.test(w) && !/(바꿔|변경|해줘|주세요|했잖아|라고|으로|이야|한|했던|하던|했던거|말한거)$/.test(w); });
+      if (unknown.length) {
+        R.notes.push("'" + unknown.join(" ") + "'은(는) 등록된 상품에서 찾지 못했어요. 상품 이름을 다시 말씀해 주세요.");
+        return;
+      }
+      // 상품 없이 수량만: "아니 4박스야", "5박스로 바꿔", "하나 더", "두 개 빼", "4개 말고 5개", "2kg 말고 3kg"
+      var useQ = qtys;
+      if (rep) { var p2 = c.indexOf(rep[0]); var right = qtys.filter(function (q) { return q.index > p2; }); if (right.length) useQ = right; }
+      var q0 = useQ[useQ.length - 1];
+      var op;
+      if (q0.kind === "weight") op = q0.cond ? { kind: "cond", cond: q0.cond, grams: q0.grams } : { kind: "weight", grams: q0.grams };
+      else op = isDel ? { kind: "dec", n: q0.value, unit: q0.unit } : isMore && !RX.change.test(c.replace(/추가/g, "")) ? { kind: "inc", n: q0.value, unit: q0.unit } : { kind: "set", n: q0.value, unit: q0.unit };
+      var target = pickTarget(st, c, op, R, prevTurnKeys);
+      if (target) applyQtyToItem(st, target, op, R, logChange, idx);
+      return;
+    }
+    // "로메인 2kg 말고 1kg" — 같은 상품에서 수량/무게만 바꾸는 경우: 말고 뒤의 값만 사용
+    if (rep && mentions.length === 1) {
+      var pr = c.indexOf(rep[0]);
+      var rightQ = qtys.filter(function (q) { return q.index > pr; });
+      if (rightQ.length) qtys = rightQ;
+    }
+    // 상품 + 수량: 각 수량을 가까운 상품에 붙임
+    var toks = tokensOf(c);
+    var tokPos = function (ti) { return tokIndexPos(c, ti); };
+    var mq = mentions.map(function () { return []; });
+    qtys.forEach(function (q) {
+      var bestI = -1, bestD = 1e9;
+      mentions.forEach(function (m, mi) {
+        var mEnd = tokPos(m.end - 1) + (toks[m.end - 1] || "").length;
+        var mStart = tokPos(m.start);
+        var d = q.index >= mEnd ? q.index - mEnd : (mStart - q.end) + 1000; // 앞 상품 우선
+        if (d < bestD) { bestD = d; bestI = mi; }
+      });
+      if (bestI >= 0) mq[bestI].push(q);
+    });
+    mentions.forEach(function (m, mi) {
+      var qs = mq[mi];
+      var cq = qs.filter(function (q) { return q.kind === "count"; });
+      var wq = qs.filter(function (q) { return q.kind === "weight"; });
+      var count = cq.length ? cq[cq.length - 1] : null;
+      var weight = wq.length ? wq.find(function (q) { return !q.cond; }) || null : null;
+      var condQ = wq.find(function (q) { return q.cond; }) || null;
+      if (m.ambiguous) {
+        // 등록된 상품 중 여러 개가 해당 → 무게로 좁혀보고, 그래도 여러 개면 질문
+        var cands = m.ambiguous;
+        if (weight) { var byW = cands.filter(function (b) { return idx.groups[b].skus.some(function (s) { return s.grams === weight.grams; }); }); if (byW.length) cands = byW; }
+        var inCart = cands.filter(function (b) { return findItem(st, b); });
+        if (inCart.length === 1) cands = inCart;
+        if (cands.length === 1) m.baseNS = cands[0];
+        else {
+          var addA = { quantity: count ? count.value : 1, quantityUnit: count ? count.unit : "개", countGiven: !!count, wantGrams: weight ? weight.grams : null, condition: condQ ? condQ.cond : null, condGrams: condQ ? condQ.grams : null, more: isMore };
+          queueAsk(st, R, { type: "productPick", options: cands, add: addA }, "'" + m.surface + "'는 " + cands.map(function (b, i) { return (i + 1) + "번 " + idx.groups[b].base; }).join(", ") + " 중 어느 상품인가요?");
+          return;
+        }
+      }
+      var ex = findItem(st, m.baseNS);
+      // 같은 상품이라도 다른 무게를 말하면(바꾸라는 말이 없으면) 새 줄로 추가 — 예: 모듬쌈채소 1kg 있는데 "채소 2kg 두 개"
+      if (ex && !isDel && weight && ex.weightGrams && weight.grams !== ex.weightGrams && !RX.change.test(c)) {
+        var sameW = st.items.find(function (x) { return x.baseNS === m.baseNS && x.weightGrams === weight.grams; });
+        ex = sameW || null;
+      }
+      if (isDel) {
+        if (!ex) { R.notes.push(eun(idx.groups[m.baseNS].base) + " 주문에 없어요."); return; }
+        if (count) applyQtyToItem(st, ex, { kind: "dec", n: count.value, unit: count.unit }, R, logChange, idx);
+        else applyQtyToItem(st, ex, { kind: "remove" }, R, logChange, idx);
+        return;
+      }
+      if (ex) {
+        var did = false;
+        if (weight && weight.grams !== ex.weightGrams) { applyQtyToItem(st, ex, { kind: "weight", grams: weight.grams }, R, logChange, idx); did = true; }
+        if (count) {
+          if (isMore && !RX.change.test(c)) applyQtyToItem(st, ex, { kind: "inc", n: count.value, unit: count.unit }, R, logChange, idx);
+          else if (count.value !== ex.quantity || count.unit !== ex.quantityUnit || count.value <= 0) applyQtyToItem(st, ex, { kind: "set", n: count.value, unit: count.unit }, R, logChange, idx);
+          did = true;
+        } else if (isMore && !weight) { applyQtyToItem(st, ex, { kind: "inc", n: 1, unit: ex.quantityUnit }, R, logChange, idx); did = true; }
+        if (condQ) { applyQtyToItem(st, ex, { kind: "cond", cond: condQ.cond, grams: condQ.grams }, R, logChange, idx); did = true; }
+        if (!did) { R.notes.push(eun(itemLabel(ex, idx)) + " 이미 담겨 있어요."); st.ctx.lastItemKey = ex.key; }
+        return;
+      }
+      resolveAndAdd(st, m.baseNS, {
+        quantity: count ? count.value : 1, quantityUnit: count ? count.unit : "개", countGiven: !!count,
+        wantGrams: weight ? weight.grams : null,
+        condition: condQ ? condQ.cond : null, condGrams: condQ ? condQ.grams : null
+      }, R, logChange, idx);
+    });
+  }
+  function tokIndexPos(c, ti) {
+    var toks = tokensOf(c);
+    var pos = 0, from = 0;
+    for (var i = 0; i < toks.length; i++) {
+      var p = c.indexOf(toks[i], from);
+      if (i === ti) return p;
+      from = p + toks[i].length;
+    }
+    return c.length;
+  }
+
+  // 한 차례 대화 처리 후 "직전 턴에 건드린 상품" 기억 (정정 판단용)
+  function step(st, utterance, db, opts) {
+    var prevKeys = st && st.ctx ? (st.ctx.lastTurnKeys || []).slice() : [];
+    var s0 = st ? clone(st) : newState();
+    s0.ctx._prevTurnKeys = prevKeys;
+    var r = handle(s0, utterance, db, opts);
+    if (r.state && r.state.ctx) delete r.state.ctx._prevTurnKeys;
+    return r;
+  }
+  // 화면에서 직접 수정 (같은 상태·기록 방식 사용)
+  function edit(st, action, db) {
+    var idx = db && db.__vo2idx ? db.__vo2idx : buildIndex(db);
+    var s = clone(st || newState());
+    var R = { changes: [], asks: [], notes: [] };
+    var lg = function (f, b, a) { s.log.push({ t: Date.now(), utter: "(화면)", field: f, before: b, after: a }); };
+    var a = action || {};
+    if (a.type === "itemQty") { var it = s.items.find(function (x) { return x.key === a.key; }); if (it) applyQtyToItem(s, it, { kind: "set", n: Math.max(1, Number(a.qty) || 1), unit: it.quantityUnit }, R, lg, idx); }
+    else if (a.type === "itemRemove") { var it2 = s.items.find(function (x) { return x.key === a.key; }); if (it2) applyQtyToItem(s, it2, { kind: "remove" }, R, lg, idx); }
+    else if (a.type === "itemProduct") {
+      var p = idx.products.find(function (x) { return x.id === a.productId; });
+      var it3 = s.items.find(function (x) { return x.key === a.key; });
+      if (p && it3) { var b = itemLabel(it3, idx); it3.productId = p.id; it3.productName = p.name; it3.baseName = p.base; it3.baseNS = p.baseNS; it3.weightGrams = p.grams; lg("item.product", b, itemLabel(it3, idx)); }
+    }
+    else if (a.type === "itemAdd") { var p2 = idx.products.find(function (x) { return x.id === a.productId; }); if (p2) addOrMergeItem(s, { productId: p2.id, productName: p2.name, baseName: p2.base, baseNS: p2.baseNS, weightGrams: p2.grams, quantity: Math.max(1, Number(a.qty) || 1), quantityUnit: a.unit || "개", countGiven: true }, R, lg, idx); }
+    else if (a.type === "vendor") { var v = idx.vendors.find(function (x) { return x.id === a.vendorId; }); if (v) setVendor(s, v, R, lg); else { s.vendor = null; s.company = null; lg("vendor", "", ""); } }
+    else if (a.type === "orderer" || a.type === "recipient") {
+      var c = (db.customers || []).find(function (x) { return x && x.id === a.customerId; });
+      if (c) setPerson(s, a.type, c, R, lg);
+      else if (a.name != null) {
+        if (a.type === "orderer") { var bo = s.orderer ? s.orderer.name : ""; s.orderer = a.name ? { name: a.name, phone: a.phone || "", address: "", customerId: null } : null; lg("orderer", bo, a.name); }
+        else { var br = s.recipient ? s.recipient.name : ""; s.recipient = a.name ? { name: a.name, phone: a.phone || "", address: a.address || "", recipientId: null, kind: "customer" } : null; lg("recipient", br, a.name); }
+      }
+    }
+    else if (a.type === "address") { var ra = effRecipient(s); lg("address", ra ? ra.address : "", a.value); s.shipping.addressOverride = a.value || null; }
+    else if (a.type === "phone") { var rp = effRecipient(s); lg("phone", rp ? rp.phone : "", a.value); s.shipping.phoneOverride = a.value || null; }
+    else if (a.type === "memo") { lg("memo", s.shipping.memo, a.value); s.shipping.memo = a.value || ""; }
+    else if (a.type === "reserveDate") { lg("reserveDate", s.reserveDate, a.value || ""); s.reserveDate = a.value || ""; }
+    else if (a.type === "senderAuto") { lg("senderAuto", s.shipping.senderAuto, !!a.value); s.shipping.senderAuto = !!a.value; if (!a.value) s.shipping.senderName = ""; }
+    if (s.status === "confirming") s.status = "collecting";
+    return { state: s, summary: summaryLines(s, idx) };
+  }
+
+  // 규칙으로 못 알아들은 말만 AI에게 '앱이 알아듣는 짧은 명령'으로 바꿔 달라고 함 (AI가 DB를 직접 바꾸지 않음 → 결과는 다시 DB 검색·확인을 거침)
+  function llmPrompt(st, utterance, idx) {
+    var prods = idx.products.map(function (p) { return p.name; }).slice(0, 120).join(", ");
+    var vends = idx.vendors.map(function (v) { return v.name; }).slice(0, 80).join(", ");
+    return "너는 농산물 주문 앱의 통역사다. 사장님이 음성으로 한 말을 앱이 알아듣는 짧은 명령 문장으로 바꿔라.\n" +
+      "사용 가능한 명령 형식(한 줄에 하나):\n" +
+      "- {업체이름} {지점} 주문할게 / {고객이름} 주문할게\n- {상품} {숫자}{단위}  (단위: kg, g, 박스, 개, 봉, 팩)\n- {상품} {숫자}{단위}로 바꿔\n- {상품} {숫자}{단위} 더\n- {상품} 빼줘\n- {상품A} 말고 {상품B}\n- 받는 사람 {이름}\n- 보내는 분 {이름}\n- 주소는 {주소}\n- 전화번호 {번호}\n- 배송 메모 {내용}\n- 그대로 주문해\n- 주문 취소\n- 처음부터 다시 할게\n" +
+      "규칙: 상품·업체 이름은 아래 목록의 표기를 써라(발음이 비슷하면 목록 표기로). 사람 이름은 들은 그대로 써라. 목록에 없는 상품을 지어내지 마라. 주문과 관계없는 말이면 UNKNOWN 한 단어만 출력. 설명 없이 명령 줄만 출력.\n" +
+      "[상품 목록] " + prods + "\n[업체 목록] " + vends + "\n" +
+      "[현재 주문] " + summaryLines(st || newState(), idx).join(" / ") + "\n" +
+      "[사장님 말] " + String(utterance || "");
+  }
+
+  return {
+    llmPrompt: llmPrompt,
+    normalize: normalize, parseQuantities: parseQuantities, buildIndex: buildIndex, findProducts: findProducts, findPersons: findPersons,
+    findCompanies: findCompanies, findBranches: findBranches, newState: newState, step: step, edit: edit, summaryLines: summaryLines,
+    toLegacyOrder: toLegacyOrder, itemLabel: itemLabel, effRecipient: effRecipient, deliveryMemoText: deliveryMemoText, sim: sim,
+    splitCompanyBranch: splitCompanyBranch, fmtWeight: fmtWeight, extractPhone: extractPhone
+  };
+})();
+
+// ===== VO2 화면: 음성 주문 카드 (말하는 동안 주문 내용을 항목별로 보여주고, 화면에서도 직접 고칠 수 있음) =====
+async function vo2LlmRewrite(utterance, st, idx, apiKey) {
+  if (!apiKey || typeof buildGeminiKeyPool !== "function") return null;
+  try {
+    if (typeof aiGeminiGuardCheck === "function" && !aiGeminiGuardCheck().ok) return null;
+  } catch (e) {}
+  const pool = buildGeminiKeyPool(apiKey);
+  if (!pool.length) return null;
+  const key = (typeof geminiRotateOrder === "function" ? geminiRotateOrder(pool) : pool)[0];
+  const model = await getGeminiModel(key);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 6e3);
+  let res;
+  try {
+    res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: ctrl.signal,
+      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: VO2.llmPrompt(st, utterance, idx) }] }], generationConfig: { temperature: 0, maxOutputTokens: 200 } })
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!res || !res.ok) return null;
+  const data = await res.json().catch(() => null);
+  const txt = (((((data || {}).candidates || [])[0] || {}).content || {}).parts || []).map((p) => p.text || "").join("\n");
+  const lines = txt.replace(/```[a-z]*|```/g, "").split(/\n+/).map((l) => l.replace(/^[-*\d.)\s]+/, "").trim()).filter(Boolean);
+  if (!lines.length || /^UNKNOWN$/i.test(lines[0])) return null;
+  return lines.slice(0, 6);
+}
+function VoiceOrderCard({ st, idx, products, vendors, customers, onEdit, onConfirm, onCancel, onClose }) {
+  const h = React.createElement;
+  const [open, setOpen] = React.useState(true);
+  const [pick, setPick] = React.useState(null); // 'orderer' | 'recipient'
+  const [q, setQ] = React.useState("");
+  const [showLog, setShowLog] = React.useState(false);
+  if (!st) return null;
+  const rec = VO2.effRecipient(st);
+  const status = st.status;
+  const done = status === "confirmed" || status === "cancelled";
+  const C = { bg: "rgba(10,25,45,0.97)", line: "rgba(255,255,255,0.12)", sub: "rgba(255,255,255,0.55)", txt: "#e8f1ff", acc: "#7fd1a0" };
+  const row = (label, val, extra) => h("div", { style: { display: "flex", alignItems: "flex-start", gap: 8, padding: "5px 0", borderTop: `1px solid ${C.line}` } },
+    h("div", { style: { width: 62, flexShrink: 0, color: C.sub, fontSize: 12, paddingTop: 3 } }, label),
+    h("div", { style: { flex: 1, minWidth: 0, color: C.txt, fontSize: 14, wordBreak: "keep-all" } }, val),
+    extra || null);
+  const btn = (txt, onClick, style) => h("button", { onClick, disabled: done, style: Object.assign({ border: `1px solid ${C.line}`, background: "rgba(255,255,255,0.08)", color: C.txt, borderRadius: 8, padding: "3px 9px", fontSize: 12, cursor: done ? "default" : "pointer", flexShrink: 0, opacity: done ? 0.5 : 1 }, style || {}) }, txt);
+  const inp = (val, onCommit, ph, type) => h("input", {
+    key: String(val) + ph, defaultValue: val || "", placeholder: ph, type: type || "text", disabled: done,
+    onBlur: (e) => { if ((e.target.value || "") !== (val || "")) onCommit(e.target.value.trim()); },
+    onKeyDown: (e) => { if (e.key === "Enter") e.target.blur(); },
+    style: { width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,0.07)", border: `1px solid ${C.line}`, borderRadius: 6, color: C.txt, padding: "4px 7px", fontSize: 13 }
+  });
+  const custHits = pick && q.trim().length >= 1 ? (customers || []).filter((c) => c && c.name && c.name.replace(/\s/g, "").includes(q.replace(/\s/g, ""))).slice(0, 8) : [];
+  const statusBadge = status === "confirmed" ? ["✓ 확정됨", "#2e7d32"] : status === "cancelled" ? ["취소됨", "#8d6e63"] : status === "confirming" ? ["확인 대기", "#e65100"] : ["작성 중", "#1565c0"];
+  const header = h("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: open ? 4 : 0 } },
+    h("div", { style: { fontWeight: 800, color: "#fff", fontSize: 14 } }, "📝 음성 주문"),
+    h("span", { style: { background: statusBadge[1], color: "#fff", borderRadius: 10, padding: "1px 8px", fontSize: 11, fontWeight: 700 } }, statusBadge[0]),
+    !open ? h("div", { style: { flex: 1, minWidth: 0, color: C.sub, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, (rec ? rec.name + " · " : "") + st.items.map((it) => VO2.itemLabel(it, idx)).join(", ")) : h("div", { style: { flex: 1 } }),
+    h("button", { onClick: () => setOpen(!open), style: { border: "none", background: "transparent", color: C.sub, fontSize: 13, cursor: "pointer" } }, open ? "접기 ▲" : "펼치기 ▼"),
+    done && onClose ? h("button", { onClick: onClose, style: { border: "none", background: "transparent", color: C.sub, fontSize: 15, cursor: "pointer" } }, "✕") : null);
+  if (!open) return h("div", { style: { position: "sticky", top: 0, zIndex: 3, background: C.bg, border: `1px solid ${C.line}`, borderRadius: 12, padding: "8px 10px", boxShadow: "0 4px 14px rgba(0,0,0,0.35)" } }, header);
+  const vendorSel = h("select", {
+    value: st.vendor ? st.vendor.id : "", disabled: done,
+    onChange: (e) => onEdit({ type: "vendor", vendorId: e.target.value }),
+    style: { width: "100%", background: "rgba(255,255,255,0.07)", color: C.txt, border: `1px solid ${C.line}`, borderRadius: 6, padding: "3px 6px", fontSize: 13 }
+  }, h("option", { value: "", style: { color: "#000" } }, st.company && !st.vendor ? `${st.company.name} (지점 선택)` : "(업체 아님 · 일반 고객)"),
+    (vendors || []).filter((v) => v && v.name).map((v) => h("option", { key: v.id, value: v.id, style: { color: "#000" } }, v.name)));
+  const personPicker = (role) => pick === role ? h("div", { style: { marginTop: 4 } },
+    h("input", { autoFocus: true, value: q, placeholder: "이름 검색", onChange: (e) => setQ(e.target.value), style: { width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,0.1)", border: `1px solid ${C.acc}`, borderRadius: 6, color: C.txt, padding: "5px 8px", fontSize: 13 } }),
+    h("div", { style: { display: "flex", flexDirection: "column", gap: 2, marginTop: 3 } },
+      custHits.map((c) => h("button", { key: c.id, onClick: () => { onEdit({ type: role, customerId: c.id }); setPick(null); setQ(""); }, style: { textAlign: "left", background: "rgba(255,255,255,0.06)", border: "none", color: C.txt, borderRadius: 6, padding: "5px 8px", fontSize: 13, cursor: "pointer" } },
+        c.name, h("span", { style: { color: C.sub, fontSize: 11, marginLeft: 6 } }, String(c.phone || "").slice(-4) ? "☎ " + String(c.phone).slice(-4) + " " : "", String(c.address || "").split(/\s+/).slice(0, 3).join(" ")))),
+      q.trim() ? h("button", { onClick: () => { onEdit({ type: role, name: q.trim() }); setPick(null); setQ(""); }, style: { textAlign: "left", background: "transparent", border: `1px dashed ${C.line}`, color: C.sub, borderRadius: 6, padding: "5px 8px", fontSize: 12, cursor: "pointer" } }, `"${q.trim()}" 이름 그대로 쓰기 (등록 안 된 분)`) : null,
+      h("button", { onClick: () => { setPick(null); setQ(""); }, style: { background: "transparent", border: "none", color: C.sub, fontSize: 12, cursor: "pointer", alignSelf: "flex-end" } }, "닫기"))) : null;
+  const itemRows = st.items.map((it) => h("div", { key: it.key, style: { display: "flex", alignItems: "center", gap: 6, padding: "3px 0" } },
+    h("select", { value: it.productId || "", disabled: done, onChange: (e) => onEdit({ type: "itemProduct", key: it.key, productId: e.target.value }), style: { flex: 1, minWidth: 0, background: "rgba(255,255,255,0.07)", color: it.productId ? C.txt : "#ffab91", border: `1px solid ${C.line}`, borderRadius: 6, padding: "3px 4px", fontSize: 13 } },
+      it.productId ? null : h("option", { value: "", style: { color: "#000" } }, `${it.productName} (미등록)`),
+      (products || []).filter((p) => p && p.name).map((p) => h("option", { key: p.id, value: p.id, style: { color: "#000" } }, p.name))),
+    btn("−", () => it.quantity > 1 ? onEdit({ type: "itemQty", key: it.key, qty: it.quantity - 1 }) : onEdit({ type: "itemRemove", key: it.key }), { padding: "3px 8px" }),
+    h("div", { style: { color: "#fff", fontWeight: 700, fontSize: 14, minWidth: 46, textAlign: "center" } }, it.quantity + (it.quantityUnit || "개")),
+    btn("+", () => onEdit({ type: "itemQty", key: it.key, qty: it.quantity + 1 }), { padding: "3px 8px" }),
+    btn("✕", () => onEdit({ type: "itemRemove", key: it.key }), { color: "#ff8a80" }),
+    it.condition ? h("div", { style: { color: "#ffe082", fontSize: 11 } }, (it.condition === "MIN" ? "최소 " : it.condition === "MAX" ? "최대 " : "약 ") + VO2.fmtWeight(it.condGrams)) : null));
+  const addSel = h("select", { value: "", disabled: done, onChange: (e) => { if (e.target.value) onEdit({ type: "itemAdd", productId: e.target.value, qty: 1 }); }, style: { width: "100%", marginTop: 3, background: "rgba(127,209,160,0.12)", color: C.acc, border: `1px dashed ${C.acc}`, borderRadius: 6, padding: "4px 6px", fontSize: 13 } },
+    h("option", { value: "", style: { color: "#000" } }, "＋ 상품 추가"),
+    (products || []).filter((p) => p && p.name).map((p) => h("option", { key: p.id, value: p.id, style: { color: "#000" } }, p.name)));
+  const memoTxt = VO2.deliveryMemoText(st);
+  const differ = rec && (st.orderer || st.shipping.senderName) && rec.name.replace(/\s/g, "") !== String(st.shipping.senderName || (st.orderer && st.orderer.name) || "").replace(/\s/g, "");
+  return h("div", { style: { position: "sticky", top: 0, zIndex: 3, background: C.bg, border: `1px solid ${status === "confirming" ? "#ff9800" : C.line}`, borderRadius: 12, padding: "8px 10px", boxShadow: "0 4px 14px rgba(0,0,0,0.35)", maxHeight: "56vh", overflowY: "auto" } },
+    header,
+    row("업체·지점", vendorSel),
+    row("주문자", st.orderer ? st.orderer.name + (st.orderer.customerId ? "" : " (미등록)") : h("span", { style: { color: C.sub } }, st.vendor ? "(업체)" : "아직 없음"), btn("변경", () => { setPick(pick === "orderer" ? null : "orderer"); setQ(""); })),
+    personPicker("orderer"),
+    row("받는 사람", rec ? rec.name + (st.recipient ? "" : " (주문자와 같음)") : h("span", { style: { color: C.sub } }, "아직 없음"), btn("변경", () => { setPick(pick === "recipient" ? null : "recipient"); setQ(""); })),
+    personPicker("recipient"),
+    rec ? row("전화", inp(rec.phone, (v) => onEdit({ type: "phone", value: v }), "전화번호", "tel")) : null,
+    rec ? row("배송지", inp(rec.address, (v) => onEdit({ type: "address", value: v }), "주소")) : null,
+    row("상품", h("div", null, st.items.length ? itemRows : h("div", { style: { color: C.sub, fontSize: 13 } }, "아직 없음"), done ? null : addSel)),
+    row("배송 메모", h("div", null,
+      inp(st.shipping.memo, (v) => onEdit({ type: "memo", value: v }), "예: 문 앞에 놓아주세요"),
+      differ || st.shipping.senderName ? h("label", { style: { display: "flex", alignItems: "center", gap: 5, color: C.sub, fontSize: 12, marginTop: 3 } },
+        h("input", { type: "checkbox", disabled: done, checked: !!(st.shipping.senderAuto || st.shipping.senderName), onChange: (e) => onEdit({ type: "senderAuto", value: e.target.checked }) }),
+        "보내는 분 표시") : null,
+      memoTxt ? h("div", { style: { color: "#ffe082", fontSize: 12, marginTop: 3 } }, "→ " + memoTxt) : null)),
+    row("발송일", inp(st.reserveDate, (v) => onEdit({ type: "reserveDate", value: v }), "YYYY-MM-DD", "date")),
+    done ? null : h("div", { style: { display: "flex", gap: 8, marginTop: 8 } },
+      h("button", { onClick: onConfirm, style: { flex: 2, border: "none", background: status === "confirming" ? "#e65100" : "#2e7d32", color: "#fff", borderRadius: 10, padding: "10px 0", fontSize: 15, fontWeight: 800, cursor: "pointer" } }, status === "confirming" ? "✅ 이대로 주문 확정" : "✅ 주문 확정"),
+      h("button", { onClick: onCancel, style: { flex: 1, border: `1px solid ${C.line}`, background: "transparent", color: C.sub, borderRadius: 10, padding: "10px 0", fontSize: 14, cursor: "pointer" } }, "주문 취소")),
+    st.log && st.log.length ? h("div", { style: { marginTop: 6 } },
+      h("button", { onClick: () => setShowLog(!showLog), style: { border: "none", background: "transparent", color: C.sub, fontSize: 11, cursor: "pointer", padding: 0 } }, `변경 기록 ${st.log.length}건 ${showLog ? "▲" : "▼"}`),
+      showLog ? h("div", { style: { fontSize: 11, color: C.sub, lineHeight: 1.5, marginTop: 3 } }, st.log.slice(-12).reverse().map((l, i) => h("div", { key: i }, `"${l.utter}" → ${l.field}: ${l.before === "" || l.before == null ? "∅" : l.before} ⇒ ${l.after === "" || l.after == null ? "∅" : l.after}`))) : null) : null);
+}
+
 function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onClose, onAppCommand, subscriptions, openBundlePlanner, openPersonPicker, openBulkModeChoice, closeOrderPickers, onSetOrderMemo }) {
   var _a, _b;
   const [phase, setPhase] = React.useState("idle");
@@ -8138,6 +9664,12 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   const lastProcRef = React.useRef({ text: "", ts: 0 });
   const orderModeRef = React.useRef(false);
   const orderDraftRef = React.useRef(null);
+  // v260: 새 대화형 음성 주문(VO2) 상태
+  const vo2Ref = React.useRef(null);
+  const vo2ActiveRef = React.useRef(false);
+  const vo2DbRef = React.useRef({});
+  const vo2DoneAtRef = React.useRef(0);
+  const [vo2St, setVo2St] = React.useState(null);
   const awaitingMemoRef = React.useRef(false);
   const audioStreamRef = React.useRef(null);
   const hiResStreamRef = React.useRef(null);
@@ -9518,6 +11050,130 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     }
     return buildBoxItems(cur.items || [], plan);
   }
+  function vo2Enabled() {
+    try { return localStorage.getItem("joassam_vo2_off") !== "1"; } catch (e) { return true; }
+  }
+  function vo2Db() {
+    const c = vo2DbRef.current || {};
+    if (c.db && c.p === products && c.c === customers && c.v === vendors) return c.db;
+    let learned = {};
+    try { learned = typeof getLearnedAliases === "function" ? getLearnedAliases() : {}; } catch (e) {}
+    const db = { products: products || [], customers: customers || [], vendors: vendors || [], orders: orders || [], learnedAliases: learned, productAliases: typeof PRODUCT_ALIASES !== "undefined" ? PRODUCT_ALIASES : {} };
+    db.__vo2idx = VO2.buildIndex(db);
+    vo2DbRef.current = { p: products, c: customers, v: vendors, db };
+    return db;
+  }
+  function vo2SetState(st) {
+    vo2Ref.current = st;
+    setVo2St(st);
+  }
+  function vo2Say(userText, msg) {
+    setLastAI(msg);
+    pushExchange(userText, msg);
+    processingRef.current = false;
+    speakThenListen(msg);
+  }
+  function vo2End() {
+    vo2ActiveRef.current = false;
+    orderModeRef.current = false;
+    orderDraftRef.current = null;
+  }
+  function vo2Start() {
+    try { setMinimized(false); setSheetH("94vh"); } catch (e) {}
+    vo2ActiveRef.current = true;
+    orderModeRef.current = true;
+    orderDraftRef.current = { items: [] };
+    vo2SetState(VO2.newState());
+  }
+  function vo2Commit(r) {
+    let created = null;
+    try { created = createVoiceOrder ? createVoiceOrder(r.order) : null; } catch (e) { created = null; }
+    if (!created || Array.isArray(created) && !created.length) {
+      const back = Object.assign({}, r.state, { status: "collecting" });
+      vo2SetState(back);
+      return "주문 등록에 실패했어요. 받는 분과 상품을 확인해 주세요.";
+    }
+    vo2DoneAtRef.current = Date.now();
+    vo2End();
+    try {
+      if (setSearchQuery) setSearchQuery("");
+      if (setStatusFilter) setStatusFilter("all");
+      if (setDateFilter) setDateFilter("all");
+      setTab("orders");
+    } catch (e) {}
+    try {
+      const k = "joassam_vo2_log";
+      const arr = JSON.parse(localStorage.getItem(k) || "[]");
+      arr.push({ t: Date.now(), summary: r.summary, log: (r.state.log || []).slice(-40) });
+      localStorage.setItem(k, JSON.stringify(arr.slice(-30)));
+    } catch (e) {}
+    return r.reply + " 주문 목록에 등록했어요.";
+  }
+  async function vo2Turn(text) {
+    setPhaseSync("thinking", "order");
+    const db = vo2Db();
+    const opt = { parseDate: (t) => typeof parseDate === "function" ? parseDate(t, /* @__PURE__ */ new Date()) : null };
+    let r = null;
+    try { r = VO2.step(vo2Ref.current, text, db, opt); } catch (e) { r = null; }
+    const gk = geminiKey || (typeof localStorage !== "undefined" && localStorage.getItem("joassam_gemini_key_v1") || "");
+    if (r && !r.understood && gk) {
+      // 규칙으로 못 알아들은 말만 AI가 '앱 명령'으로 바꿔 주고, 그 결과도 다시 DB 확인을 거침
+      try {
+        const lines = await vo2LlmRewrite(text, vo2Ref.current || VO2.newState(), db.__vo2idx, gk);
+        if (lines && lines.length) {
+          let s2 = vo2Ref.current, last = null;
+          const said = [];
+          for (const ln of lines) {
+            last = VO2.step(s2, ln, db, opt);
+            s2 = last.state;
+            if (last.reply) last.reply.split(/(?<=[.?!])\s+/).forEach((x) => { if (x && said.indexOf(x) < 0) said.push(x); });
+            if (last.confirmed || last.cancelled) break;
+          }
+          if (last && last.understood) { r = last; r.reply = said.join(" "); }
+        }
+      } catch (e) {}
+    }
+    if (!r) { vo2Say(text, "주문 처리 중 문제가 생겼어요. 다시 말씀해 주세요."); return; }
+    vo2SetState(r.state);
+    if (r.cancelled) { vo2End(); vo2DoneAtRef.current = Date.now(); vo2Say(text, r.reply); return; }
+    if (r.confirmed) { vo2Say(text, vo2Commit(r)); return; }
+    if (!r.understood) {
+      try { addProblemLog(text, "(음성주문) 못 알아들음", "fail", snapshotTurns(text, "")); } catch (e) {}
+      vo2Say(text, "잘 못 알아들었어요. 예를 들어 '적상추 4박스', '받는 사람 홍길동', '그대로 주문해'처럼 말씀해 주세요.");
+      return;
+    }
+    vo2Say(text, r.reply || "네.");
+  }
+  function vo2ScreenEdit(action) {
+    if (!vo2Ref.current) return;
+    const r = VO2.edit(vo2Ref.current, action, vo2Db());
+    vo2SetState(r.state);
+  }
+  function vo2ScreenConfirm() {
+    const cur = vo2Ref.current;
+    if (!cur) return;
+    try { stopRec(); } catch (e) {}
+    try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
+    const r = VO2.step(Object.assign({}, cur, { status: "confirming" }), "응 그대로 해", vo2Db());
+    vo2SetState(r.state);
+    const msg = r.confirmed ? vo2Commit(r) : r.reply;
+    setLastAI(msg);
+    pushExchange("(화면) 주문 확정", msg);
+    processingRef.current = false;
+    speakThenListen(msg);
+  }
+  function vo2ScreenCancel() {
+    const cur = vo2Ref.current;
+    if (!cur) return;
+    vo2SetState(Object.assign({}, cur, { status: "cancelled" }));
+    vo2End();
+    vo2DoneAtRef.current = Date.now();
+    const m = "주문을 취소했어요.";
+    setLastAI(m);
+    pushExchange("(화면) 주문 취소", m);
+    processingRef.current = false;
+    speakThenListen(m);
+  }
   async function handleOrderTurn(text) {
     const t = (text || "").replace(/\s/g, "");
     const cur = orderDraftRef.current || { items: [] };
@@ -10425,7 +12081,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         } catch (e) {
         }
       }
-      if (_strongQuery && _qName) {
+      if (_strongQuery && _qName && !vo2ActiveRef.current) {
         orderModeRef.current = false;
         orderDraftRef.current = null;
         clearInterval(countdownRef.current);
@@ -10443,6 +12099,12 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
           return;
         }
       }
+    }
+    if (vo2ActiveRef.current) {
+      clearInterval(countdownRef.current);
+      setRetryCountdown(0);
+      vo2Turn(text).catch(() => { processingRef.current = false; });
+      return;
     }
     if (orderModeRef.current) {
       clearInterval(countdownRef.current);
@@ -10503,6 +12165,26 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       pushExchange(text, m);
       processingRef.current = false;
       speakThenListen(m);
+      return;
+    }
+    // v260: 확정된 주문을 바로 고치려 하면 새 주문으로 만들지 않고 안내
+    if (vo2Ref.current && vo2Ref.current.status === "confirmed" && Date.now() - vo2DoneAtRef.current < 12e4 && !detectVoiceOrderIntent(text)) {
+      try {
+        const _db = vo2Db();
+        const _t = String(text || "");
+        if (VO2.findProducts(VO2.normalize(_t), _db.__vo2idx).length || /(바꿔|빼|추가|수정|변경|정정)/.test(_t.replace(/\s/g, ""))) {
+          clearInterval(countdownRef.current);
+          setRetryCountdown(0);
+          vo2Say(text, "이미 주문이 확정되었습니다. 바꾸시려면 주문 목록에서 수정하시거나, 새 주문은 '주문할게'라고 말씀해 주세요.");
+          return;
+        }
+      } catch (e) {}
+    }
+    if (detectVoiceOrderIntent(text) && vo2Enabled()) {
+      clearInterval(countdownRef.current);
+      setRetryCountdown(0);
+      vo2Start();
+      vo2Turn(text).catch(() => { processingRef.current = false; });
       return;
     }
     if (detectVoiceOrderIntent(text)) {
@@ -11265,7 +12947,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       fontSize: 14,
       fontStyle: "italic",
       minHeight: 32
-    } }, interim) : null, /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", minHeight: 0 } }, /* @__PURE__ */ React.createElement(
+    } }, interim) : null, vo2St ? /* @__PURE__ */ React.createElement("div", { style: { flexShrink: 0, padding: "0 10px 6px" } }, /* @__PURE__ */ React.createElement(VoiceOrderCard, { st: vo2St, idx: vo2Db().__vo2idx, products, vendors, customers, onEdit: vo2ScreenEdit, onConfirm: vo2ScreenConfirm, onCancel: vo2ScreenCancel, onClose: () => setVo2St(null) })) : null, /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", minHeight: 0 } }, /* @__PURE__ */ React.createElement(
       "div",
       {
         onMouseDown: onDragStart,
@@ -11294,7 +12976,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         fontSize: 14,
         maxWidth: "85%"
       } }, msg.role === "user" ? "\u{1F464} " : "\u{1F916} ", msg.parts[0].text)),
-      lastUser && (history.length === 0 || ((_b = (_a = history[history.length - 1]) == null ? void 0 : _a.parts[0]) == null ? void 0 : _b.text) !== lastUser) ? /* @__PURE__ */ React.createElement("div", { style: {
+      lastUser && (history.length === 0 || ((_b = (_a = history.slice().reverse().find((m) => m && m.role === "user")) == null ? void 0 : _a.parts[0]) == null ? void 0 : _b.text) !== lastUser) ? /* @__PURE__ */ React.createElement("div", { style: {
         alignSelf: "flex-end",
         background: "rgba(33,150,243,0.25)",
         borderRadius: "14px 14px 4px 14px",
