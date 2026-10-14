@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 253;
+const APP_VERSION = 254;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2341,7 +2341,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v253 (주문할 때 인식·용량 다른 상품 오매칭 방지)";
+const APP_BUILD = "v254 (거래처+주문 말하면 주문 시작·할께 인식)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8999,7 +8999,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   }
   function hasOrderActionVerb(text) {
     const t = (text || "").replace(/\s/g, "");
-    return /주문(을|를)?(등록|접수|받아|받을|받자|작성|넣어|만들|하려|할게|하자|해줘|하겠|넣을)|음성주문|음성으로주문|주문받아줘|주문접수|새주문|주문등록|주문추가|주문넣|주문작성/.test(t) && !/주문할때|주문할 때/.test(t) || /(등록해|접수해|넣어줘|작성해|추가해|주문할게|주문하자|주문해줘)/.test(t);
+    return /주문(을|를)?(등록|접수|받아|받을|받자|작성|넣어|만들|하려|할게|할께|할래|할거|하고싶|하자|해줘|해요|하겠|넣을|넣을게|넣을께)|음성주문|음성으로주문|주문받아줘|주문접수|새주문|주문등록|주문추가|주문넣|주문작성/.test(t) && !/주문할때|주문할 때/.test(t) || /(등록해|접수해|넣어줘|작성해|추가해|주문할게|주문할께|주문할래|주문하자|주문해줘)/.test(t);
   }
   function utteranceHasProductOrQty(text) {
     const t = (text || "").replace(/\s/g, "");
@@ -9020,7 +9020,16 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     const t = (text || "").replace(/\s/g, "");
     if (looksLikeQueryUtterance(text) && !hasOrderActionVerb(text)) return false;
     if (hasOrderActionVerb(text)) return true;
-    if (/주문/.test(t)) return utteranceHasProductOrQty(text);
+    if (/주문/.test(t)) {
+      if (utteranceHasProductOrQty(text)) return true;
+      if (!/(확인|내역|상황|현황|알려|보여|목록|리스트|조회|검색|취소|삭제|수정|몇)/.test(t)) {
+        try {
+          if (findKnownNameIn(text, customers, vendors, products)) return true;
+        } catch (e) {
+        }
+      }
+      return false;
+    }
     if (/저번처럼|지난번처럼|늘하던|평소처럼|하던대로/.test(t) && findKnownNameIn(text, customers, vendors, products)) return true;
     return false;
   }
