@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 256;
+const APP_VERSION = 257;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2386,7 +2386,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v256 (빈 데이터 불러오기 방지)";
+const APP_BUILD = "v257 (조비서 멈춤 방지)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -7731,8 +7731,10 @@ JSON\uC73C\uB85C\uB9CC:
     throw new Error("\uD30C\uC2F1 \uC2E4\uD328");
   }
 }
+let _puterBadUntil = 0;
 function puterAvailable() {
   try {
+    if (Date.now() < _puterBadUntil) return false;
     return typeof puter !== "undefined" && puter && puter.ai && typeof puter.ai.chat === "function";
   } catch (e) {
     return false;
@@ -7766,7 +7768,7 @@ async function callPuterJarvis(history, ctx) {
     if (txt) msgs.push({ role, content: txt });
   });
   const chatP = puter.ai.chat(msgs);
-  const r = await Promise.race([chatP, new Promise((_, rej) => setTimeout(() => rej(new Error("PUTER_TIMEOUT")), 15e3))]);
+  const r = await Promise.race([chatP, new Promise((_, rej) => setTimeout(() => { _puterBadUntil = Date.now() + 3e5; rej(new Error("PUTER_TIMEOUT")); }, 6e3))]);
   const text = puterExtractText(r);
   if (!text) throw new Error("PUTER_EMPTY");
   return { text, provider: "puter" };
@@ -7804,7 +7806,7 @@ ${JSON.stringify(draft || { name: "", items: [], reserveDate: "", deliveryMessag
 6. \uBC18\uB4DC\uC2DC JSON\uB9CC \uCD9C\uB825, \uC124\uBA85 \uAE08\uC9C0:
 {"name":"","items":[{"name":"","qty":1}],"reserveDate":"","deliveryMessage":""}`;
   const chatP = puter.ai.chat([{ role: "user", content: sys }]);
-  const r = await Promise.race([chatP, new Promise((_, rej) => setTimeout(() => rej(new Error("PUTER_TIMEOUT")), 12e3))]);
+  const r = await Promise.race([chatP, new Promise((_, rej) => setTimeout(() => { _puterBadUntil = Date.now() + 3e5; rej(new Error("PUTER_TIMEOUT")); }, 6e3))]);
   const rawT = puterExtractText(r).replace(/```(?:json)?/g, "").replace(/```/g, "").trim();
   let obj = null;
   try {
@@ -8111,6 +8113,8 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   const dragStartH = React.useRef(null);
   const processingRef = React.useRef(false);
   const recIdRef = React.useRef(0);
+  const procTokRef = React.useRef(0);
+  const lastProcRef = React.useRef({ text: "", ts: 0 });
   const orderModeRef = React.useRef(false);
   const orderDraftRef = React.useRef(null);
   const awaitingMemoRef = React.useRef(false);
@@ -10168,7 +10172,27 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   async function processUserSpeech(text) {
     if (!activeRef.current) return;
     if (processingRef.current) return;
+    {
+      const _dn = String(text || "").replace(/[\s.,!?]/g, "");
+      const _lp = lastProcRef.current;
+      if (_dn.length >= 6 && _lp.text === _dn && Date.now() - _lp.ts < 6e3) {
+        try { setInterim(""); } catch (e) {}
+        if (activeRef.current && autoListenRef.current) setTimeout(() => { if (activeRef.current && phaseRef.current !== "speaking" && !processingRef.current) beginListening(); }, 200);
+        return;
+      }
+      lastProcRef.current = { text: _dn, ts: Date.now() };
+    }
     processingRef.current = true;
+    {
+      const _tok = ++procTokRef.current;
+      setTimeout(() => {
+        if (procTokRef.current !== _tok || !processingRef.current || !activeRef.current) return;
+        processingRef.current = false;
+        const _m = "응답이 늦어서 다시 들을게요. 한 번 더 말씀해 주세요.";
+        try { setLastAI(_m); } catch (e) {}
+        try { speakThenListen(_m); } catch (e) { try { setPhaseSync("idle"); } catch (e2) {} }
+      }, 3e4);
+    }
     setInterim("");
     text = dedupCascade(text).slice(0, 200);
     try {
