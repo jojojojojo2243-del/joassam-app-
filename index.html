@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 260;
+const APP_VERSION = 261;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2386,7 +2386,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v260 (대화형 음성 주문 새로 구현: 주문 카드·정정·받는 사람·메모)";
+const APP_BUILD = "v261 (음성 인식 보정·진단 모드·실데이터 인식 시험)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8097,7 +8097,7 @@ null       : \uC774\uB3D9 \uBD88\uD544\uC694\uD55C \uC77C\uBC18 \uB300\uD654
   const stripped = cleaned.replace(/^[^{]*\{/, "").replace(/["']?\s*text\s*["']?\s*:\s*["']?/i, "").replace(/["']?\s*,?\s*["']?action["']?\s*:[\s\S]*$/i, "").replace(/[{}"]/g, "").trim();
   return { text: stripped || "\uB2E4\uC2DC \uB9D0\uC500\uD574 \uC8FC\uC138\uC694.", action: null };
 }
-// ===== VO2: 대화형 음성 주문 엔진 (v260) =====
+// ===== VO2: 대화형 음성 주문 엔진 (v261) =====
 // 말 → 정규화 → 의도/항목 추출 → 등록된 DB(상품·고객·업체·지점)에서 후보 검색 → 현재 주문 상태에 '바뀐 것만' 반영 → 답변
 // 주문 상태는 문자열이 아니라 구조화된 객체로 관리하고, 애매하면 추측하지 않고 질문함.
 var VO2 = (function () {
@@ -8116,21 +8116,30 @@ var VO2 = (function () {
         out.push(CHO[Math.floor(k / 588)]);
         out.push(JUNG[Math.floor((k % 588) / 28)]);
         var j = k % 28;
-        if (j) out.push(JONG[j]);
+        if (j) out.push("_" + JONG[j]); // 받침은 따로 표시 (받침이 빠지거나 바뀌는 STT 오류를 가볍게 봄)
       } else if (!/\s/.test(s[i])) out.push(s[i].toLowerCase());
     }
     return out;
   }
+  // 발음이 비슷해 STT가 자주 헷갈리는 자모 쌍 (바뀌어도 반값만 틀린 것으로 침)
+  var CONF = {};
+  ["ㄷㄹ", "ㄴㅁ", "ㄴㄹ", "ㅂㅍ", "ㄱㅋ", "ㄷㅌ", "ㅈㅊ", "ㅅㅆ", "ㄱㄲ", "ㄷㄸ", "ㅂㅃ", "ㅈㅉ", "ㅇㅎ", "ㅐㅔ", "ㅒㅖ", "ㅓㅗ", "ㅕㅛ", "ㅚㅙ", "ㅚㅞ", "ㅙㅞ", "ㅢㅣ", "ㅡㅜ", "ㅝㅗ", "ㅟㅣ",
+    "_ㄱ_ㄲ", "_ㄱ_ㅋ", "_ㄷ_ㅅ", "_ㄷ_ㅌ", "_ㅅ_ㅆ", "_ㅅ_ㅈ", "_ㅅ_ㅊ", "_ㅂ_ㅍ", "_ㄴ_ㅇ", "_ㄴ_ㅁ", "_ㅁ_ㅇ", "_ㄹ_ㄴ"].forEach(function (p) {
+    var a, b;
+    if (p[0] === "_") { a = p.slice(0, 2); b = p.slice(2); } else { a = p[0]; b = p[1]; }
+    CONF[a + "|" + b] = CONF[b + "|" + a] = 1;
+  });
+  function subCost(x, y) { return x === y ? 0 : CONF[x + "|" + y] ? 0.4 : 1; }
+  function indelCost(x) { return x && x[0] === "_" ? 0.5 : 1; }
   function lev(a, b) {
     var m = a.length, n = b.length;
-    if (!m) return n;
-    if (!n) return m;
     var prev = new Array(n + 1), cur = new Array(n + 1);
-    for (var j = 0; j <= n; j++) prev[j] = j;
+    prev[0] = 0;
+    for (var j = 1; j <= n; j++) prev[j] = prev[j - 1] + indelCost(b[j - 1]);
     for (var i = 1; i <= m; i++) {
-      cur[0] = i;
+      cur[0] = prev[0] + indelCost(a[i - 1]);
       for (var j2 = 1; j2 <= n; j2++) {
-        cur[j2] = Math.min(prev[j2] + 1, cur[j2 - 1] + 1, prev[j2 - 1] + (a[i - 1] === b[j2 - 1] ? 0 : 1));
+        cur[j2] = Math.min(prev[j2] + indelCost(a[i - 1]), cur[j2 - 1] + indelCost(b[j2 - 1]), prev[j2 - 1] + subCost(a[i - 1], b[j2 - 1]));
       }
       var t = prev; prev = cur; cur = t;
     }
@@ -8293,6 +8302,7 @@ var VO2 = (function () {
       if (groups[to]) addPA(from, to);
     });
     products.forEach(function (p) { (p.raw.aliases || []).forEach(function (a) { addPA(a, p.baseNS); }); });
+    var prodAliasMulti = {};
     // 업체·지점
     var vendors = (db.vendors || []).filter(function (v) { return v && v.name; }).map(function (v) {
       var cb = splitCompanyBranch(v.name);
@@ -8312,12 +8322,43 @@ var VO2 = (function () {
     var custByName = {};
     var customers = (db.customers || []).filter(function (c) { return c && c.name; });
     customers.forEach(function (c) { var k = ns(c.name); (custByName[k] = custByName[k] || []).push(c); });
+    // v261: 학습센터 '사전'(사장님이 등록·승인한 말)과 기존 STT 보정표를 '이름 별칭'으로 연결
+    //  → 문장을 통째로 바꾸지 않고, 그 말이 들렸을 때 해당 상품·업체·고객 후보로만 사용 (최소→채소 같은 사전이 '최소 2kg'을 망가뜨리지 않게)
+    var custAlias = {};
+    var aliasSrc = [];
+    [["dict", db.userDict || {}], ["stt", db.sttAliases || {}]].forEach(function (pair) {
+      Object.keys(pair[1]).forEach(function (from) { aliasSrc.push({ from: from, to: pair[1][from], src: pair[0] }); });
+    });
+    var aliasLog = [];
+    aliasSrc.forEach(function (a) {
+      var f = ns(a.from), toRaw = ns(a.to);
+      if (!f || !toRaw || f === toRaw) return;
+      var fCore = f.replace(/\d+(?:\.\d+)?(kg|g|키로|킬로|그램|개|박스)?/gi, "");
+      if ((fCore.match(/[가-힣]/g) || []).length < 2) { aliasLog.push({ from: a.from, to: a.to, src: a.src, used: "무시(숫자·무게만 있는 말)" }); return; }
+      if (/^(최소|최대|이상|이하|정도|주문|취소|확정|추가|메모|주소|전화|번호|등록|그대로|이대로|박스|키로|킬로|그램|받는|보내는|아니|말고|빼|빼줘|바꿔|변경|처음|다시)/.test(f)) { aliasLog.push({ from: a.from, to: a.to, src: a.src, used: "무시(앱 명령어와 겹치는 말)" }); return; }
+      var to = toRaw.replace(/(\d+(?:\.\d+)?)(kg|g)/g, "");
+      var used = "";
+      if (groups[to]) { if (!groups[f]) { prodAlias[f] = to; used = "상품:" + groups[to].base; } }
+      else {
+        var cont = Object.keys(groups).filter(function (k) { return k.indexOf(to) >= 0; });
+        if (cont.length === 1 && !groups[f]) { prodAlias[f] = cont[0]; used = "상품:" + groups[cont[0]].base; }
+        else if (cont.length > 1 && !groups[f]) { prodAliasMulti[f] = cont; used = "상품 후보 " + cont.length + "개"; }
+      }
+      if (!used) {
+        var co = companies[to] || Object.keys(companies).map(function (k) { return companies[k]; }).find(function (c) { return c.aliases.indexOf(to) >= 0; });
+        var vend = !co ? vendors.find(function (v) { return ns(v.name) === to; }) : null;
+        if (vend) { if (vend.aliases.indexOf(f) < 0) vend.aliases.push(f); used = "업체:" + vend.name; }
+        else if (co) { if (co.aliases.indexOf(f) < 0) co.aliases.push(f); used = "업체:" + co.name; }
+      }
+      if (!used && custByName[to]) { custAlias[f] = to; used = "고객:" + to; }
+      aliasLog.push({ from: a.from, to: a.to, src: a.src, used: used || "연결 안 됨(등록된 이름 아님)" });
+    });
     var recent = {};
     (db.orders || []).slice(-3000).forEach(function (o) {
       var n = ns((o.recipient && o.recipient.name) || (o.sender && o.sender.name) || "");
       if (n) recent[n] = (recent[n] || 0) + 1;
     });
-    return { products: products, groups: groups, prodAlias: prodAlias, vendors: vendors, companies: companies, customers: customers, custByName: custByName, recent: recent };
+    return { products: products, groups: groups, prodAlias: prodAlias, prodAliasMulti: prodAliasMulti, vendors: vendors, companies: companies, customers: customers, custByName: custByName, custAlias: custAlias, aliasLog: aliasLog, recent: recent };
   }
 
   // ---------- 후보 검색 ----------
@@ -8342,6 +8383,7 @@ var VO2 = (function () {
           if (w.length < 2) continue;
           if (idx.groups[w]) { best = { baseNS: w, score: 1, how: "exact" }; break; }
           if (idx.prodAlias[w]) { best = { baseNS: idx.prodAlias[w], score: 0.97, how: "alias" }; break; }
+          if (idx.prodAliasMulti && idx.prodAliasMulti[w]) { best = { ambiguous: idx.prodAliasMulti[w], score: 0.9, how: "alias-multi" }; break; }
         }
         if (!best) {
           // 포함 관계(예: '채소' ⊂ '모듬쌈채소') — 여러 개면 애매함으로 표시
@@ -8355,19 +8397,24 @@ var VO2 = (function () {
           }
         }
         if (!best) {
-          var w1 = vs[vs.length - 1];
-          if (w1.length >= 2) {
-            var sc = [];
+          // 조사가 붙었는지 아닌지 모르므로 떼기 전·후 모든 형태로 비교해 가장 비슷한 것을 씀 ("초록식랑"의 '랑'이 조사로 잘려 나가지 않게)
+          var bestBy = {};
+          vs.forEach(function (w1) {
+            if (w1.length < 2) return;
             keys.forEach(function (k) {
               if (Math.abs(k.length - w1.length) > 2) return;
               var s = sim(w1, k);
-              if (s >= (w1.length <= 2 ? 0.9 : 0.75)) sc.push({ k: k, s: s });
+              if (s >= (w1.length <= 2 ? 0.9 : 0.75) && (!bestBy[k] || s > bestBy[k])) bestBy[k] = s;
             });
             Object.keys(idx.prodAlias).forEach(function (a) {
               if (Math.abs(a.length - w1.length) > 1) return;
-              var s = sim(w1, a);
-              if (s >= 0.82) sc.push({ k: idx.prodAlias[a], s: s - 0.02 });
+              var s = sim(w1, a) - 0.02;
+              var k2 = idx.prodAlias[a];
+              if (s >= 0.8 && (!bestBy[k2] || s > bestBy[k2])) bestBy[k2] = s;
             });
+          });
+          var sc = Object.keys(bestBy).map(function (k) { return { k: k, s: bestBy[k] }; });
+          if (sc.length) {
             sc.sort(function (a, b) { return b.s - a.s; });
             if (sc.length && (sc.length === 1 || sc[0].s - sc[1].s >= 0.06 || sc[0].k === sc[1].k)) best = { baseNS: sc[0].k, score: sc[0].s, how: "similar" };
           }
@@ -8398,6 +8445,7 @@ var VO2 = (function () {
           var w = vs[vi];
           if (w.length < 2 || w.length > 12) continue;
           if (idx.custByName[w]) { hit = { nameNS: w, list: idx.custByName[w], exact: true }; break; }
+          if (idx.custAlias && idx.custAlias[w]) { hit = { nameNS: idx.custAlias[w], list: idx.custByName[idx.custAlias[w]], exact: true, alias: true }; break; }
         }
         if (hit) { found.push({ start: i, end: i + L, surface: seg.join(" "), nameNS: hit.nameNS, list: hit.list, exact: true }); i += L - 1; break; }
       }
@@ -8405,14 +8453,17 @@ var VO2 = (function () {
     if (!found.length && opts.fuzzy) {
       for (var i2 = 0; i2 < toks.length; i2++) {
         if (isQtyTok(toks[i2])) continue;
-        var w2 = stripParticles(toks[i2]);
-        if (w2.length < 2 || w2.length > 5 || /^(받는|보내는|주문|아니|그거|사람|고객|업체|지점|전화|주소|메모|배송|번호)/.test(w2)) continue;
-        var cands = [];
-        Object.keys(idx.custByName).forEach(function (k) {
-          if (Math.abs(k.length - w2.length) > 1) return;
-          var s = sim(w2, k);
-          if (s >= 0.7) cands.push({ nameNS: k, s: s + Math.min(0.03, (idx.recent[k] || 0) * 0.005) });
+        var vs2 = variants(toks[i2]).filter(function (w) { return w.length >= 2 && w.length <= 5 && !/^(받는|보내는|주문|아니|그거|사람|고객|업체|지점|전화|주소|메모|배송|번호)/.test(w); });
+        if (!vs2.length) continue;
+        var byName = {};
+        vs2.forEach(function (w2) {
+          Object.keys(idx.custByName).forEach(function (k) {
+            if (Math.abs(k.length - w2.length) > 1) return;
+            var s = sim(w2, k) - (w2.length < k.length ? 0.04 : 0);
+            if (s >= 0.7 && (!byName[k] || s > byName[k])) byName[k] = s;
+          });
         });
+        var cands = Object.keys(byName).map(function (k) { return { nameNS: k, s: byName[k] + Math.min(0.03, (idx.recent[k] || 0) * 0.005) }; });
         cands.sort(function (a, b) { return b.s - a.s; });
         if (cands.length) found.push({ start: i2, end: i2 + 1, surface: toks[i2], nameNS: cands[0].nameNS, list: idx.custByName[cands[0].nameNS], exact: false, candidates: cands.slice(0, 4) });
       }
@@ -8446,16 +8497,20 @@ var VO2 = (function () {
           }
         }
         if (!best && L >= 1) {
-          var w1 = vs[vs.length - 1];
-          if (w1.length >= 3) {
-            var sc = [];
+          var bestC = new Map();
+          vs.forEach(function (w1) {
+            if (w1.length < 3) return;
             cos.forEach(function (c) {
               c.aliases.forEach(function (a) {
                 if (a.length < 3) return;
                 var s = a.indexOf(w1) === 0 && w1.length >= 4 ? 0.9 : sim(w1, a);
-                if (s >= 0.78) sc.push({ c: c, s: s });
+                if (s >= 0.78 && (!bestC.has(c) || s > bestC.get(c))) bestC.set(c, s);
               });
             });
+          });
+          var sc = [];
+          bestC.forEach(function (v, c) { sc.push({ c: c, s: v }); });
+          if (sc.length) {
             sc.sort(function (a, b) { return b.s - a.s; });
             if (sc.length && (sc.length === 1 || sc[0].s - sc[1].s >= 0.05 || sc[0].c === sc[1].c)) best = { company: sc[0].c, score: sc[0].s };
           }
@@ -9185,6 +9240,7 @@ var VO2 = (function () {
   }
 
   // ---------- 상품 ----------
+  var ITEM_STOP = /^(아니|아니요|아니야|아냐|그거|그것|그건|이거|방금|아까|마지막|그|저|바꿔|바꿔줘|변경|변경해|수정|해|해줘|줘|주세요|로|으로|말고|아니고|아니라|더|빼|빼줘|추가|추가해|추가해줘|야|이야|요|만|씩|각|박스|개|정도|쯤|최소|최대|이상|이하|내가|라고|했잖아|했어|할게|할께|해요|하고|하나|넣어|넣어줘|담아|담아줘|주문|주문해|좀|다시|그리고|또|네|응|예|좋아|대신|각각|전부|모두|다|상품|물건|품목|것|거|건|그상품|아까그)$/;
   function findItem(st, baseNS) { return st.items.find(function (it) { return it.baseNS === baseNS; }) || null; }
   function addOrMergeItem(st, add, R, logChange, idx) {
     var ex = st.items.find(function (it) { return it.productId && it.productId === add.productId; });
@@ -9347,7 +9403,7 @@ var VO2 = (function () {
     }
     if (!mentions.length && qtys.length) {
       // 수량은 있는데 상품 이름처럼 보이는 말을 못 찾은 경우 → 등록 상품이 아니라고 알림 (임의로 다른 상품에 적용하지 않음)
-      var STOP = /^(아니|아니요|아니야|아냐|그거|그것|그건|이거|방금|아까|마지막|그|저|바꿔|바꿔줘|변경|변경해|수정|해|해줘|줘|주세요|로|으로|말고|아니고|아니라|더|빼|빼줘|추가|추가해|추가해줘|야|이야|요|만|씩|각|박스|개|정도|쯤|최소|최대|이상|이하|내가|라고|했잖아|했어|할게|할께|해요|하고|하나|넣어|넣어줘|담아|담아줘|주문|주문해|좀|다시|그리고|또|네|응|예|좋아|대신|각각|전부|모두|다)$/;
+      var STOP = ITEM_STOP;
       var unknown = tokensOf(c).filter(function (tk) { return !isQtyTok(tk); }).map(stripParticles).filter(function (w) { return w.length >= 2 && !STOP.test(w) && !/(바꿔|변경|해줘|주세요|했잖아|라고|으로|이야|한|했던|하던|했던거|말한거)$/.test(w); });
       if (unknown.length) {
         R.notes.push("'" + unknown.join(" ") + "'은(는) 등록된 상품에서 찾지 못했어요. 상품 이름을 다시 말씀해 주세요.");
@@ -9374,6 +9430,12 @@ var VO2 = (function () {
     var toks = tokensOf(c);
     var tokPos = function (ti) { return tokIndexPos(c, ti); };
     var mq = mentions.map(function () { return []; });
+    var unknownBetween = function (from, to) {
+      // from~to(글자 위치) 사이에 상품처럼 보이는 모르는 말이 있으면 그 수량은 그 말의 것 (다른 상품에 붙이지 않음)
+      var seg = c.slice(from, to);
+      return tokensOf(seg).some(function (tk) { if (isQtyTok(tk)) return false; var w = stripParticles(tk); return w.length >= 2 && !ITEM_STOP.test(w) && !/(바꿔|변경|해줘|주세요|했잖아|라고|으로|이야|한|했던|하던)$/.test(w) && !RX.del.test(w) && !/(최소|최대|이상|이하|정도|각)/.test(w); });
+    };
+    var orphan = [];
     qtys.forEach(function (q) {
       var bestI = -1, bestD = 1e9;
       mentions.forEach(function (m, mi) {
@@ -9382,8 +9444,17 @@ var VO2 = (function () {
         var d = q.index >= mEnd ? q.index - mEnd : (mStart - q.end) + 1000; // 앞 상품 우선
         if (d < bestD) { bestD = d; bestI = mi; }
       });
-      if (bestI >= 0) mq[bestI].push(q);
+      if (bestI >= 0) {
+        var m0 = mentions[bestI];
+        var mEnd0 = tokPos(m0.end - 1) + (toks[m0.end - 1] || "").length;
+        if (q.index >= mEnd0 && unknownBetween(mEnd0, q.index)) { orphan.push(q); return; }
+        mq[bestI].push(q);
+      }
     });
+    if (orphan.length) {
+      var unk = tokensOf(c).filter(function (tk) { return !isQtyTok(tk); }).map(stripParticles).filter(function (w) { return w.length >= 2 && !ITEM_STOP.test(w) && !/(바꿔|변경|해줘|주세요|했잖아|라고|으로|이야|한|했던|하던)$/.test(w) && !RX.del.test(w) && mentions.every(function (m) { return ns(m.surface).indexOf(w) < 0; }); });
+      if (unk.length) R.notes.push("'" + unk.join(" ") + "'은(는) 등록된 상품에서 찾지 못해 뺐어요.");
+    }
     mentions.forEach(function (m, mi) {
       var qs = mq[mi];
       var cq = qs.filter(function (q) { return q.kind === "count"; });
@@ -9501,7 +9572,70 @@ var VO2 = (function () {
       "[사장님 말] " + String(utterance || "");
   }
 
+  // ---------- 진단: 어떤 후보를 찾았는지, 어느 단계에서 틀렸는지 ----------
+  var DIAG_STOP = /^(그대|이대|그대로|이대로|주문할|하는|주문|주문할게|주문할께|주문해|주문해줘|할게|할께|해줘|해|줘|주세요|아니|아니야|네|응|예|그대로|이대로|좋아|빼|빼줘|빼고|추가|추가해|추가해줘|더|바꿔|바꿔줘|변경|말고|아니고|아니라|받는|보내는|사람|분|씨|님|메모|배송|주소|전화|번호|전화번호|그거|방금|아까|마지막|이거|저거|그리고|하고|또|좀|다시|처음부터|취소|확정|등록|해요|이야|야|요|로|으로|은|는|이|가|을|를|도|만|라고|이라고|넣어줘|넣어|적어줘|써줘|했잖아|정도|최소|최대|이상|이하|각|박스|개|상품|업체|고객|지점|그|저|내가|말한|거|것|건)$/;
+  function closestNames(word, idx, n) {
+    var w = ns(word);
+    if (w.length < 2) return [];
+    var out = [];
+    Object.keys(idx.groups).forEach(function (k) { var s = sim(w, k); if (s >= 0.45) out.push({ kind: "상품", name: idx.groups[k].base, s: s }); });
+    Object.keys(idx.companies).forEach(function (k) { var c = idx.companies[k]; var best = 0; c.aliases.forEach(function (a) { best = Math.max(best, sim(w, a)); }); if (best >= 0.45) out.push({ kind: "업체", name: c.name, s: best }); });
+    idx.vendors.forEach(function (v) { if (v.branch) { var s2 = sim(w, v.branchNS); if (s2 >= 0.55) out.push({ kind: "지점", name: v.name, s: s2 }); } });
+    if (w.length >= 2 && w.length <= 5) Object.keys(idx.custByName).forEach(function (k) { if (Math.abs(k.length - w.length) > 1) return; var s3 = sim(w, k); if (s3 >= 0.6) out.push({ kind: "고객", name: k, s: s3 }); });
+    out.sort(function (a, b) { return b.s - a.s; });
+    return out.slice(0, n || 3).map(function (o) { return { kind: o.kind, name: o.name, s: Math.round(o.s * 100) / 100 }; });
+  }
+  function analyze(text, db, st) {
+    var idx = db && db.__vo2idx ? db.__vo2idx : buildIndex(db);
+    var norm = normalize(text);
+    var prods = findProducts(norm, idx);
+    var cos = findCompanies(norm, idx);
+    var coCur = cos.length ? cos[cos.length - 1].company : st && st.company ? idx.companies[st.company.nameNS] : null;
+    var brs = findBranches(norm, idx, coCur);
+    var pers = findPersons(norm, idx, { fuzzy: true });
+    var qtys = parseQuantities(norm);
+    var used = {};
+    [prods, cos, brs, pers].forEach(function (list) { list.forEach(function (m) { for (var i = m.start; i < m.end; i++) used[i] = 1; }); });
+    var unknown = tokensOf(norm).map(function (tk, i) { return { tk: tk, i: i }; }).filter(function (x) { return !used[x.i] && !isQtyTok(x.tk); }).map(function (x) { return stripParticles(x.tk); }).filter(function (w) { return w.length >= 2 && !DIAG_STOP.test(w) && !/(해줘|주세요|할게|할께|했어|이야|라고|으로)$/.test(w); });
+    return {
+      normalized: norm,
+      products: prods.map(function (m) { return { said: m.surface, found: m.baseNS ? idx.groups[m.baseNS].base : null, candidates: m.ambiguous ? m.ambiguous.map(function (b) { return idx.groups[b].base; }) : null, how: m.how, score: Math.round(m.score * 100) / 100 }; }),
+      companies: cos.map(function (m) { return { said: m.surface, found: m.vendor ? m.vendor.name : m.company.name, score: Math.round(m.score * 100) / 100 }; }),
+      branches: brs.map(function (m) { return { said: m.surface, found: m.vendor ? m.vendor.name : null, candidates: m.ambiguous ? m.ambiguous.map(function (v) { return v.name; }) : null, score: Math.round(m.score * 100) / 100 }; }),
+      persons: pers.map(function (m) { return { said: m.surface, found: m.list && m.list[0] ? String(m.list[0].name).trim() : null, count: m.list ? m.list.length : 0, exact: !!m.exact, candidates: m.candidates ? m.candidates.map(function (c) { return c.nameNS; }) : null }; }),
+      quantities: qtys.map(function (q) { return q.text + (q.cond ? "(" + q.cond + ")" : ""); }),
+      unknown: unknown.map(function (w) { return { word: w, closest: closestNames(w, idx, 3) }; })
+    };
+  }
+  // 받아쓰기 후보(N-best) 중 등록된 이름·수량과 가장 잘 맞는 문장 점수
+  function scoreText(text, db) {
+    var a = analyze(text, db, null);
+    var sc = 0;
+    a.products.forEach(function (p) { sc += p.found ? (p.how === "exact" || p.how === "alias" ? 3 : p.how === "contains" ? 2 : 1.5 * p.score) : 1; });
+    a.companies.forEach(function (c) { sc += 3 * c.score; });
+    a.branches.forEach(function (b) { sc += b.found ? 2 : 0.5; });
+    a.persons.forEach(function (p) { sc += p.exact ? 2 : 0.5; });
+    sc += Math.min(3, a.quantities.length);
+    sc -= a.unknown.length * 0.8;
+    return Math.round(sc * 100) / 100;
+  }
+  // 어느 단계에서 틀렸는지 판단
+  function verdict(an, r) {
+    var found = an.products.length + an.companies.length + an.persons.length + an.branches.length;
+    var near = an.unknown.filter(function (u) { return u.closest.length && u.closest[0].s >= 0.7; });
+    var far = an.unknown.filter(function (u) { return !u.closest.length || u.closest[0].s < 0.7; });
+    var changed = r && r.understood && !/(찾지 못했|못 알아|등록된 상품이 아니)/.test(r.reply || "");
+    if (changed && !an.unknown.length) return { stage: "정상", ok: true, msg: "정상 처리" };
+    if (near.length) return { stage: "보정", ok: false, msg: "'" + near[0].word + "'은(는) 등록된 '" + near[0].closest[0].name + "'와 비슷하지만 확신이 낮아 연결하지 않았어요 → 학습센터 사전에 '" + near[0].word + " → " + near[0].closest[0].name + "' 등록하면 해결돼요" };
+    if (far.length) return { stage: "STT", ok: changed, msg: "들린 말 '" + far.map(function (u) { return u.word; }).join(", ") + "'은(는) 등록된 상품·업체·고객 이름과 비슷하지 않아요 → 받아쓰기(STT)에서 틀렸거나, 아직 등록되지 않은 이름이에요" + (changed ? " (나머지는 처리함)" : "") };
+    if (changed) return { stage: "정상", ok: true, msg: "정상 처리" };
+    if (!found) return { stage: "분석", ok: false, msg: "받아쓰기는 됐지만 주문 명령으로 이해하지 못했어요" };
+    return { stage: "분석", ok: false, msg: "이름은 찾았지만 주문에 반영하지 못했어요(질문 대기 또는 명령 불분명)" };
+  }
+
+
   return {
+    analyze: analyze, scoreText: scoreText, verdict: verdict, closestNames: closestNames,
     llmPrompt: llmPrompt,
     normalize: normalize, parseQuantities: parseQuantities, buildIndex: buildIndex, findProducts: findProducts, findPersons: findPersons,
     findCompanies: findCompanies, findBranches: findBranches, newState: newState, step: step, edit: edit, summaryLines: summaryLines,
@@ -9623,6 +9757,204 @@ function VoiceOrderCard({ st, idx, products, vendors, customers, onEdit, onConfi
       showLog ? h("div", { style: { fontSize: 11, color: C.sub, lineHeight: 1.5, marginTop: 3 } }, st.log.slice(-12).reverse().map((l, i) => h("div", { key: i }, `"${l.utter}" → ${l.field}: ${l.before === "" || l.before == null ? "∅" : l.before} ⇒ ${l.after === "" || l.after == null ? "∅" : l.after}`))) : null) : null);
 }
 
+// ===== VO2 진단: 단계별 기록·화면·실데이터 인식 시험 (v261) =====
+const VO2_DIAG_KEY = "joassam_vo2_diag";
+function vo2DiagLoad() {
+  try { return JSON.parse(localStorage.getItem(VO2_DIAG_KEY) || "[]") || []; } catch (e) { return []; }
+}
+function vo2DiagPush(rec) {
+  try {
+    const arr = vo2DiagLoad();
+    arr.push(rec);
+    localStorage.setItem(VO2_DIAG_KEY, JSON.stringify(arr.slice(-50)));
+  } catch (e) {}
+}
+function vo2DiagExport(obj, name) {
+  const txt = JSON.stringify(obj, null, 1);
+  try { navigator.clipboard && navigator.clipboard.writeText(txt); } catch (e) {}
+  try {
+    const blob = new Blob([txt], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  } catch (e) {}
+}
+// 발음이 비슷한 자모로 한 글자 바꾼 '받아쓰기 실수' 흉내
+function vo2Perturb(word) {
+  const PAIRS = { 5: 3, 3: 5, 6: 2, 2: 6, 17: 7, 7: 17, 15: 0, 0: 15, 16: 3, 14: 12, 12: 14 }; // ㄹ↔ㄷ, ㅁ↔ㄴ, ㅍ↔ㅂ, ㅋ↔ㄱ, ㅌ→ㄷ, ㅊ↔ㅈ
+  const VPAIRS = { 1: 5, 5: 1 }; // ㅐ↔ㅔ
+  const s = String(word || "");
+  for (let i = s.length - 1; i >= 0; i--) {
+    const c = s.charCodeAt(i);
+    if (c < 0xac00 || c > 0xd7a3) continue;
+    const k = c - 0xac00, cho = Math.floor(k / 588), jung = Math.floor(k % 588 / 28), jong = k % 28;
+    if (PAIRS[cho] != null) return s.slice(0, i) + String.fromCharCode(0xac00 + (PAIRS[cho] * 21 + jung) * 28 + jong) + s.slice(i + 1);
+    if (VPAIRS[jung] != null) return s.slice(0, i) + String.fromCharCode(0xac00 + (cho * 21 + VPAIRS[jung]) * 28 + jong) + s.slice(i + 1);
+  }
+  return null;
+}
+// 사장님 폰에 등록된 실제 상품·업체·고객 이름으로 시험 문장을 만들어, 예전 방식과 새 방식을 비교
+function vo2BuildSelfTests(db) {
+  const idx = db.__vo2idx;
+  const tests = [];
+  Object.keys(idx.groups).forEach((b) => {
+    const g = idx.groups[b];
+    const base = g.base, sku = g.skus[0];
+    const ids = g.skus.map((x) => x.id);
+    tests.push({ kind: "상품", say: `${base} 2박스`, expectIds: ids, label: base });
+    if (/\s/.test(base)) tests.push({ kind: "상품", say: `${base.replace(/\s/g, "")} 두 박스`, expectIds: ids, label: base });
+    tests.push({ kind: "상품", say: `${base}는 세 개`, expectIds: ids, label: base });
+    g.skus.forEach((k) => { if (k.grams) tests.push({ kind: "상품+무게", say: `${base} ${k.grams >= 1000 ? k.grams / 1000 + "키로" : k.grams + "그램"} 한 개`, expectIds: [k.id], label: k.name }); });
+    const pb = vo2Perturb(base.replace(/\s/g, ""));
+    if (pb && pb !== base.replace(/\s/g, "") && !idx.groups[pb]) tests.push({ kind: "상품(발음오류)", say: `${pb} 2박스`, expectIds: ids, label: base, perturbed: true });
+  });
+  idx.vendors.forEach((v) => {
+    tests.push({ kind: "업체", say: `${v.name} 주문할게`, expectVendor: v.id, label: v.name });
+    if (/\s/.test(v.name)) tests.push({ kind: "업체", say: `${v.name.replace(/\s/g, "")} 주문할게`, expectVendor: v.id, label: v.name });
+    const pc = vo2Perturb(v.company.replace(/\s/g, ""));
+    if (pc) tests.push({ kind: "업체(발음오류)", say: `${pc} ${v.branch} 주문할게`.replace(/\s+/g, " "), expectVendor: v.id, label: v.name, perturbed: true });
+  });
+  Object.keys(idx.companies).forEach((k) => {
+    const c = idx.companies[k];
+    if (c.vendors.filter((v) => v.branch).length >= 2) tests.push({ kind: "업체만(지점 질문)", say: `${c.name} 주문할게`, expectBranchAsk: k, label: c.name });
+  });
+  const names = Object.keys(idx.custByName).sort((a, b) => (idx.recent[b] || 0) - (idx.recent[a] || 0)).filter((n) => n.length >= 2 && n.length <= 5 && !/\d/.test(n)).slice(0, 150);
+  names.forEach((n) => {
+    tests.push({ kind: "고객", say: `${n} 주문할게`, expectPerson: n, label: n });
+    tests.push({ kind: "받는 사람", say: `${n} 님한테 보내줘`, expectRecipient: n, label: n, needOrderer: true });
+    const pn = vo2Perturb(n);
+    if (pn && !idx.custByName[pn]) tests.push({ kind: "고객(발음오류)", say: `${pn} 주문할게`, expectPerson: n, label: n, perturbed: true });
+  });
+  return tests;
+}
+function vo2RunOneTest(t, db) {
+  const idx = db.__vo2idx;
+  // 새 방식
+  let st = null;
+  if (t.expectIds || t.needOrderer) {
+    st = VO2.newState();
+    const firstVendor = idx.vendors[0];
+    if (firstVendor) st.vendor = { id: firstVendor.id, name: firstVendor.name, company: firstVendor.company, branch: firstVendor.branch, phone: "", address: "" };
+    else st.orderer = { name: "시험", phone: "", address: "", customerId: null };
+    if (t.needOrderer) { st.orderer = { name: "시험주문자", phone: "", address: "", customerId: "x" }; st.vendor = null; }
+  }
+  let r = null, okNew = false, gotNew = "";
+  try {
+    r = VO2.step(st, t.say, db);
+    const s = r.state, p = s.ctx.pending;
+    if (t.expectIds) {
+      const it = s.items[0];
+      gotNew = it ? it.productName : p ? "질문: " + (p.q || p.type) : "-";
+      okNew = !!(it && t.expectIds.indexOf(it.productId) >= 0) || !!(p && (p.type === "sku" && t.expectIds.some((id) => (idx.groups[p.baseNS] || { skus: [] }).skus.some((k) => k.id === id))) || p && p.type === "productPick" && p.options.some((b) => idx.groups[b].skus.some((k) => t.expectIds.indexOf(k.id) >= 0)));
+    } else if (t.expectVendor) {
+      gotNew = s.vendor ? s.vendor.name : p ? "질문: " + (p.q || p.type) : "-";
+      okNew = !!(s.vendor && s.vendor.id === t.expectVendor) || !!(p && p.type === "branch" && p.options.indexOf(t.expectVendor) >= 0);
+    } else if (t.expectBranchAsk) {
+      gotNew = p ? "질문: " + (p.q || p.type) : s.vendor ? s.vendor.name : "-";
+      okNew = !!(p && p.type === "branch" && p.companyNS === t.expectBranchAsk);
+    } else if (t.expectPerson) {
+      gotNew = s.orderer ? s.orderer.name : p ? "질문: " + (p.q || p.type) : "-";
+      okNew = !!(s.orderer && s.orderer.name.replace(/\s/g, "") === t.expectPerson) || !!(p && p.type === "person" && p.options.some((o) => String(o.name).replace(/\s/g, "") === t.expectPerson));
+    } else if (t.expectRecipient) {
+      gotNew = s.recipient ? s.recipient.name : p ? "질문: " + (p.q || p.type) : "-";
+      okNew = !!(s.recipient && s.recipient.name.replace(/\s/g, "") === t.expectRecipient) || !!(p && p.type === "person" && p.options.some((o) => String(o.name).replace(/\s/g, "") === t.expectRecipient));
+    }
+  } catch (e) { gotNew = "오류: " + e.message; }
+  // 예전 방식 (v259까지 조비서가 쓰던 상품·이름 찾기)
+  let okOld = false, gotOld = "";
+  try {
+    if (t.expectIds && typeof extractItems === "function") {
+      const items = extractItems(t.say, db.products, (db.customers || []).map((c) => c.name).concat((db.vendors || []).map((v) => v.name)).slice(0, 3000));
+      const it = items[0];
+      gotOld = it ? it.name : "-";
+      okOld = !!(it && t.expectIds.indexOf(it.productId) >= 0);
+    } else if (typeof findKnownNameIn === "function") {
+      const nm = findKnownNameIn(t.say, db.customers, db.vendors, db.products) || "";
+      gotOld = nm || "-";
+      const want = t.expectVendor ? (idx.vendors.find((v) => v.id === t.expectVendor) || {}).name : t.expectBranchAsk ? null : t.expectPerson || t.expectRecipient;
+      okOld = want ? String(nm).replace(/\s/g, "") === String(want).replace(/\s/g, "") : false;
+    }
+  } catch (e) { gotOld = "오류"; }
+  return { kind: t.kind, say: t.say, label: t.label, okNew, gotNew, okOld, gotOld };
+}
+function VoiceDiagPanel({ diag, onOpen }) {
+  const h = React.createElement;
+  if (!diag) return null;
+  const C = { sub: "rgba(255,255,255,0.55)", txt: "#e8f1ff" };
+  const v = diag.verdict || {};
+  const color = v.ok ? "#7fd1a0" : v.stage === "STT" ? "#ff8a80" : "#ffcc80";
+  const an = diag.analysis || {};
+  const list = (arr, f) => (arr || []).map(f).join(", ");
+  return h("div", { style: { background: "rgba(0,0,0,0.35)", border: `1px solid ${color}`, borderRadius: 10, padding: "6px 9px", fontSize: 11.5, color: C.txt, lineHeight: 1.5, marginTop: 6 } },
+    h("div", { style: { display: "flex", alignItems: "center", gap: 6 } }, h("b", { style: { color } }, "🔍 진단 · " + (v.stage || "") + (v.ok ? " ✓" : " ✗")), h("div", { style: { flex: 1 } }), h("button", { onClick: onOpen, style: { border: "none", background: "transparent", color: "#90caf9", fontSize: 11.5, cursor: "pointer" } }, "기록·시험 ›")),
+    h("div", null, "① STT(" + (diag.engine || "?") + "): ", h("b", null, diag.stt || "-"), diag.alts && diag.alts.length > 1 ? h("span", { style: { color: C.sub } }, "  [후보 " + diag.alts.length + "개" + (diag.altPicked ? " → '" + diag.altPicked + "' 선택" : "") + "]") : null),
+    diag.prep && diag.prep.length ? h("div", { style: { color: C.sub } }, "② 보정: " + diag.prep.map((p) => p.step + " '" + p.from + "'→'" + p.to + "'").join(" / ")) : null,
+    h("div", null, "③ 정규화: ", an.normalized || "-"),
+    h("div", null, "④ 후보: ",
+      [an.companies && an.companies.length ? "업체[" + list(an.companies, (c) => c.said + "→" + c.found) + "]" : "",
+        an.branches && an.branches.length ? "지점[" + list(an.branches, (b) => b.said + "→" + (b.found || (b.candidates || []).join("/"))) + "]" : "",
+        an.persons && an.persons.length ? "사람[" + list(an.persons, (p) => p.said + "→" + (p.found || "?") + (p.count > 1 ? "(" + p.count + "명)" : "") + (p.exact ? "" : "(비슷)")) + "]" : "",
+        an.products && an.products.length ? "상품[" + list(an.products, (p) => p.said + "→" + (p.found || "?(" + (p.candidates || []).join("/") + ")") + (p.how && p.how !== "exact" ? "(" + p.how + ")" : "")) + "]" : "",
+        an.quantities && an.quantities.length ? "수량[" + an.quantities.join(", ") + "]" : ""].filter(Boolean).join(" ") || h("span", { style: { color: C.sub } }, "없음")),
+    an.unknown && an.unknown.length ? h("div", { style: { color: "#ffcc80" } }, "   못 찾은 말: " + an.unknown.map((u) => u.word + (u.closest && u.closest.length ? "(가까운 이름: " + u.closest.map((c) => c.name + " " + Math.round(c.s * 100) + "%").join(", ") + ")" : "(비슷한 이름 없음)")).join(" / ")) : null,
+    h("div", null, "⑤ 결과: ", diag.items || "-"),
+    h("div", { style: { color } }, "⇒ " + (v.msg || "")));
+}
+function VoiceDiagModal({ db, onClose }) {
+  const h = React.createElement;
+  const [list, setList] = React.useState(() => vo2DiagLoad().slice().reverse());
+  const [test, setTest] = React.useState(null);
+  const [prog, setProg] = React.useState(0);
+  const [onlyFail, setOnlyFail] = React.useState(true);
+  const runTest = () => {
+    const tests = vo2BuildSelfTests(db);
+    const rows = [];
+    let i = 0;
+    setTest(null);
+    const step = () => {
+      const end = Math.min(tests.length, i + 25);
+      for (; i < end; i++) rows.push(vo2RunOneTest(tests[i], db));
+      setProg(Math.round(i / tests.length * 100));
+      if (i < tests.length) setTimeout(step, 0);
+      else {
+        const by = {};
+        rows.forEach((r) => { const b = by[r.kind] = by[r.kind] || { n: 0, newOk: 0, oldOk: 0 }; b.n++; if (r.okNew) b.newOk++; if (r.okOld) b.oldOk++; });
+        setTest({ rows, by, at: new Date().toLocaleString("ko-KR"), aliasLog: db.__vo2idx.aliasLog || [] });
+      }
+    };
+    setTimeout(step, 30);
+  };
+  const box = { background: "#fff", borderRadius: 12, padding: 12, marginBottom: 10, border: "1px solid #E1E8E2" };
+  const btn = (bg) => ({ border: "none", background: bg, color: "#fff", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer" });
+  const pct = (a, b) => b ? Math.round(a / b * 100) + "%" : "-";
+  return h("div", { style: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 6000, display: "flex", alignItems: "flex-end", justifyContent: "center" }, onClick: onClose },
+    h("div", { onClick: (e) => e.stopPropagation(), style: { width: "100%", maxWidth: 560, maxHeight: "92vh", overflowY: "auto", background: "#F4F7F4", borderTopLeftRadius: 18, borderTopRightRadius: 18, padding: 14, color: "#243b2e" } },
+      h("div", { style: { display: "flex", alignItems: "center", marginBottom: 8 } }, h("div", { style: { flex: 1, fontSize: 16, fontWeight: 800 } }, "🔍 음성 주문 진단"), h("button", { onClick: onClose, style: { border: "none", background: "none", fontSize: 20, cursor: "pointer" } }, "✕")),
+      h("div", { style: box },
+        h("div", { style: { fontWeight: 700, marginBottom: 6 } }, "실제 등록 데이터로 인식 시험"),
+        h("div", { style: { fontSize: 12, color: "#5B7A63", marginBottom: 8 } }, "이 폰에 등록된 상품·업체·지점·고객 이름으로 시험 문장을 만들어(띄어쓰기·조사·숫자 표현·발음이 비슷한 받아쓰기 실수 포함) 예전 방식과 새 방식의 인식 결과를 비교해요. 데이터는 바꾸지 않아요."),
+        h("button", { onClick: runTest, style: btn("#2F6F4E") }, prog && prog < 100 ? `시험 중… ${prog}%` : "▶ 시험 시작"),
+        test ? h("div", { style: { marginTop: 10 } },
+          h("table", { style: { width: "100%", fontSize: 12.5, borderCollapse: "collapse" } },
+            h("thead", null, h("tr", null, ["종류", "문장 수", "예전 방식", "새 방식"].map((x) => h("th", { key: x, style: { textAlign: "left", borderBottom: "1px solid #ccc", padding: 3 } }, x)))),
+            h("tbody", null, Object.keys(test.by).map((k) => h("tr", { key: k }, h("td", { style: { padding: 3 } }, k), h("td", null, test.by[k].n), h("td", null, pct(test.by[k].oldOk, test.by[k].n)), h("td", { style: { fontWeight: 800, color: "#2F6F4E" } }, pct(test.by[k].newOk, test.by[k].n)))))),
+          h("label", { style: { display: "flex", gap: 6, alignItems: "center", fontSize: 12, marginTop: 8 } }, h("input", { type: "checkbox", checked: onlyFail, onChange: (e) => setOnlyFail(e.target.checked) }), "새 방식에서 실패한 것만 보기"),
+          h("div", { style: { maxHeight: 260, overflowY: "auto", fontSize: 12, marginTop: 6 } }, test.rows.filter((r) => !onlyFail || !r.okNew).slice(0, 200).map((r, i) => h("div", { key: i, style: { padding: "4px 0", borderBottom: "1px solid #eee" } }, (r.okNew ? "✅ " : "⚠️ ") + `[${r.kind}] "${r.say}" → 새: ${r.gotNew} / 예전: ${r.gotOld}`))),
+          h("div", { style: { display: "flex", gap: 8, marginTop: 8 } }, h("button", { onClick: () => vo2DiagExport({ at: test.at, summary: test.by, fails: test.rows.filter((r) => !r.okNew), aliasLog: test.aliasLog }, "음성인식시험결과.json"), style: btn("#3E7A52") }, "결과 내보내기(복사·저장)"))) : null),
+      h("div", { style: box },
+        h("div", { style: { fontWeight: 700, marginBottom: 6 } }, "사전·보정표 연결 상태"),
+        h("div", { style: { fontSize: 12, color: "#5B7A63", marginBottom: 6 } }, "학습센터 사전과 기존 보정표가 어떤 상품·업체·고객에 연결됐는지 보여줘요."),
+        h("div", { style: { fontSize: 12, maxHeight: 160, overflowY: "auto" } }, (db.__vo2idx.aliasLog || []).map((a, i) => h("div", { key: i }, `${a.src === "dict" ? "사전" : "보정표"}: ${a.from} → ${a.to} : ${a.used}`)))),
+      h("div", { style: box },
+        h("div", { style: { display: "flex", alignItems: "center", marginBottom: 6 } }, h("div", { style: { flex: 1, fontWeight: 700 } }, `최근 대화 진단 기록 (${list.length})`),
+          h("button", { onClick: () => vo2DiagExport(list, "음성진단기록.json"), style: btn("#3E7A52") }, "내보내기"),
+          h("button", { onClick: () => { try { localStorage.removeItem(VO2_DIAG_KEY); } catch (e) {} setList([]); }, style: Object.assign(btn("#9E9E9E"), { marginLeft: 6 }) }, "지우기")),
+        list.length ? list.map((d, i) => h("div", { key: i, style: { background: "#0f2238", borderRadius: 10, padding: 4, marginBottom: 6 } }, h(VoiceDiagPanel, { diag: d, onOpen: () => {} }))) : h("div", { style: { fontSize: 12, color: "#888" } }, "아직 기록이 없어요. 조비서 진단을 켜고 주문을 말해 보세요."))));
+}
+
 function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onClose, onAppCommand, subscriptions, openBundlePlanner, openPersonPicker, openBulkModeChoice, closeOrderPickers, onSetOrderMemo }) {
   var _a, _b;
   const [phase, setPhase] = React.useState("idle");
@@ -9670,6 +10002,19 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   const vo2DbRef = React.useRef({});
   const vo2DoneAtRef = React.useRef(0);
   const [vo2St, setVo2St] = React.useState(null);
+  // v261: 진단 (받아쓰기 원문 → 보정 → 정규화 → 후보 → 결과 → 틀린 단계)
+  const sttLogRef = React.useRef([]);
+  const prepRef = React.useRef(null);
+  const [diagOn, setDiagOn] = React.useState(() => { try { return localStorage.getItem("joassam_vo2_diag_on") === "1"; } catch (e) { return false; } });
+  const [lastDiag, setLastDiag] = React.useState(null);
+  const [diagModal, setDiagModal] = React.useState(false);
+  function noteStt(engine, primary, alts, chosen, extra) {
+    try {
+      const arr = sttLogRef.current || [];
+      arr.push(Object.assign({ engine, primary: String(primary || ""), alts: (alts || []).slice(0, 5), chosen: String(chosen || primary || ""), at: Date.now() }, extra || {}));
+      sttLogRef.current = arr.slice(-6);
+    } catch (e) {}
+  }
   const awaitingMemoRef = React.useRef(false);
   const audioStreamRef = React.useRef(null);
   const hiResStreamRef = React.useRef(null);
@@ -10013,6 +10358,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         bargedRef.current = false;
         const raw = (finalText || "").trim() || (interimText || "").trim();
         const best = pickBestTranscript(dedupCascade(raw), finalAlts);
+        if (best) noteStt("기본(끼어들기)", raw, finalAlts, best);
         finalText = "";
         finalAlts = [];
         if (best && (best.match(/[가-힣A-Za-z0-9]/g) || []).length >= 1) {
@@ -10340,6 +10686,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       if (text && (text.match(/[가-힣A-Za-z0-9]/g) || []).length >= 1) {
         silenceCountRef.current = 0;
         if (cap.fromBarge) bargeFalseRef.current = 0;
+        noteStt(cap.fromBarge ? "정밀(Gemini·끼어들기)" : "정밀(Gemini)", text, [], text, { speechMs: Math.round(cap.speechMs) });
         if (phaseRef.current === "listening") routeCapturedSpeech(text);
       } else {
         noSpeechNext();
@@ -10453,7 +10800,9 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         if (isStale() || !activeRef.current) return;
         let text = pickBestTranscript(dedupCascade(finalText.trim()), finalAlts);
         // v246: 안드로이드는 말이 끝나도 '확정' 없이 끝나는 경우가 있어 → 들린 만큼(중간 결과)이라도 사용
-        if (!text && lastInterim && (lastInterim.match(/[가-힣A-Za-z0-9]/g) || []).length >= 2) text = dedupCascade(lastInterim.trim());
+        let _fromInterim = false;
+        if (!text && lastInterim && (lastInterim.match(/[가-힣A-Za-z0-9]/g) || []).length >= 2) { text = dedupCascade(lastInterim.trim()); _fromInterim = true; }
+        if (text) noteStt("기본(폰)", finalText.trim() || lastInterim, finalAlts, text, _fromInterim ? { interim: true } : null);
         if (text && isRecentEcho(text)) text = "";
         finalText = "";
         finalAlts = [];
@@ -11055,12 +11404,16 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   }
   function vo2Db() {
     const c = vo2DbRef.current || {};
-    if (c.db && c.p === products && c.c === customers && c.v === vendors) return c.db;
+    let _dictSig = "";
+    try { _dictSig = JSON.stringify((aiVoiceMemGet(aiUserId()) || {}).approved || {}); } catch (e) {}
+    if (c.db && c.p === products && c.c === customers && c.v === vendors && c.d === _dictSig) return c.db;
     let learned = {};
     try { learned = typeof getLearnedAliases === "function" ? getLearnedAliases() : {}; } catch (e) {}
-    const db = { products: products || [], customers: customers || [], vendors: vendors || [], orders: orders || [], learnedAliases: learned, productAliases: typeof PRODUCT_ALIASES !== "undefined" ? PRODUCT_ALIASES : {} };
+    let userDict = {};
+    try { userDict = (aiVoiceMemGet(aiUserId()) || {}).approved || {}; } catch (e) {}
+    const db = { products: products || [], customers: customers || [], vendors: vendors || [], orders: orders || [], learnedAliases: learned, productAliases: typeof PRODUCT_ALIASES !== "undefined" ? PRODUCT_ALIASES : {}, userDict, sttAliases: typeof FARM_AI_ALIASES !== "undefined" ? FARM_AI_ALIASES : {} };
     db.__vo2idx = VO2.buildIndex(db);
-    vo2DbRef.current = { p: products, c: customers, v: vendors, db };
+    vo2DbRef.current = { p: products, c: customers, v: vendors, d: _dictSig, db };
     return db;
   }
   function vo2SetState(st) {
@@ -11113,13 +11466,32 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     setPhaseSync("thinking", "order");
     const db = vo2Db();
     const opt = { parseDate: (t) => typeof parseDate === "function" ? parseDate(t, /* @__PURE__ */ new Date()) : null };
+    const prevState = vo2Ref.current;
+    const _now = Date.now();
+    const pieces = (sttLogRef.current || []).filter((x) => _now - x.at < 2e4);
+    sttLogRef.current = [];
+    const prep = prepRef.current && _now - prepRef.current.at < 5e3 ? prepRef.current : { raw: text, steps: [] };
+    // v261: 받아쓰기 후보(최대 5개) 중 등록된 이름·수량과 가장 잘 맞는 문장 고르기 (1순위가 틀리고 다른 후보가 맞는 경우)
+    let altPicked = "";
+    try {
+      const last = pieces.length === 1 ? pieces[0] : null;
+      if (last && last.alts && last.alts.length > 1) {
+        const fixAlt = (a) => { let x = dedupCascade(a); try { for (const [pt, rp] of STT_SENTENCE_FIXES) x = x.replace(pt, rp); } catch (e) {} return x; };
+        const base = VO2.scoreText(text, db);
+        let best = null, bestS = base;
+        last.alts.forEach((a) => { const fa = fixAlt(a); if (!fa || fa === text) return; const sc = VO2.scoreText(fa, db); if (sc >= bestS + 1.5) { bestS = sc; best = fa; } });
+        if (best) { altPicked = best; text = best; }
+      }
+    } catch (e) {}
     let r = null;
     try { r = VO2.step(vo2Ref.current, text, db, opt); } catch (e) { r = null; }
+    let llmLines = null;
     const gk = geminiKey || (typeof localStorage !== "undefined" && localStorage.getItem("joassam_gemini_key_v1") || "");
     if (r && !r.understood && gk) {
       // 규칙으로 못 알아들은 말만 AI가 '앱 명령'으로 바꿔 주고, 그 결과도 다시 DB 확인을 거침
       try {
         const lines = await vo2LlmRewrite(text, vo2Ref.current || VO2.newState(), db.__vo2idx, gk);
+        llmLines = lines;
         if (lines && lines.length) {
           let s2 = vo2Ref.current, last = null;
           const said = [];
@@ -11134,6 +11506,19 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       } catch (e) {}
     }
     if (!r) { vo2Say(text, "주문 처리 중 문제가 생겼어요. 다시 말씀해 주세요."); return; }
+    try {
+      const an = VO2.analyze(text, db, prevState);
+      const rec = {
+        t: Date.now(), engine: pieces.map((p) => p.engine).filter((v, i, a) => a.indexOf(v) === i).join("+") || "?",
+        stt: pieces.length ? pieces.map((p) => p.primary).join(" / ") : prep.raw, chosen: pieces.map((p) => p.chosen).join(" / "), alts: pieces.length === 1 ? pieces[0].alts : [], altPicked: altPicked || (pieces.length === 1 && pieces[0].chosen && pieces[0].chosen.replace(/\s/g, "") !== pieces[0].primary.replace(/\s/g, "") ? pieces[0].chosen : ""),
+        interim: pieces.some((p) => p.interim), prep: prep.steps, analysis: an, llm: llmLines,
+        reply: r.reply, items: (r.state.items || []).map((it) => VO2.itemLabel(it, db.__vo2idx)).join(", ") + (r.state.ctx && r.state.ctx.pending ? " (질문 대기)" : ""),
+        verdict: VO2.verdict(an, r)
+      };
+      if (llmLines && r.understood) rec.verdict = { stage: "AI 보조", ok: true, msg: "규칙으로 못 알아들어 AI가 '" + llmLines.join(" / ") + "'(으)로 바꿔 처리했어요" };
+      vo2DiagPush(rec);
+      setLastDiag(rec);
+    } catch (e) {}
     vo2SetState(r.state);
     if (r.cancelled) { vo2End(); vo2DoneAtRef.current = Date.now(); vo2Say(text, r.reply); return; }
     if (r.confirmed) { vo2Say(text, vo2Commit(r)); return; }
@@ -11942,15 +12327,37 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       }, 3e4);
     }
     setInterim("");
-    text = dedupCascade(text).slice(0, 200);
+    // v261: 받아쓰기 결과를 고친 단계를 모두 기록 (진단용)
+    const _prep = [];
+    const _prepStep = (name, before, after) => { if (before !== after) _prep.push({ step: name, from: before, to: after }); };
+    const _raw0 = String(text || "");
+    let _t1 = dedupCascade(text).slice(0, 200);
+    _prepStep("반복 제거", _raw0, _t1);
+    text = _t1;
     try {
+      // 기존 문장 보정표(케일 매일소풍→매일소풍, 메일 소풍→매일소풍 …)를 조비서에도 적용 — 그동안 조비서 경로에서는 빠져 있었음
+      if (typeof STT_SENTENCE_FIXES !== "undefined") {
+        for (const [pattern, replacement] of STT_SENTENCE_FIXES) {
+          const b = text;
+          text = text.replace(pattern, replacement);
+          _prepStep("문장 보정표", b, text);
+        }
+      }
+    } catch (e) {
+    }
+    try {
+      const b = text;
       text = applyLearnedAliasesToText(text);
+      _prepStep("자동 학습 단어", b, text);
     } catch (e) {
     }
     try {
+      const b = text;
       if (!orderModeRef.current) text = text.replace(/주문\s*할\s*때\s*[.!?]*$/, "주문할게").replace(/주문\s*할\s*때\s*(?=\S)/, "주문할게 ");
+      _prepStep("주문할 때→주문할게", b, text);
     } catch (e) {
     }
+    prepRef.current = { raw: _raw0, steps: _prep, at: Date.now() };
     setLastUser(text);
     try {
       bumpWordFreq(text);
@@ -12505,6 +12912,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   async function sendText() {
     const text = inp.trim();
     if (!text || phaseRef.current === "thinking" || phaseRef.current === "speaking") return;
+    noteStt("키보드 입력", text, [], text);
     setInp("");
     stopRec();
     await processUserSpeech(text);
@@ -12885,6 +13293,14 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     ), /* @__PURE__ */ React.createElement(
       "button",
       {
+        onClick: () => { const n = !diagOn; setDiagOn(n); try { localStorage.setItem("joassam_vo2_diag_on", n ? "1" : "0"); } catch (e) {} },
+        title: "진단: 받아쓰기 원문부터 최종 결과까지 단계별로 보여줘요",
+        style: { background: diagOn ? "rgba(255,193,7,0.25)" : "rgba(255,255,255,0.1)", border: "none", borderRadius: 8, color: diagOn ? "#ffe082" : "#aaa", padding: "4px 10px", cursor: "pointer", fontSize: 12.5, fontWeight: 700 }
+      },
+      diagOn ? "\u{1F50D} 진단 ON" : "\u{1F50D} 진단"
+    ), /* @__PURE__ */ React.createElement(
+      "button",
+      {
         onClick: () => {
           stopRec();
           window.speechSynthesis && window.speechSynthesis.cancel();
@@ -12947,7 +13363,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       fontSize: 14,
       fontStyle: "italic",
       minHeight: 32
-    } }, interim) : null, vo2St ? /* @__PURE__ */ React.createElement("div", { style: { flexShrink: 0, padding: "0 10px 6px" } }, /* @__PURE__ */ React.createElement(VoiceOrderCard, { st: vo2St, idx: vo2Db().__vo2idx, products, vendors, customers, onEdit: vo2ScreenEdit, onConfirm: vo2ScreenConfirm, onCancel: vo2ScreenCancel, onClose: () => setVo2St(null) })) : null, /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", minHeight: 0 } }, /* @__PURE__ */ React.createElement(
+    } }, interim) : null, vo2St || diagOn && lastDiag ? /* @__PURE__ */ React.createElement("div", { style: { flexShrink: 0, padding: "0 10px 6px", maxHeight: diagOn ? "60vh" : void 0, overflowY: diagOn ? "auto" : void 0 } }, diagOn && lastDiag ? /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 6 } }, /* @__PURE__ */ React.createElement(VoiceDiagPanel, { diag: lastDiag, onOpen: () => setDiagModal(true) })) : null, vo2St ? /* @__PURE__ */ React.createElement(VoiceOrderCard, { st: vo2St, idx: vo2Db().__vo2idx, products, vendors, customers, onEdit: vo2ScreenEdit, onConfirm: vo2ScreenConfirm, onCancel: vo2ScreenCancel, onClose: () => setVo2St(null) }) : null) : null, diagModal ? /* @__PURE__ */ React.createElement(VoiceDiagModal, { db: vo2Db(), onClose: () => setDiagModal(false) }) : null, /* @__PURE__ */ React.createElement("div", { style: { flex: 1, display: "flex", minHeight: 0 } }, /* @__PURE__ */ React.createElement(
       "div",
       {
         onMouseDown: onDragStart,
