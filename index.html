@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 258;
+const APP_VERSION = 259;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2386,7 +2386,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v258 (잘못 배운 말 정리·몰래 학습 끔·끼어들기)";
+const APP_BUILD = "v259 (소음에 덜 민감·인터넷 느릴 때 빨리 전환·끼어들기 오작동 방지)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8144,6 +8144,8 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   const hiResNodesRef = React.useRef(null);
   const hiResCapRef = React.useRef(null);
   const hiResFailUntilRef = React.useRef(0);
+  const hiResNoiseRef = React.useRef(0.01);
+  const bargeFalseRef = React.useRef(0);
   const [hiRes, setHiRes] = React.useState(() => {
     try { return localStorage.getItem("joassam_hires_voice_v1") !== "0"; } catch (e) { return true; }
   });
@@ -8545,6 +8547,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   async function startHiResBarge() {
     if (!activeRef.current || !autoListenRef.current) return;
     if (hiResCapRef.current && hiResCapRef.current.barge) return;
+    if (bargeFalseRef.current >= 2) return; // 소음·자기 목소리에 잘못 끊긴 적이 2번이면 이번엔 말로 끼어들기 끔 (버튼은 계속 됨)
     let ctx;
     try { ctx = await hiResEnsureAudio(); } catch (e) { return; }
     if (phaseRef.current !== "speaking" || !activeRef.current) return;
@@ -8561,17 +8564,17 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       b.t += ms;
       b.chunks.push(copy);
       if (b.chunks.length > 14) b.chunks.shift();
-      if (b.t < 600) { b.echo = Math.max(b.echo, rms); return; }
-      const thr = Math.min(0.25, Math.max(0.045, b.echo * 2.2));
+      if (b.t < 1200) { b.echo = Math.max(b.echo, rms); return; }
+      const thr = Math.min(0.3, Math.max(0.07, b.echo * 3, (hiResNoiseRef.current || 0.01) * 5));
       if (rms > thr) b.loudMs += ms;
-      else { b.loudMs = Math.max(0, b.loudMs - ms); b.echo = Math.max(b.echo * 0.995, rms); }
-      if (b.loudMs >= 250) {
+      else { b.loudMs = 0; b.echo = Math.max(b.echo * 0.995, rms); }
+      if (b.loudMs >= 400) {
         hiResCapRef.current = null;
         bargedRef.current = true;
         try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
         clearTimeout(ttsTimerRef.current);
         setPhaseSync("listening");
-        beginListeningHiRes({ preroll: b.chunks.slice(), speechMs: b.loudMs });
+        beginListeningHiRes({ preroll: b.chunks.slice(), speechMs: b.loudMs, fromBarge: true });
       }
     };
     hiResCapRef.current = b;
@@ -8645,6 +8648,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     try { return geminiKey || loadGeminiKey() || ""; } catch (e) { return geminiKey || ""; }
   }
   function hiResActive() {
+    try { if (typeof navigator !== "undefined" && navigator.onLine === false) return false; } catch (e) {}
     return !!(hiResRef.current && hiResKey() && Date.now() >= hiResFailUntilRef.current && navigator.mediaDevices && navigator.mediaDevices.getUserMedia && (window.AudioContext || window.webkitAudioContext));
   }
   function hiResTeardown() {
@@ -8711,6 +8715,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       cap.heard = true;
       cap.speechMs = opts.speechMs || 250;
       cap.floor = 0.01;
+      cap.fromBarge = !!opts.fromBarge;
       try { setInterim("\u{1F399}\uFE0F \uB4E3\uB294 \uC911\u2026"); } catch (e) {}
     }
     cap.onData = (buf) => {
@@ -8721,18 +8726,30 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       const rms = Math.sqrt(sum / copy.length);
       const ms = copy.length / rate * 1000;
       cap.totalMs += ms;
-      cap.floor = Math.min(cap.floor, Math.max(rms, 0.002));
-      const thr = Math.min(0.06, Math.max(0.014, cap.floor * 3.5));
+      // v259: 주변 소음 크기(noise floor)를 계속 따라가며 그보다 확실히 큰 소리만 '말'로 봄
+      let nf = hiResNoiseRef.current || 0.01;
+      const thrOn = Math.min(0.12, Math.max(0.02, nf * 3.2));
+      const thrOff = Math.min(0.1, Math.max(0.016, nf * 2.2, (cap.peak || 0) * 0.2));
+      const thr = cap.heard ? thrOff : thrOn;
       cap.chunks.push(copy);
+      if (!cap.heard) {
+        // 말 시작 전에는 들리는 소리를 계속 '주변 소음'으로 학습 (선풍기·차 소리 같은 일정한 소음은 점점 무시)
+        nf = nf * 0.95 + Math.min(Math.max(rms, 0.002), nf * 3) * 0.05;
+        hiResNoiseRef.current = Math.min(0.06, nf);
+      }
       if (rms > thr) {
         cap.speechMs += ms;
+        cap.runMs = (cap.runMs || 0) + ms;
+        cap.peak = Math.max(cap.peak || 0, rms);
         cap.silenceMs = 0;
-        if (!cap.heard && cap.speechMs >= 150) { cap.heard = true; try { setInterim("\u{1F399}\uFE0F \uB4E3\uB294 \uC911\u2026"); } catch (e) {} }
-      } else if (cap.heard) {
-        cap.silenceMs += ms;
+        if (!cap.heard && cap.runMs >= 240) { cap.heard = true; try { setInterim("\u{1F399}\uFE0F \uB4E3\uB294 \uC911\u2026"); } catch (e) {} }
+      } else {
+        cap.runMs = 0;
+        if (!cap.heard) cap.speechMs = 0;
+        if (cap.heard) cap.silenceMs += ms;
       }
       if (!cap.heard && cap.chunks.length > 9) cap.chunks.shift();
-      if ((cap.heard && cap.silenceMs >= endMs) || cap.totalMs > 22000 || (!cap.heard && cap.totalMs > 7000)) {
+      if ((cap.heard && cap.silenceMs >= endMs) || cap.totalMs > 12000 || (!cap.heard && cap.totalMs > 7000)) {
         cap.done = true;
         hiResCapRef.current = null;
         setTimeout(() => finishCapture(), 0);
@@ -8754,7 +8771,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     };
     const finishCapture = async () => {
       if (isStale()) return;
-      if (!cap.heard) { setInterim(""); noSpeechNext(); return; }
+      if (!cap.heard || cap.speechMs < 320) { setInterim(""); if (cap.fromBarge) bargeFalseRef.current++; noSpeechNext(); return; }
       setInterim("\u23F3 \uC778\uC2DD \uC911\u2026");
       let text = "";
       let failed = false;
@@ -8766,14 +8783,14 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         try {
           text = await geminiTranscribeWav(b64, vocab, key);
         } catch (e1) {
-          if (e1 && (e1.status === 429 || e1.status === 403 || e1.status === 400)) throw e1;
+          if (!(e1 && e1.status >= 500)) throw e1;
           text = await geminiTranscribeWav(b64, vocab, key);
         }
       } catch (e) {
         failed = true;
         const st = e && e.status;
         hiResFailUntilRef.current = Date.now() + (st === 429 ? 60000 : st === 400 || st === 403 ? 600000 : 90000);
-        const m = st === 429 ? "정밀 인식 사용량이 잠시 초과돼서 기본 음성 인식으로 바꿔요." : st === 400 || st === 403 ? "정밀 인식 Gemini 키에 문제가 있어 기본 음성 인식으로 바꿔요. (☰ 메뉴 → 'Gemini AI API 키' 칸에서 키 확인)" : "인터넷이 불안정해서 기본 음성 인식으로 바꿔요.";
+        const m = st === 429 ? "정밀 인식 사용량이 잠시 초과돼서 기본 음성 인식으로 바꿨어요. 방금 말씀 다시 해 주세요." : st === 400 || st === 403 ? "정밀 인식 Gemini 키에 문제가 있어 기본 음성 인식으로 바꿨어요. (☰ 메뉴 → 'Gemini AI API 키' 칸에서 키 확인)" : "인터넷이 느려서 기본 음성 인식으로 바꿨어요. 방금 말씀 다시 해 주세요.";
         try { setLastAI(m); setVoiceErr(m); } catch (x) {}
       }
       if (isStale()) return;
@@ -8784,11 +8801,13 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         if (vocab.some((v) => String(v).replace(/\s/g, "") === _tn)) text = "";
       }
       if (failed) {
-        setTimeout(() => { if (!isStale() && phaseRef.current === "listening") beginListening(); }, 2800);
+        setTimeout(() => { try { setVoiceErr(""); } catch (x) {} if (!isStale() && phaseRef.current === "listening") beginListening(); }, 900);
         return;
       }
+      if (cap.fromBarge && (!text || isRecentEcho(text))) bargeFalseRef.current++;
       if (text && (text.match(/[가-힣A-Za-z0-9]/g) || []).length >= 1) {
         silenceCountRef.current = 0;
+        if (cap.fromBarge) bargeFalseRef.current = 0;
         if (phaseRef.current === "listening") routeCapturedSpeech(text);
       } else {
         noSpeechNext();
@@ -11484,7 +11503,7 @@ async function geminiTranscribeWav(b64, vocab, apiKey) {
   let model = await getGeminiSttModel(apiKey);
   const doFetch = (mdl) => {
     const c = new AbortController();
-    const t = setTimeout(() => c.abort(), 12e3);
+    const t = setTimeout(() => c.abort(), 7e3);
     return fetch(`https://generativelanguage.googleapis.com/v1beta/models/${mdl}:generateContent?key=${apiKey}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
