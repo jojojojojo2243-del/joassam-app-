@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 263;
+const APP_VERSION = 265;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2386,7 +2386,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v263 (붙여쓴 지점 이름·대솔/채소 문맥 판단·빠진 글자 확인)";
+const APP_BUILD = "v265 (지어낸 받아쓰기 거르기·주문 바꾸는 음성 명령은 확인 후 실행·상품+수량은 주문으로)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8123,7 +8123,7 @@ var VO2 = (function () {
   }
   // 발음이 비슷해 STT가 자주 헷갈리는 자모 쌍 (바뀌어도 반값만 틀린 것으로 침)
   var CONF = {};
-  ["ㄷㄹ", "ㄴㅁ", "ㄴㄹ", "ㅂㅍ", "ㄱㅋ", "ㄷㅌ", "ㅈㅊ", "ㅅㅆ", "ㄱㄲ", "ㄷㄸ", "ㅂㅃ", "ㅈㅉ", "ㅇㅎ", "ㅐㅔ", "ㅒㅖ", "ㅓㅗ", "ㅕㅛ", "ㅚㅙ", "ㅚㅞ", "ㅙㅞ", "ㅢㅣ", "ㅡㅜ", "ㅝㅗ", "ㅟㅣ",
+  ["ㄷㄹ", "ㄴㅁ", "ㄴㄹ", "ㅂㅍ", "ㄱㅋ", "ㄷㅌ", "ㅈㅊ", "ㅅㅆ", "ㅅㅈ", "ㅅㅊ", "ㄱㄲ", "ㄷㄸ", "ㅂㅃ", "ㅈㅉ", "ㅇㅎ", "ㅐㅔ", "ㅒㅖ", "ㅓㅗ", "ㅕㅛ", "ㅚㅙ", "ㅚㅞ", "ㅙㅞ", "ㅢㅣ", "ㅡㅜ", "ㅝㅗ", "ㅟㅣ",
     "_ㄱ_ㄲ", "_ㄱ_ㅋ", "_ㄷ_ㅅ", "_ㄷ_ㅌ", "_ㅅ_ㅆ", "_ㅅ_ㅈ", "_ㅅ_ㅊ", "_ㅂ_ㅍ", "_ㄴ_ㅇ", "_ㄴ_ㅁ", "_ㅁ_ㅇ", "_ㄹ_ㄴ"].forEach(function (p) {
     var a, b;
     if (p[0] === "_") { a = p.slice(0, 2); b = p.slice(2); } else { a = p[0]; b = p[1]; }
@@ -8190,7 +8190,8 @@ var VO2 = (function () {
     t = t.replace(/반\s*(키로그램|킬로그램|키로|킬로|kg)/gi, " 0.5kg ");
     // 숫자 + 무게 단위
     t = t.replace(/(\d+(?:\.\d+)?)\s*(키로그램|킬로그램|키로그람|킬로그람|키로|킬로|kg|KG|Kg)/g, function (_, n) { return " " + n + "kg "; });
-    t = t.replace(/(\d+(?:\.\d+)?)\s*(그램|그람|g)(?![a-z가-힣])/g, function (_, n) { return " " + n + "g "; });
+    t = t.replace(/(\d+(?:\.\d+)?)\s*(그램|그람)/g, function (_, n) { return " " + n + "g "; });
+    t = t.replace(/(\d+(?:\.\d+)?)\s*g(?![a-z])/gi, function (_, n) { return " " + n + "g "; });
     // 고유어 수사 + 단위 (두 박스, 네 개, 두 키로)
     t = t.replace(new RegExp("(^|[\\s,])(" + NATIVE_RE + ")\\s*(키로그램|킬로그램|키로|킬로|kg|그램|" + COUNT_UNIT_RE + ")(?=[\\s,]|[가-힣])", "g"), function (_, pre, w, u) {
       return pre + NATIVE[w] + normUnitWord(u) + " ";
@@ -8693,7 +8694,7 @@ var VO2 = (function () {
 
   // ---------- 의도 단서 ----------
   var RX = {
-    start: /(주문\s*(할게|할께|할래|할거|하려|합니다|해요|이요|입니다|받아|시작|넣을게|넣을께|들어갑니다)|주문이야|주문\s*요$)/,
+    start: /(주문\s*(좀\s*|하나\s*|한\s*건\s*)?(할게|할께|할래|할거|하려|합니다|해요|이요|입니다|받아|시작|넣을게|넣을께|넣어요|들어갑니다|들어가요|하께|할꺼)|주문이야|주문\s*요$|^주문$)/,
     cancel: /(주문\s*취소|취소\s*할게|취소해\s*줘|그만\s*할|그만해|관둬|관두|중단|안\s*할래|주문\s*안\s*해)/,
     clear: /(처음부터|다\s*지워|전부\s*지워|싹\s*지워|모두\s*지워|리셋|새로\s*할게|다시\s*할게)/,
     confirm: /(그대로|이대로|확정|주문\s*해|주문해\s*줘|주문\s*넣어|등록\s*해|등록해|접수\s*해|그렇게\s*해|그렇게\s*해\s*줘|좋아|오케이|오케|ok|맞아|맞습니다|응|네|예|어\s*그래|그래)/i,
@@ -10117,6 +10118,25 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   const [diagOn, setDiagOn] = React.useState(() => { try { return localStorage.getItem("joassam_vo2_diag_on") === "1"; } catch (e) { return false; } });
   const [lastDiag, setLastDiag] = React.useState(null);
   const [diagModal, setDiagModal] = React.useState(false);
+  // v265: 기존 주문을 바꾸는 음성 명령(묶음 바꾸기·삭제·상태 변경 등)은 바로 실행하지 않고 한 번 확인
+  const cmdConfirmRef = React.useRef(null);
+  const VOICE_WRITE_DESC = { ADD_TO_ORDER: "기존 주문에 상품 추가", BUNDLE_ORDERS: "주문 묶기", CONFIRM_DELIVERY: "도착 확인 처리", CREATE_ORDER: "새 주문 만들기", DELETE_ORDER: "주문 삭제", REBUNDLE_ONE: "주문 박스 다시 나누기/묶기", REMOVE_FROM_ORDER: "기존 주문에서 상품 빼기", SET_INVOICE_NO: "송장번호 입력", SET_STATUS: "주문 상태 변경", UNDO_LAST: "방금 작업 되돌리기" };
+  function voiceCmdInfo(text) {
+    let c = null;
+    try { c = localParseVoiceCommand(text, { products, customers, vendors }); } catch (e) {}
+    const write = !!(c && VOICE_WRITE_DESC[c.action]);
+    return { cmd: c, write, desc: write ? VOICE_WRITE_DESC[c.action] + (c.name ? "(" + c.name + " 님)" : "") : "" };
+  }
+  function askVoiceWrite(text, info) {
+    cmdConfirmRef.current = { text, at: Date.now(), desc: info.desc };
+    clearInterval(countdownRef.current);
+    setRetryCountdown(0);
+    const m = `"${text}" — ${info.desc}로 알아들었어요. 기존 주문이 바뀌어요. 실행할까요? 맞으면 "응", 아니면 "아니"라고 해 주세요.`;
+    setLastAI(m);
+    pushExchange(text, m);
+    processingRef.current = false;
+    speakThenListen(m);
+  }
   function noteStt(engine, primary, alts, chosen, extra) {
     try {
       const arr = sttLogRef.current || [];
@@ -10770,8 +10790,10 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         const _vs = vo2ActiveRef.current && vo2Ref.current && (vo2Ref.current.vendor || vo2Ref.current.orderer) ? vo2Ref.current : null;
         if (_vs) {
           const cur = [_vs.vendor && _vs.vendor.name, _vs.orderer && _vs.orderer.name, _vs.recipient && _vs.recipient.name].filter(Boolean);
-          vocab = hiResBuildVocab({ vendors: cur.map((n) => ({ name: n })), customers: (customers || []).slice(-15), products });
-        } else vocab = hiResBuildVocab({ vendors, customers, products });
+          vocab = hiResBuildVocab({ vendors: cur.map((n) => ({ name: n })), customers: [], products });
+        } else vocab = hiResBuildVocab({ vendors: [], customers: [], products });
+        // v264: 사람·업체 이름은 받아쓰기 힌트로 주지 않음 — 힌트에 있던 이름("김운호")을 다른 말 대신 적어 넣는 문제가 반복됨.
+        //        이름은 받아쓴 뒤 등록 목록에서 비슷한 이름을 찾고, 확실하지 않으면 물어봄.
         const key = hiResKey();
         try {
           text = await geminiTranscribeWav(b64, vocab, key);
@@ -10789,6 +10811,20 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       if (isStale()) return;
       setInterim("");
       if (text && isRecentEcho(text)) text = "";
+      // v265: 말한 시간에 비해 글자가 너무 많으면 받아쓰기가 지어낸 문장으로 보고 버림 ("주문 할께요"→"배수련 모듬쌈채소 1kg 한 박스 추가요")
+      if (text) {
+        const _syl = (text.match(/[가-힣]/g) || []).length + (text.match(/\d/g) || []).length * 1.5 + (text.match(/[a-zA-Z]/g) || []).length * 0.5;
+        const _sec = Math.max(0.3, cap.speechMs / 1000);
+        if (_syl > _sec * 9 + 6) {
+          noteStt("정밀(Gemini)", text, [], "", { rejected: true, speechMs: Math.round(cap.speechMs) });
+          try {
+            const rec = { t: Date.now(), engine: "정밀(Gemini)", stt: text, alts: [], prep: [], analysis: { normalized: "", products: [], companies: [], branches: [], persons: [], quantities: [], unknown: [] }, reply: "", items: "", verdict: { stage: "STT", ok: false, msg: "약 " + _sec.toFixed(1) + "초 말했는데 " + Math.round(_syl) + "글자가 나와서, 받아쓰기가 지어낸 문장으로 보고 버렸어요" } };
+            vo2DiagPush(rec); setLastDiag(rec);
+          } catch (x) {}
+          try { setVoiceErr("잘 안 들렸어요. 한 번 더 말씀해 주세요."); setTimeout(() => setVoiceErr(""), 3500); } catch (x) {}
+          text = "";
+        }
+      }
       if (text && cap.speechMs < 450) {
         const _tn = text.replace(/[\s.,!?]/g, "");
         if (vocab.some((v) => String(v).replace(/\s/g, "") === _tn)) text = "";
@@ -11141,7 +11177,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   }
   function hasOrderActionVerb(text) {
     const t = (text || "").replace(/\s/g, "");
-    return /주문(을|를)?(등록|접수|받아|받을|받자|작성|넣어|만들|하려|할게|할께|할래|할거|하고싶|하자|해줘|해요|하겠|넣을|넣을게|넣을께)|음성주문|음성으로주문|주문받아줘|주문접수|새주문|주문등록|주문추가|주문넣|주문작성/.test(t) && !/주문할때|주문할 때/.test(t) || /(등록해|접수해|넣어줘|작성해|추가해|주문할게|주문할께|주문할래|주문하자|주문해줘)/.test(t);
+    return /주문(을|를)?(좀|하나|한건|한개)?(등록|접수|받아|받을|받자|작성|넣어|만들|하려|할게|할께|할래|할거|하고싶|하자|해줘|해요|하겠|넣을|넣을게|넣을께|들어갑니다|들어가요|들어간다|이요|입니다|할게요|할께요|하께|할꺼)|음성주문|음성으로주문|주문받아줘|주문접수|새주문|주문등록|주문추가|주문넣|주문작성/.test(t) && !/주문할때|주문할 때/.test(t) || /(등록해|접수해|넣어줘|작성해|추가해|주문할게|주문할께|주문할래|주문하자|주문해줘)/.test(t);
   }
   function utteranceHasProductOrQty(text) {
     const t = (text || "").replace(/\s/g, "");
@@ -11160,8 +11196,24 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   }
   function detectVoiceOrderIntent(text) {
     const t = (text || "").replace(/\s/g, "");
+    // v265: 기존 주문을 묶기·나누기·송장·상태 바꾸기 같은 말(상품 이름 없이)은 새 주문이 아님
+    if (/(묶어|묶음|합쳐|나눠|따로따로|따로보내|송장|운송장|발송처리|발송완료|도착|결제완료|입금확인|상태)/.test(t)) {
+      let _hasProd = false;
+      try { _hasProd = VO2.analyze(text, vo2Db(), null).products.some((p) => p.found); } catch (e) {}
+      if (!_hasProd) return false;
+    }
+    if (/^(주문|주문요|주문이요|주문입니다|주문할게|주문할께)$/.test(t)) return true;
     if (looksLikeQueryUtterance(text) && !hasOrderActionVerb(text)) return false;
     if (hasOrderActionVerb(text)) return true;
+    // v264: '주문'이라는 말이 없어도 등록된 상품+수량("모듬쌈채소 1kg 한 박스 추가요")이나 고객·업체+상품이면 주문 대화로 시작
+    try {
+      if (typeof VO2 !== "undefined" && !/(왜|뭐|어째서|뭔데|이상|알려|보여|조회|검색|내역|현황|목록|얼마|몇)/.test(t)) {
+        const an = VO2.analyze(text, vo2Db(), null);
+        const prodOK = an.products.some((p) => p.found || p.candidates && p.candidates.length);
+        if (prodOK && (an.quantities.length || /(추가|넣어|주세요|줘|보내|담아)/.test(t))) return true;
+        if (prodOK && (an.persons.some((p) => p.exact) || an.companies.length)) return true;
+      }
+    } catch (e) {}
     if (/주문/.test(t)) {
       if (utteranceHasProductOrQty(text)) return true;
       if (!/(확인|내역|상황|현황|알려|보여|목록|리스트|조회|검색|취소|삭제|수정|몇)/.test(t)) {
@@ -11533,6 +11585,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   }
   function vo2SetState(st) {
     vo2Ref.current = st;
+    try { window.__vo2State = st; } catch (e) {}
     setVo2St(st);
   }
   function vo2Say(userText, msg) {
@@ -11583,7 +11636,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     const opt = { parseDate: (t) => typeof parseDate === "function" ? parseDate(t, /* @__PURE__ */ new Date()) : null };
     const prevState = vo2Ref.current;
     const _now = Date.now();
-    const pieces = (sttLogRef.current || []).filter((x) => _now - x.at < 2e4);
+    const pieces = (sttLogRef.current || []).filter((x) => _now - x.at < 2e4 && !x.rejected);
     sttLogRef.current = [];
     const prep = prepRef.current && _now - prepRef.current.at < 5e3 ? prepRef.current : { raw: text, steps: [] };
     // v261: 받아쓰기 후보(최대 5개) 중 등록된 이름·수량과 가장 잘 맞는 문장 고르기 (1순위가 틀리고 다른 후보가 맞는 경우)
@@ -12397,6 +12450,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     }
   }
   function pushExchange(userText, aiText) {
+    try { window.__jsTurn = (window.__jsTurn || 0) + 1; window.__jsLastAI = aiText; } catch (e) {}
     const updated = [
       ...historyRef.current,
       { role: "user", parts: [{ text: userText }] },
@@ -12474,6 +12528,23 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     }
     prepRef.current = { raw: _raw0, steps: _prep, at: Date.now() };
     setLastUser(text);
+    if (cmdConfirmRef.current) {
+      const cc = cmdConfirmRef.current;
+      cmdConfirmRef.current = null;
+      const tt = String(text || "").replace(/\s/g, "");
+      if (Date.now() - cc.at < 9e4 && /^(응|어|네|예|그래|맞아|맞아요|실행|실행해|해줘|해|오케이|좋아)/.test(tt)) {
+        let ok = false;
+        try { ok = onAppCommand ? onAppCommand(cc.text) : false; } catch (e) {}
+        const m = ok ? "네, " + cc.desc + "를 실행했어요." : "실행하지 못했어요.";
+        setLastAI(m); pushExchange(text, m); processingRef.current = false; speakThenListen(m);
+        return;
+      }
+      if (/^(아니|아니요|아니오|아냐|취소|하지마|노|됐어)/.test(tt)) {
+        const m = "네, 실행하지 않았어요.";
+        setLastAI(m); pushExchange(text, m); processingRef.current = false; speakThenListen(m);
+        return;
+      }
+    }
     try {
       bumpWordFreq(text);
     } catch (e) {
@@ -12690,11 +12761,10 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       return;
     }
     // v260: 확정된 주문을 바로 고치려 하면 새 주문으로 만들지 않고 안내
-    if (vo2Ref.current && vo2Ref.current.status === "confirmed" && Date.now() - vo2DoneAtRef.current < 12e4 && !detectVoiceOrderIntent(text)) {
+    if (vo2Ref.current && vo2Ref.current.status === "confirmed" && Date.now() - vo2DoneAtRef.current < 12e4 && !hasOrderActionVerb(text)) {
       try {
-        const _db = vo2Db();
         const _t = String(text || "");
-        if (VO2.findProducts(VO2.normalize(_t), _db.__vo2idx).length || /(바꿔|빼|추가|수정|변경|정정)/.test(_t.replace(/\s/g, ""))) {
+        if (/(바꿔|바꾸|빼|수정|변경|정정|아니|말고|잘못|더\s*넣|추가해)/.test(_t.replace(/\s/g, ""))) {
           clearInterval(countdownRef.current);
           setRetryCountdown(0);
           vo2Say(text, "이미 주문이 확정되었습니다. 바꾸시려면 주문 목록에서 수정하시거나, 새 주문은 '주문할게'라고 말씀해 주세요.");
@@ -12720,6 +12790,8 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     {
       const tNS = (text || "").replace(/\s/g, "");
       const editIntent = /주문.*(수정|고쳐|고칠|고치|바꿔|바꾸|변경|편집|열어|불러)/.test(tNS) || /(수정|고쳐|고칠|편집)(해|하|해줘|해주세요)?$/.test(tNS) || /(빼|삭제|제외|없애|지워)/.test(tNS) || /(되돌려|되돌리|방금전으로|방금거취소|방금꺼취소|방금취소|방금주문취소|방금등록취소|마지막주문취소|마지막취소|실수했어|잘못했어)/.test(tNS) || /(도착확인|도착했|도착처리|배송완료처리|배송완료로|받은걸로|받았다고)/.test(tNS) || /도착/.test(tNS) && /확인/.test(tNS) || /(한박스|한상자|하나로묶|하나로합|자동묶음|따로따로|따로보내|개별발송|낱개로|묶음수정|박스수정|박스편집|묶음편집)/.test(tNS) || /(송장번호|송장|운송장|택배번호|운송번호)/.test(tNS) || /(발송처리|발송완료|발송했|출고|보냈|결제완료|결제확인|입금확인|입금완료|입금됐|발송준비|준비완료)/.test(tNS) && !/도착/.test(tNS) || /(주문삭제|주문취소|주문전체삭제|전체삭제|주문지워|주문없애|오더삭제|오더취소|주문전체취소)/.test(tNS);
+      const _vi = editIntent ? voiceCmdInfo(text) : null;
+      if (_vi && _vi.write) { askVoiceWrite(text, _vi); return; }
       if (editIntent && onAppCommand && onAppCommand(text)) {
         clearInterval(countdownRef.current);
         setRetryCountdown(0);
@@ -12876,6 +12948,10 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         return;
       }
     } catch (e) {
+    }
+    {
+      const _vi2 = voiceCmdInfo(text);
+      if (_vi2.write) { askVoiceWrite(text, _vi2); return; }
     }
     if (onAppCommand && onAppCommand(text)) {
       const msg = "\uB124, \uC2E4\uD589\uD588\uC5B4\uC694.";
@@ -13710,7 +13786,7 @@ async function geminiTranscribeWav(b64, vocab, apiKey) {
   var _a, _b, _c, _d, _e;
   const hint = (vocab || []).join(", ");
   const prompt = "이 오디오는 한국의 농산물(쌈채소) 판매 사장님이 주문관리 앱에 대고 말한 음성입니다. 들리는 말을 한국어로 그대로 정확히 받아쓰세요.\n" +
-    "규칙: 받아쓴 문장만 출력(설명·따옴표·번역·마침표 추가 금지). 말이 없거나 잡음뿐이면 아무것도 출력하지 마세요. 들리지 않는 말을 지어내지 마세요. 이름 목록에서 임의로 골라 적지 마세요(실제로 그 이름을 말한 경우만 적기). 발음이 확실히 비슷하지 않으면 목록의 이름으로 바꾸지 말고 들린 그대로 적으세요(예: '채소'를 다른 상품·업체 이름으로 바꾸지 않기). 숫자와 단위(키로·박스·개)는 빠뜨리지 마세요.\n" +
+    "규칙: 받아쓴 문장만 출력(설명·따옴표·번역·마침표 추가 금지). 말이 없거나 잡음뿐이면 아무것도 출력하지 마세요. 들리지 않는 말을 지어내지 마세요. 이름 목록에서 임의로 골라 적지 마세요(실제로 그 이름을 말한 경우만 적기). 발음이 확실히 비슷하지 않으면 목록의 이름으로 바꾸지 말고 들린 그대로 적으세요(예: '채소'를 다른 상품·업체 이름으로 바꾸지 않기). 숫자와 단위(키로·박스·개)는 빠뜨리지 마세요. 짧게 말했으면 짧게만 적고, 말하지 않은 상품·이름·수량을 덧붙이지 마세요.\n" +
     "숫자·수량은 말한 그대로(예: 두 박스, 3키로). 아래는 자주 나오는 업체·고객·상품 이름입니다. 발음이 비슷하게 들리면 이 표기를 쓰되, 이 목록에 없는 말은 들린 대로 적으세요.\n" +
     "이름 목록: " + hint + "\n자주 쓰는 말: 주문, 발송, 입금대기, 결제완료, 발송준비, 박스, 키로, 업체, 고객, 취소, 등록, 목록, 보여줘";
   let model = await getGeminiSttModel(apiKey);
