@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 261;
+const APP_VERSION = 262;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2386,7 +2386,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v261 (음성 인식 보정·진단 모드·실데이터 인식 시험)";
+const APP_BUILD = "v262 (주문 중 업체 바뀜 확인·정밀 받아쓰기 힌트 조정)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8097,7 +8097,7 @@ null       : \uC774\uB3D9 \uBD88\uD544\uC694\uD55C \uC77C\uBC18 \uB300\uD654
   const stripped = cleaned.replace(/^[^{]*\{/, "").replace(/["']?\s*text\s*["']?\s*:\s*["']?/i, "").replace(/["']?\s*,?\s*["']?action["']?\s*:[\s\S]*$/i, "").replace(/[{}"]/g, "").trim();
   return { text: stripped || "\uB2E4\uC2DC \uB9D0\uC500\uD574 \uC8FC\uC138\uC694.", action: null };
 }
-// ===== VO2: 대화형 음성 주문 엔진 (v261) =====
+// ===== VO2: 대화형 음성 주문 엔진 (v262) =====
 // 말 → 정규화 → 의도/항목 추출 → 등록된 DB(상품·고객·업체·지점)에서 후보 검색 → 현재 주문 상태에 '바뀐 것만' 반영 → 답변
 // 주문 상태는 문자열이 아니라 구조화된 객체로 관리하고, 애매하면 추측하지 않고 질문함.
 var VO2 = (function () {
@@ -8750,6 +8750,7 @@ var VO2 = (function () {
       var c = clauses[ci];
       var r1 = handlePeopleAndCompany(st, c, idx, R, logChange, ci === 0 ? norm : c);
       if (r1) anyPersonOrCompany = true;
+      if (r1 === "skipItems") continue;
       handleShipping(st, c, idx, R, logChange);
       handleItems(st, c, idx, R, logChange, clauses.length > 1);
     }
@@ -8993,6 +8994,22 @@ var VO2 = (function () {
       if (no) { st.ctx.pending = null; return "handled"; }
       return "pass";
     }
+    if (p.type === "switchVendor") {
+      if (yes) {
+        st.ctx.pending = null;
+        var vv = p.vendorId ? idx.vendors.find(function (v) { return v.id === p.vendorId; }) : null;
+        if (vv) setVendor(st, vv, R, logChange);
+        else {
+          var co2 = idx.companies[p.companyNS];
+          if (co2) { st.company = { name: co2.name, nameNS: co2.nameNS }; st.vendor = null; logChange("company", "", co2.name); R.changes.push("업체를 " + ro(co2.name) + " 바꿨습니다"); var q2 = askBranch(st, co2); if (q2) R.asks.push(q2); }
+        }
+        return "handled";
+      }
+      if (no) { st.ctx.pending = null; R.notes.push("네, 업체는 그대로 둘게요."); return "handled"; }
+      // 대답 대신 상품 등을 말하면 질문은 접고 그 말을 처리
+      st.ctx.pending = null;
+      return "pass";
+    }
     if (p.type === "role") {
       var person = p.person;
       if (/(받는|받으)/.test(t)) { st.ctx.pending = null; setPerson(st, "recipient", person, R, logChange); return "handled"; }
@@ -9047,6 +9064,16 @@ var VO2 = (function () {
     var company = cos.length ? cos[cos.length - 1] : null; // "A 말고 B"면 뒤엣것
     if (company) {
       var co = company.company;
+      // v262: 주문 중에 다른 업체 이름이 '들리기만' 한 경우(예: "채소 2키로"가 "대솔동남점 4개"로 잘못 받아써짐)는 바로 바꾸지 않고 물어봄
+      var curName = st.vendor ? st.vendor.name : st.company ? st.company.name : "";
+      var differs = !!curName && (company.vendor ? !st.vendor || st.vendor.id !== company.vendor.id : !st.company || st.company.nameNS !== co.nameNS);
+      var sameCoBranch = company.vendor && st.company && company.vendor.companyNS === st.company.nameNS;
+      var explicitSwitch = RX.start.test(c) || /(업체|거래처|가게|상호)/.test(c) || isCorrection || !!replaceM || /(바꿔|변경)/.test(c);
+      if (differs && !sameCoBranch && !explicitSwitch) {
+        var tgt = company.vendor || null;
+        queueAsk(st, R, { type: "switchVendor", vendorId: tgt ? tgt.id : null, companyNS: co.nameNS }, "지금은 " + curName + " 주문이에요. '" + company.surface + "'(이)라고 들렸는데 업체를 " + ro(tgt ? tgt.name : co.name) + " 바꿀까요?" + (parseQuantities(c).length ? " 상품을 말씀하신 거라면 상품 이름을 다시 말씀해 주세요." : ""));
+        return "skipItems";
+      }
       if (company.vendor) setVendor(st, company.vendor, R, logChange);
       else {
         var sameCo = st.company && st.company.nameNS === co.nameNS;
@@ -10656,7 +10683,13 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       let vocab = [];
       try {
         const b64 = hiResEncodeWav16k(cap.chunks, rate);
-        vocab = hiResBuildVocab({ vendors, customers, products });
+        // v262: 주문 중(업체·주문자가 이미 정해짐)에는 받아쓰기 힌트에서 다른 업체 이름을 빼고 상품 이름 위주로 줌
+        //  → "채소 2키로"를 힌트 목록의 업체 이름("대솔동남점")으로 바꿔 적던 문제 줄이기
+        const _vs = vo2ActiveRef.current && vo2Ref.current && (vo2Ref.current.vendor || vo2Ref.current.orderer) ? vo2Ref.current : null;
+        if (_vs) {
+          const cur = [_vs.vendor && _vs.vendor.name, _vs.orderer && _vs.orderer.name, _vs.recipient && _vs.recipient.name].filter(Boolean);
+          vocab = hiResBuildVocab({ vendors: cur.map((n) => ({ name: n })), customers: (customers || []).slice(-15), products });
+        } else vocab = hiResBuildVocab({ vendors, customers, products });
         const key = hiResKey();
         try {
           text = await geminiTranscribeWav(b64, vocab, key);
@@ -13595,7 +13628,7 @@ async function geminiTranscribeWav(b64, vocab, apiKey) {
   var _a, _b, _c, _d, _e;
   const hint = (vocab || []).join(", ");
   const prompt = "이 오디오는 한국의 농산물(쌈채소) 판매 사장님이 주문관리 앱에 대고 말한 음성입니다. 들리는 말을 한국어로 그대로 정확히 받아쓰세요.\n" +
-    "규칙: 받아쓴 문장만 출력(설명·따옴표·번역·마침표 추가 금지). 말이 없거나 잡음뿐이면 아무것도 출력하지 마세요. 들리지 않는 말을 지어내지 마세요. 이름 목록에서 임의로 골라 적지 마세요(실제로 그 이름을 말한 경우만 적기).\n" +
+    "규칙: 받아쓴 문장만 출력(설명·따옴표·번역·마침표 추가 금지). 말이 없거나 잡음뿐이면 아무것도 출력하지 마세요. 들리지 않는 말을 지어내지 마세요. 이름 목록에서 임의로 골라 적지 마세요(실제로 그 이름을 말한 경우만 적기). 발음이 확실히 비슷하지 않으면 목록의 이름으로 바꾸지 말고 들린 그대로 적으세요(예: '채소'를 다른 상품·업체 이름으로 바꾸지 않기). 숫자와 단위(키로·박스·개)는 빠뜨리지 마세요.\n" +
     "숫자·수량은 말한 그대로(예: 두 박스, 3키로). 아래는 자주 나오는 업체·고객·상품 이름입니다. 발음이 비슷하게 들리면 이 표기를 쓰되, 이 목록에 없는 말은 들린 대로 적으세요.\n" +
     "이름 목록: " + hint + "\n자주 쓰는 말: 주문, 발송, 입금대기, 결제완료, 발송준비, 박스, 키로, 업체, 고객, 취소, 등록, 목록, 보여줘";
   let model = await getGeminiSttModel(apiKey);
