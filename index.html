@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 268;
+const APP_VERSION = 269;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2386,7 +2386,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v268 (대화 주문 음성 인식 전면 정리: 학습 단어 덮어쓰기 중단·다시 듣기·버린 말 표시·짧은 음성 답)";
+const APP_BUILD = "v269 (대화 주문 전용 화면 새로 만듦: 녹음·받아쓰기·주문 처리·대화 기록 한 줄 경로)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8384,7 +8384,11 @@ var VO2 = (function () {
       if (!used) {
         var co = companies[to] || Object.keys(companies).map(function (k) { return companies[k]; }).find(function (c) { return c.aliases.indexOf(to) >= 0; });
         var vend = !co ? vendors.find(function (v) { return ns(v.name) === to; }) : null;
-        if (vend) { if (vend.aliases.indexOf(f) < 0) vend.aliases.push(f); used = "업체:" + vend.name; }
+        if (vend) {
+          if (vend.aliases.indexOf(f) < 0) vend.aliases.push(f);
+          if (vend.companyNS && f.indexOf(vend.companyNS) === 0 && f.length > vend.companyNS.length) { vend.branchAliases = vend.branchAliases || []; vend.branchAliases.push(f.slice(vend.companyNS.length)); }
+          used = "업체:" + vend.name;
+        }
         else if (co) { if (co.aliases.indexOf(f) < 0) co.aliases.push(f); used = "업체:" + co.name; }
       }
       if (!used && custByName[to]) { custAlias[f] = to; used = "고객:" + to; }
@@ -8589,7 +8593,7 @@ var VO2 = (function () {
       pool.forEach(function (v) {
         var b = v.branchNS, bs = b.replace(/점$/, "");
         var s = 0;
-        if (w === b || w === bs) s = 1;
+        if (w === b || w === bs || (v.branchAliases && v.branchAliases.indexOf(w) >= 0)) s = 1;
         else if (bs.length >= 2 && w.indexOf(bs) === 0) s = 0.92;
         else if (looksBranch) s = sim(w, b);
         else if (w.length >= 2 && w.length <= bs.length + 1) s = sim(w, bs) - 0.08;
@@ -8755,6 +8759,18 @@ var VO2 = (function () {
       }
     }
 
+    // v269: 다른 질문이 걸려 있어도, 주소처럼 확실한 말("경기 수원시 팔달구 효원로 100")이 오면 받는 분 주소로 씀
+    if (st.ctx.pending && st.ctx.pending.type !== "address" && strongAddress(raw) && !findProducts(norm, idx).length) {
+      var er0 = effRecipient(st);
+      if (er0) {
+        var ad0 = raw.replace(/^(주소는|주소|배송지는|배송지)\s*/, "").replace(/(이야|예요|입니다|로 해 줘|로 해줘|으로 해줘)$/, "").trim();
+        logChange("address", (er0 || {}).address || "", ad0);
+        st.shipping.addressOverride = ad0;
+        st.ctx.queue = (st.ctx.queue || []).filter(function (q) { return q.type !== "address"; });
+        R.changes.push("주소를 '" + ad0 + "'(으)로 정했습니다");
+        return finish(st, res, R, idx, raw);
+      }
+    }
     // 1) 확인 대기 중인 질문에 대한 답
     if (st.ctx.pending) {
       var pr = resolvePending(st, norm, raw, idx, R, logChange);
@@ -8805,7 +8821,13 @@ var VO2 = (function () {
     }
 
     // 3-1) 묶음 발송 말("한 박스로 묶어", "따로 보내", "로메인이랑 루꼴라 한 박스")은 상품 수량으로 보지 않고 묶음으로 처리
-    if (st.items.length && BUNDLE_RX.test(norm) && !RX.del.test(norm)) {
+    // v269: "적상추랑 로메인 한 박스"처럼 이미 담긴 상품 2개 이상을 '랑/하고'로 이어 '한 박스'라고 하면 묶음으로 봄 ('씩/추가/더'가 있으면 수량)
+    var bundleLike = false;
+    if (st.items.length >= 2 && /(?:한|1)\s*박스/.test(norm) && /(랑|이랑|하고|과|와)\s/.test(norm + " ") && !/(씩|추가|더|각각|각)/.test(norm)) {
+      var bm = findProducts(norm, idx).filter(function (m) { return m.baseNS; });
+      bundleLike = bm.length >= 2 && bm.every(function (m) { return st.items.some(function (it) { return it.baseNS === m.baseNS; }); });
+    }
+    if (st.items.length && (BUNDLE_RX.test(norm) || bundleLike) && !RX.del.test(norm)) {
       var bplan = parseBundle(norm, st, idx);
       if (bplan) {
         setBoxPlan(st, bplan, R, logChange, idx);
@@ -8845,6 +8867,12 @@ var VO2 = (function () {
     return finish(st, res, R, idx, raw);
   }
 
+  function strongAddress(t) {
+    var x = String(t || "").trim();
+    if (!/\d/.test(x)) return false;
+    var units = x.split(/\s+/).filter(function (tk) { return tk.length >= 2 && /(시|도|구|군|동|읍|면|리|로|길)$/.test(tk) && !/^(그대로|이대로|정도)$/.test(tk); }).length;
+    return units >= 2 && !/(박스|키로|킬로|kg|개|봉|팩)/i.test(x);
+  }
   function finish(st, res, R, idx, raw) {
     if (R._added && R._added.length) {
       var addTxt = eul(R._added.join(", ")) + " 추가했습니다";
@@ -8863,25 +8891,51 @@ var VO2 = (function () {
       if (np) parts.push(np);
     }
     res.reply = parts.join(" ").replace(/\.\./g, ".").trim();
+    // v269: 아무 대답도 없는 경우가 없게 — 걸린 질문이 있으면 다시 묻기
+    if (!res.reply && st.ctx.pending) {
+      var pq = st.ctx.pending.q || nextPrompt(st, idx);
+      if (pq) res.reply = "먼저 확인할 게 있어요. " + pq;
+    }
     res.summary = summaryLines(st, idx);
     return res;
   }
   function nextPrompt(st, idx) {
+    // v269: 지점 질문에 답하지 않고 넘어간 경우 다시 물음 (전에는 "지점이 아직 없어요."에서 질문이 빠졌음)
+    var coIdx = st.company && idx && idx.companies ? idx.companies[st.company.nameNS] : null;
+    if (st.ctx.pending && st.ctx.pending.type === "branch" && coIdx && !st.vendor) return askBranch(st, coIdx, st.ctx.pending.heard);
     if (st.ctx.pending) return "";
     if (!st.vendor && !st.orderer && !st.company) return "누구 주문인가요?";
-    if (st.company && !st.vendor) return askBranch(st, st.company);
+    if (coIdx && !st.vendor) return askBranch(st, coIdx);
     if (!st.items.length) return "어떤 상품을 얼마나 드릴까요?";
     return "";
   }
-  function askBranch(st, company) {
+  function askBranch(st, company, heard) {
     var vs = company.vendors.filter(function (v) { return v.branch; });
     if (!vs.length) return "";
-    st.ctx.pending = { type: "branch", companyNS: company.nameNS, options: vs.map(function (v) { return v.id; }) };
-    return "어느 지점인가요? " + vs.slice(0, 6).map(function (v) { return v.branch; }).join(", ") + (vs.length > 6 ? " 등" : "") + ".";
+    st.ctx.pending = { type: "branch", companyNS: company.nameNS, options: vs.map(function (v) { return v.id; }), heard: heard || "" };
+    return (heard ? "'" + company.name + " " + heard + "'은(는) 등록돼 있지 않아요. " : "") + "어느 지점인가요? " + vs.slice(0, 6).map(function (v) { return v.branch; }).join(", ") + (vs.length > 6 ? " 등" : "") + ".";
+  }
+  // v269: 말한 지점 이름이 등록에 없을 때 그 말을 기억해 둠 ("대솔 본점" → 본점)
+  function heardBranchWord(c, co) {
+    var tks = String(c || "").split(/\s+/).map(stripParticles);
+    for (var i = 0; i < tks.length; i++) {
+      var w = tks[i];
+      if (co && w.indexOf(co.nameNS) === 0) w = w.slice(co.nameNS.length);
+      if (/^[가-힣A-Za-z0-9]{1,6}점$/.test(w) && !co.vendors.some(function (v) { return v.branchNS === w; })) return w;
+    }
+    return "";
+  }
+  // v269: 고른 업체를 '이 말'로 기억할지 물어봄 (사장님이 '응' 해야만 저장)
+  function offerRemember(st, R, heardText, vendor) {
+    if (!heardText || !vendor) return;
+    var hNS = ns(heardText);
+    if (!hNS || hNS === ns(vendor.name) || (vendor.aliases || []).indexOf(hNS) >= 0) return;
+    st.ctx.pending = { type: "remember", from: heardText, vendorId: vendor.id };
+    R.asks.push("앞으로 '" + heardText + "'(이)라고 하시면 " + ro(vendor.name) + " 알아들을까요?");
   }
   // ---------- v267: 묶음 발송 (한 박스 / 자동 / 따로 / 직접 묶기) ----------
   var CUR_OPTS = {};
-  var BUNDLE_RX = /(묶어|묶음|합쳐|같이\s*(보내|담아|넣어|포장)|따로|각각|개별|낱개로|자동으로|알아서|규칙대로|한\s*박스로|한\s*상자로|박스\s*하나로|한\s*박스에|전부\s*한\s*박스|모두\s*한\s*박스|다\s*한\s*박스|박스\s*나눠|나눠서\s*(보내|담아))/;
+  var BUNDLE_RX = /(묶어|묶음|합쳐|같이\s*(보내|담아|넣어|포장)|따로|각각|개별|낱개로|자동으로|알아서|규칙대로|(?:한|1)\s*박스로|(?:한|1)\s*상자로|박스\s*하나로|(?:한|1)\s*박스에|전부\s*(?:한|1)\s*박스|모두\s*(?:한|1)\s*박스|다\s*(?:한|1)\s*박스|박스\s*나눠|나눠서\s*(보내|담아))/;
   function totalUnits(st) { return st.items.reduce(function (a, it) { return a + (Number(it.quantity) || 0); }, 0); }
   function boxPlanText(st, idx) {
     var bp = st.shipping && st.shipping.boxPlan;
@@ -8942,7 +8996,7 @@ var VO2 = (function () {
     st.shipping.boxPlan = plan;
     var a = boxPlanText(st, idx);
     logChange("boxPlan", b, a);
-    R.changes.push(plan.mode === "explicit" ? "묶음 발송은 " + a + "로 할게요" : "묶음 발송은 " + ro(a) + " 할게요");
+    R.changes.push("묶음 발송은 " + ro(a) + " 할게요");
   }
   function confirmFlow(st, res, R, idx, raw) {
     // 상품이 2개 이상인데 묶음 방법을 아직 안 정했으면 먼저 물어봄
@@ -9030,16 +9084,19 @@ var VO2 = (function () {
       var vs = (co ? co.vendors : []).filter(function (v) { return p.options.indexOf(v.id) >= 0; });
       var k = pickByOrdinal(norm, vs.length);
       var chosen = k >= 0 ? vs[k] : null;
-      if (!chosen) {
+      if (!chosen && !strongAddress(raw)) {
         var br = findBranches(norm, idx, co);
-        if (br.length && br[0].vendor) chosen = br[0].vendor;
+        // v269: 비슷하기만 한 말("부산"→군산점)로 지점을 고르지 않음. '…점'이라고 했거나 지점 이름과 거의 같을 때만
+        if (br.length && br[0].vendor && (/점/.test(br[0].surface) || br[0].score >= 0.9)) chosen = br[0].vendor;
       }
       if (chosen) {
+        var heardB = p.heard ? (co ? co.name + " " : "") + p.heard : "";
         st.ctx.pending = null;
         setVendor(st, chosen, R, logChange, "select");
         // 같은 말에 상품 등이 같이 있으면 계속 처리
         var rest = norm.replace(chosen.branch, " ");
         if (findProducts(rest, idx).length || parseQuantities(rest).length) { handleItems(st, rest, idx, R, logChange, false); }
+        if (heardB && !st.ctx.pending) offerRemember(st, R, heardB, chosen);
         return "handled";
       }
       return "pass";
@@ -9082,6 +9139,14 @@ var VO2 = (function () {
       return "pass";
     }
     if (p.type === "sku") {
+      // v269: 대답 대신 다른 상품을 말하면("로메인 2키로 하나") 질문은 접고 그 말을 새로 처리 (전에는 '2키로'를 이 상품 무게로 잘못 씀)
+      var otherP = findProducts(norm, idx).filter(function (m) { return m.baseNS && m.baseNS !== p.baseNS; });
+      if (otherP.length) {
+        st.ctx.pending = null;
+        var gq = idx.groups[p.baseNS];
+        R.notes.push(eun(gq ? gq.base : "앞 상품") + " 무게를 정하지 않아 담지 않았어요. 필요하면 다시 말씀해 주세요.");
+        return "pass";
+      }
       var g = idx.groups[p.baseNS];
       var skus = g ? g.skus : [];
       var q = parseQuantities(norm).filter(function (x) { return x.kind === "weight"; });
@@ -9094,6 +9159,8 @@ var VO2 = (function () {
         var add = p.add;
         if (p.mult && sku.grams && p.wantGrams && p.wantGrams % sku.grams === 0 && !add.countGiven) add.quantity = p.wantGrams / sku.grams;
         addOrMergeItem(st, Object.assign({}, add, { productId: sku.id, productName: sku.name, weightGrams: sku.grams }), R, logChange, idx);
+        // "좋아 그대로 주문해"처럼 대답과 함께 주문 확정 말이 있으면 바로 확인 단계로
+        if (/(그대로|이대로|확정|주문\s*해|주문해|주문\s*넣어)/.test(norm)) R._thenConfirm = true;
         return "handled";
       }
       if (no) { st.ctx.pending = null; R.notes.push("알겠습니다. 다른 상품이나 무게를 말씀해 주세요."); return "handled"; }
@@ -9126,7 +9193,11 @@ var VO2 = (function () {
     if (p.type === "address") {
       if (no) { st.ctx.pending = null; R.notes.push("주소는 그대로 둘게요."); return "handled"; }
       var addr = raw.replace(/(주소는|주소|배송지는|배송지|로\s*바꿔.*|으로\s*바꿔.*|로\s*해.*|으로\s*해.*|이야|예요|입니다)$/g, "").replace(/^(주소는|주소|배송지는|배송지)\s*/, "").trim();
-      if (addr.length >= 5 && /(\d|시|도|구|군|동|읍|면|리|로|길|아파트|빌라)/.test(addr)) {
+      // v269: "좋아 그대로 주문해"의 '그대로'를 주소로 착각하지 않게, 낱말 끝이 주소 단위인지·숫자가 있는지로 판단
+      var addrToks = addr.split(/\s+/);
+      var looksAddr = /\d/.test(addr) || /(아파트|빌라|번지|맨션|오피스텔)/.test(addr) || addrToks.filter(function (tk) { return tk.length >= 2 && /(시|도|구|군|동|읍|면|리|로|길)$/.test(tk) && !/^(그대로|이대로|저대로|그래도|정도|어디로|뭐로|그걸로|이걸로|그것도)$/.test(tk); }).length >= 1;
+      var cmdLike = /(그대로|이대로|주문\s*해|주문해|확정|취소|그만|응|네|좋아|맞아)/.test(addr) && !/\d/.test(addr);
+      if (addr.length >= 5 && looksAddr && !cmdLike) {
         st.ctx.pending = null;
         var before = (effRecipient(st) || {}).address || "";
         st.shipping.addressOverride = addr;
@@ -9161,12 +9232,27 @@ var VO2 = (function () {
       }
       return "pass";
     }
+    if (p.type === "remember") {
+      var rv = idx.vendors.find(function (v) { return v.id === p.vendorId; });
+      if (yes && rv) {
+        st.ctx.pending = null;
+        var fNS = ns(p.from);
+        if (rv.aliases.indexOf(fNS) < 0) rv.aliases.push(fNS);
+        if (rv.companyNS && fNS.indexOf(rv.companyNS) === 0 && fNS.length > rv.companyNS.length) { rv.branchAliases = rv.branchAliases || []; rv.branchAliases.push(fNS.slice(rv.companyNS.length)); }
+        st.ctx.learnOut = { from: p.from, to: rv.name, turn: st.ctx.turn };
+        R.notes.push("네, 앞으로 '" + p.from + "'은(는) " + ro(rv.name) + " 알아들을게요.");
+        return "handled";
+      }
+      if (no) { st.ctx.pending = null; R.notes.push("네, 이번만 그렇게 할게요."); return "handled"; }
+      st.ctx.pending = null;
+      return "pass";
+    }
     if (p.type === "vendorPick") {
       var vlist = p.options.map(function (id) { return idx.vendors.find(function (v) { return v.id === id; }); }).filter(Boolean);
       var kk = pickByOrdinal(norm, vlist.length);
       var vch = kk >= 0 ? vlist[kk] : null;
       if (!vch) { var cs2 = findCompanies(norm, idx); if (cs2.length) vch = vlist.find(function (v) { return v.companyNS === cs2[0].company.nameNS; }) || null; }
-      if (vch) { st.ctx.pending = null; setVendor(st, vch, R, logChange, "select"); return "handled"; }
+      if (vch) { st.ctx.pending = null; setVendor(st, vch, R, logChange, "select"); if (p.heard) offerRemember(st, R, p.heard, vch); return "handled"; }
       if (no) { st.ctx.pending = null; R.notes.push("알겠습니다. 업체 이름을 말씀해 주세요."); return "handled"; }
       return "pass";
     }
@@ -9208,8 +9294,13 @@ var VO2 = (function () {
       var got = [];
       if (rec.address) got.push("주소");
       if (rec.phone) got.push("전화번호");
-      R.changes.push("받는 분을 " + rec.name + "님으로 " + (before ? "변경" : "정") + "했습니다" + (got.length ? ". 등록된 " + got.join("와 ") + "를 불러왔어요" : ". 등록된 주소가 없어요, 주소를 말씀해 주세요"));
-      if (!rec.address) queueAsk(st, R, { type: "address" }, "");
+      R.changes.push("받는 분을 " + rec.name + "님으로 " + (before ? "변경" : "정") + "했습니다" + (got.length ? ". 등록된 " + got.join("와 ") + "를 불러왔어요" : ""));
+      if (!rec.address) {
+        // v269: 주소가 없으면 (다른 질문이 먼저 있어도) 차례가 오면 꼭 물어봄
+        var aq = rec.name + "님 주소가 등록돼 있지 않아요. 받는 주소를 말씀해 주세요.";
+        if (st.ctx.pending) R.notes.push("주소는 다음에 여쭤볼게요.");
+        queueAsk(st, R, { type: "address" }, aq);
+      }
       st.ctx.lastPersonRole = "recipient";
     } else {
       var b = st.orderer ? st.orderer.name : "";
@@ -9274,7 +9365,7 @@ var VO2 = (function () {
             st.vendor = null;
             logChange("company", beforeC, co.name);
             R.changes.push(beforeC ? "업체를 " + ro(co.name) + " 변경했습니다" : "네, " + co.name + " 주문을 시작할게요");
-            var q = askBranch(st, co);
+            var q = askBranch(st, co, heardBranchWord(c, co));
             if (q) R.asks.push(q);
           }
         }
@@ -9296,13 +9387,13 @@ var VO2 = (function () {
           var heardV = pw + " " + bw;
           var opt2 = idx.vendors.filter(function (v) { return v.branchNS && v.branchNS === ns(bw); });
           closestNames(pw + bw, idx, 5).forEach(function (o) {
-            if (o.kind !== "업체" && o.kind !== "지점") return;
+            if ((o.kind !== "업체" && o.kind !== "지점") || o.s < 0.55) return;
             idx.vendors.forEach(function (v) { if ((v.name === o.name || v.company === o.name) && opt2.indexOf(v) < 0 && opt2.length < 4) opt2.push(v); });
           });
           opt2 = opt2.slice(0, 4);
           R._consumed = (R._consumed || []).concat([tks[bj - 1], tks[bj]]);
           if (opt2.length) {
-            queueAsk(st, R, { type: "vendorPick", options: opt2.map(function (v) { return v.id; }) }, "'" + heardV + "'(이)라고 들렸는데 등록된 업체에서 못 찾았어요. " + opt2.map(function (v, i) { return (i + 1) + "번 " + v.name; }).join(", ") + " 중에 있나요? 없으면 업체 이름을 다시 말씀해 주세요.");
+            queueAsk(st, R, { type: "vendorPick", options: opt2.map(function (v) { return v.id; }), heard: heardV }, "'" + heardV + "'(이)라고 들렸는데 등록된 업체에서 못 찾았어요. " + opt2.map(function (v, i) { return (i + 1) + "번 " + v.name; }).join(", ") + " 중에 있나요? 없으면 업체 이름을 다시 말씀해 주세요.");
           } else {
             R.asks.push("'" + heardV + "'(이)라는 업체는 등록돼 있지 않아요. 업체 이름을 다시 말씀해 주세요.");
           }
@@ -9488,6 +9579,29 @@ var VO2 = (function () {
   }
 
   // ---------- 상품 ----------
+  // v269: 빠르게 말해 가운데 글자가 빠지거나(크리스탈→크스, 카이피라→카이) 글자 순서가 섞여 들린 경우(청다채→다청체)도 후보로 찾음
+  //       (확신이 낮으므로 바로 넣지 않고 "~ 말씀이세요?"로 확인함)
+  function sylSim(a, b) { return a === b ? 1 : sim(a, b); }
+  function soundsLike(w, k, g, wantGrams) {
+    var best = sim(w, k);
+    var ws = w.split(""), ks = k.split("");
+    if (ws.length >= 2 && ks.length > ws.length && sylSim(ws[0], ks[0]) >= 0.75) {
+      var j = 1, hit = 1;
+      for (var i = 1; i < ws.length && j < ks.length; i++) { while (j < ks.length && sylSim(ws[i], ks[j]) < 0.6) j++; if (j < ks.length) { hit++; j++; } }
+      if (hit === ws.length) best = Math.max(best, 0.5 + 0.35 * (ws.length / ks.length) + (sylSim(ws[ws.length - 1], ks[ks.length - 1]) >= 0.75 ? 0.05 : 0));
+    }
+    if (ws.length >= 2 && ws.length === ks.length) {
+      var used = {}, ok = true, tot = 0;
+      for (var a = 0; a < ws.length && ok; a++) {
+        var bi = -1, bs = 0;
+        for (var b = 0; b < ks.length; b++) { if (used[b]) continue; var sv = sylSim(ws[a], ks[b]); if (sv > bs) { bs = sv; bi = b; } }
+        if (bi < 0 || bs < 0.6) ok = false; else { used[bi] = 1; tot += bs; }
+      }
+      if (ok) best = Math.max(best, 0.45 + 0.2 * (tot / ws.length));
+    }
+    if (wantGrams && g && g.skus) best += g.skus.some(function (x) { return x.grams === wantGrams; }) ? 0.08 : -0.08;
+    return best;
+  }
   var ITEM_STOP = /^(넣을게|넣을께|넣을게요|넣을께요|넣어요|등록해|등록해줘|등록|주문넣을게|해줘요|할게요|할께요|부탁해|부탁해요|아니|아니요|아니야|아냐|그거|그것|그건|이거|방금|아까|마지막|그|저|바꿔|바꿔줘|변경|변경해|수정|해|해줘|줘|주세요|로|으로|말고|아니고|아니라|더|빼|빼줘|추가|추가해|추가해줘|야|이야|요|만|씩|각|박스|개|정도|쯤|최소|최대|이상|이하|내가|라고|했잖아|했어|할게|할께|해요|하고|하나|넣어|넣어줘|담아|담아줘|주문|주문해|좀|다시|그리고|또|네|응|예|좋아|대신|각각|전부|모두|다|상품|물건|품목|것|거|건|그상품|아까그)$/;
   function findItem(st, baseNS) { return st.items.find(function (it) { return it.baseNS === baseNS; }) || null; }
   function addOrMergeItem(st, add, R, logChange, idx) {
@@ -9661,15 +9775,21 @@ var VO2 = (function () {
       // 수량은 있는데 상품 이름처럼 보이는 말을 못 찾은 경우 → 등록 상품이 아니라고 알림 (임의로 다른 상품에 적용하지 않음)
       var STOP = ITEM_STOP;
       var unknown = tokensOf(c).filter(function (tk) { return !isQtyTok(tk); }).map(stripParticles).filter(function (w) { return w.length >= 2 && !STOP.test(w) && !/(바꿔|변경|해줘|주세요|했잖아|라고|으로|이야|한|했던|하던|했던거|말한거)$/.test(w); });
+      // v269: "최소 4키로 두 박스"처럼 문장 맨 앞의 '최소/최대'는 수량 앞이면 상품 이름(채소 등)이 잘못 들린 것일 수 있음
+      if (!unknown.length) {
+        var ft = stripParticles(tokensOf(c)[0] || "");
+        if (/^(최소|최대)$/.test(ft) && qtys.some(function (q) { return q.kind === "weight"; })) unknown = [ft];
+      }
       if (unknown.length) {
         var uw = unknown[0];
         var keysP = Object.keys(idx.groups);
         var contP = keysP.filter(function (k) { return uw.length >= 2 && k.indexOf(uw) >= 0; });
-        var closeP = keysP.map(function (k) { return { k: k, s: sim(uw, k) }; }).filter(function (x) { return x.s >= 0.55; }).sort(function (a, b) { return b.s - a.s; }).map(function (x) { return x.k; });
+        var wantG = (qtys.find(function (q) { return q.kind === "weight" && (!q.cond || /^(최소|최대)$/.test(uw)); }) || {}).grams || null;
+        var closeP = keysP.map(function (k) { return { k: k, s: soundsLike(uw, k, idx.groups[k], wantG) }; }).filter(function (x) { return x.s >= 0.55; }).sort(function (a, b) { return b.s - a.s; }).map(function (x) { return x.k; });
         var sugg = contP.concat(closeP.filter(function (k) { return contP.indexOf(k) < 0; })).slice(0, 4);
         if (sugg.length) {
           var qq = qtys.filter(function (q) { return q.kind === "count"; });
-          var wq0 = qtys.filter(function (q) { return q.kind === "weight" && !q.cond; });
+          var wq0 = qtys.filter(function (q) { return q.kind === "weight" && (!q.cond || /^(최소|최대)$/.test(uw)); });
           var addU = { quantity: qq.length ? qq[qq.length - 1].value : 1, quantityUnit: qq.length ? qq[qq.length - 1].unit : "개", countGiven: !!qq.length, wantGrams: wq0.length ? wq0[0].grams : null };
           queueAsk(st, R, { type: "productPick", options: sugg, add: addU }, "'" + uw + "'(이)라는 상품은 등록돼 있지 않아요. " + (sugg.length === 1 ? idx.groups[sugg[0]].base + " 말씀이세요?" : sugg.map(function (b, i) { return (i + 1) + "번 " + idx.groups[b].base; }).join(", ") + " 중에 있나요?"));
           return;
@@ -10250,7 +10370,645 @@ function VoiceDiagModal({ db, onClose }) {
         list.length ? list.map((d, i) => h("div", { key: i, style: { background: "#0f2238", borderRadius: 10, padding: 4, marginBottom: 6 } }, h(VoiceDiagPanel, { diag: d, onOpen: () => {} }))) : h("div", { style: { fontSize: 12, color: "#888" } }, "아직 기록이 없어요. 조비서 진단을 켜고 주문을 말해 보세요."))));
 }
 
-function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onClose, onAppCommand, subscriptions, openBundlePlanner, openPersonPicker, openBulkModeChoice, closeOrderPickers, onSetOrderMemo }) {
+// ===== v269: 대화 주문 전용 화면 (처음부터 새로 만든 한 줄 경로) =====
+// 녹음 → 말 끝 판단 → 받아쓰기(정밀 Gemini, 안 되면 폰 기본 인식) → 등록 이름과 맞춰 고르기 → 주문 엔진(VO2) → 카드·대화 기록 → 짧은 음성 답
+// 조비서(JarvisSheet)의 예전 처리 단계(문장 덮어쓰기, 메아리 필터, 다른 명령 판단)는 거치지 않음.
+// 말하는 동안에는 마이크를 듣지 않음(반이중) → 조비서 자기 목소리를 받아쓰는 일이 없어 메아리 필터가 필요 없음.
+var TALK_VERSION = "v269";
+function talkSpoken(msg) {
+  var t = String(msg || "");
+  t = t.replace(/주문 내용을 확인해 주세요\.[\s\S]*?이대로 주문할까요\?/, "화면의 주문 내용을 확인하시고, 맞으면 '응', 고칠 게 있으면 말씀해 주세요.");
+  t = t.replace(/\s*직접 묶으려면[^.]*\./, "");
+  t = t.replace(/\(\d+박스\)/g, "");
+  if (t.length > 130) {
+    var ss = t.split(/(?<=[.?!])\s+/).filter(Boolean);
+    var q = ss.filter(function (x) { return /\?$/.test(x); }).pop();
+    var out = ss.slice(0, 2).join(" ");
+    if (q && out.indexOf(q) < 0) out += " " + q;
+    if (out.length < t.length) t = out + (out.length + 12 < t.length ? " 자세한 건 화면을 봐 주세요." : "");
+  }
+  return t.replace(/[\u{1F000}-\u{1FFFF}]/gu, "").replace(/[#*`~_|>{}\[\]]/g, "").replace(/\s{2,}/g, " ").trim();
+}
+function talkDedup(s) {
+  var t = String(s || "").replace(/\s+/g, " ").trim();
+  t = t.replace(/(\S+)(?:\s+\1)+/g, "$1");
+  return t;
+}
+function talkFix(s) {
+  var x = talkDedup(s);
+  try { if (typeof STT_SENTENCE_FIXES !== "undefined") STT_SENTENCE_FIXES.forEach(function (f) { x = x.replace(f[0], f[1]); }); } catch (e) {}
+  return x.trim();
+}
+// 받아쓰기 문장을 실제로 주문 엔진에 '넣어 보고' 결과가 얼마나 깔끔한지 점수 매김 (상태는 바꾸지 않음)
+function talkQuality(text, st, db, opt) {
+  var r = null;
+  try { r = VO2.step(st ? JSON.parse(JSON.stringify(st)) : null, text, db, opt || {}); } catch (e) { r = null; }
+  var q = 0, poor = false;
+  if (!r || !r.understood) { q -= 3; poor = true; }
+  var rep = r ? String(r.reply || "") : "";
+  if (/(못 찾|등록돼 있지 않|등록된 이름에|들렸는데|비슷한 이름|어느 상품인가요|중 어느|찾지 못했)/.test(rep)) { q -= 2; poor = true; }
+  try { q += VO2.scoreText(text, db) * 0.5; } catch (e) {}
+  try { if (VO2.needsSecondOpinion(text, db, st)) { q -= 1; poor = true; } } catch (e) {}
+  return { q: q, poor: poor };
+}
+// 받아쓰기 후보들 중 주문 엔진에 넣었을 때 가장 깔끔하게 처리되는 문장 고르기 (1순위와 발음이 너무 다른 후보는 쓰지 않음)
+function talkPickBest(primary, alts, db, st, opt) {
+  var base = talkFix(primary);
+  var bq = talkQuality(base, st, db, opt);
+  var best = base, bestQ = bq.q, picked = "";
+  (alts || []).forEach(function (a) {
+    var fa = talkFix(a);
+    if (!fa || fa === base || fa === best) return;
+    if (VO2.similar(fa, base) < 0.45) return;
+    var aq = talkQuality(fa, st, db, opt);
+    if (aq.q >= bestQ + 1) { bestQ = aq.q; best = fa; picked = fa; }
+  });
+  return { text: best, picked: picked };
+}
+function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, createVoiceOrder, firstText, onClose, onCommitted }) {
+  const h = React.createElement;
+  const [st, setSt] = React.useState(() => VO2.newState());
+  const [log, setLog] = React.useState([]);
+  const [phase, setPhase] = React.useState("idle"); // idle | listening | hearing | recognizing | thinking | speaking
+  const [interim, setInterim] = React.useState("");
+  const [auto, setAuto] = React.useState(true);
+  const [inp, setInp] = React.useState("");
+  const [cardOpen, setCardOpen] = React.useState(true);
+  const [engineName, setEngineName] = React.useState("");
+  const [level, setLevel] = React.useState(0);
+  // 말 끝 판단: "auto"(조용해지면 자동으로 끝) / "button"(버튼을 다시 눌러야 끝 — 시끄러운 곳에서 정확)
+  const [endMode, setEndMode] = React.useState(() => { try { return localStorage.getItem("joassam_talk_endmode") === "button" ? "button" : "auto"; } catch (e) { return "auto"; } });
+  const endModeRef = React.useRef("auto");
+  endModeRef.current = endMode;
+  const floorRef = React.useRef({ hist: [], floor: 0 });
+  const stRef = React.useRef(st);
+  const logRef = React.useRef([]);
+  const aliveRef = React.useRef(true);
+  const autoRef = React.useRef(true);
+  const loopRef = React.useRef(0);
+  const capRef = React.useRef(null);
+  const audioRef = React.useRef(null);
+  const nfRef = React.useRef(0.01);
+  const busyRef = React.useRef(false);
+  const queueRef = React.useRef([]);
+  const silentRef = React.useRef(0);
+  const doneRef = React.useRef(false);
+  const webRecRef = React.useRef(null);
+  const speakRef = React.useRef(null);
+  const geminiOffUntilRef = React.useRef(0);
+  const dbRef = React.useRef(null);
+  const scrollRef = React.useRef(null);
+  autoRef.current = auto;
+
+  const key = () => { try { return geminiKey || (typeof loadGeminiKey === "function" ? loadGeminiKey() : "") || localStorage.getItem("joassam_gemini_key_v1") || ""; } catch (e) { return geminiKey || ""; } };
+  const hiResWanted = () => { try { return localStorage.getItem("joassam_hires_voice_v1") !== "0"; } catch (e) { return true; } };
+  const useGemini = () => {
+    try { if (navigator.onLine === false) return false; } catch (e) {}
+    return !!(hiResWanted() && key() && Date.now() >= geminiOffUntilRef.current && navigator.mediaDevices && navigator.mediaDevices.getUserMedia && (window.AudioContext || window.webkitAudioContext));
+  };
+  const hasWeb = () => !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+
+  function getDb() {
+    const c = dbRef.current;
+    if (c && c.p === products && c.c === customers && c.v === vendors) return c.db;
+    let learned = {}, userDict = {};
+    try { learned = typeof getLearnedAliases === "function" ? getLearnedAliases() : {}; } catch (e) {}
+    try { userDict = (aiVoiceMemGet(aiUserId()) || {}).approved || {}; } catch (e) {}
+    const db = { products: products || [], customers: customers || [], vendors: vendors || [], orders: orders || [], learnedAliases: learned, productAliases: typeof PRODUCT_ALIASES !== "undefined" ? PRODUCT_ALIASES : {}, userDict, sttAliases: typeof FARM_AI_ALIASES !== "undefined" ? FARM_AI_ALIASES : {} };
+    db.__vo2idx = VO2.buildIndex(db);
+    dbRef.current = { p: products, c: customers, v: vendors, db };
+    return db;
+  }
+  function autoBoxCount(items) {
+    try {
+      const pm = {};
+      (products || []).forEach((p) => { if (p && p.id) pm[p.id] = p; });
+      return splitIntoBoxes((items || []).map((it) => ({ productId: it.productId, name: it.productName, qty: it.quantity })), pm).length;
+    } catch (e) { return 0; }
+  }
+  const stepOpt = () => ({ parseDate: (t) => typeof parseDate === "function" ? parseDate(t, new Date()) : null, autoBoxCount });
+  function setState(s) { stRef.current = s; setSt(s); try { window.__vo2State = s; } catch (e) {} }
+  function addLog(e) {
+    const arr = logRef.current.concat([Object.assign({ t: Date.now() }, e)]).slice(-300);
+    logRef.current = arr;
+    setLog(arr);
+    if (e.k === "bot") { try { window.__jsTurn = (window.__jsTurn || 0) + 1; window.__jsLastAI = e.text; } catch (x) {} }
+  }
+  const note = (text) => addLog({ k: "note", text });
+
+  // ---------- 소리 내어 말하기 (말하는 동안은 듣지 않음) ----------
+  function speak(text) {
+    return new Promise((resolve) => {
+      const clean = talkSpoken(text);
+      try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
+      if (!clean || !window.speechSynthesis || !window.SpeechSynthesisUtterance) { resolve(); return; }
+      let done = false;
+      const fin = () => { if (done) return; done = true; speakRef.current = null; resolve(); };
+      speakRef.current = { stop: () => { try { window.speechSynthesis.cancel(); } catch (e) {} fin(); } };
+      setPhase("speaking");
+      const u = new SpeechSynthesisUtterance(clean);
+      u.lang = "ko-KR"; u.rate = 1.0; u.pitch = 1;
+      try {
+        const vs = window.speechSynthesis.getVoices().filter((v) => v.lang && v.lang.indexOf("ko") === 0);
+        const best = vs.find((v) => /google|samsung|구글|네이버/i.test(v.name)) || vs.find((v) => v.localService) || vs[0];
+        if (best) u.voice = best;
+      } catch (e) {}
+      u.onend = fin; u.onerror = fin;
+      const t0 = Date.now(), est = Math.max(1500, clean.length * 70 + 900);
+      const tick = () => {
+        if (done) return;
+        let still = false;
+        try { still = window.speechSynthesis.speaking; } catch (e) {}
+        if (Date.now() - t0 > est && !still) { fin(); return; }
+        if (Date.now() - t0 > est * 2 + 6000) { try { window.speechSynthesis.cancel(); } catch (e) {} fin(); return; }
+        setTimeout(tick, 400);
+      };
+      setTimeout(tick, 600);
+      try { window.speechSynthesis.speak(u); } catch (e) { fin(); }
+    });
+  }
+  function playCue() {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      const c = new AC(), o = c.createOscillator(), g = c.createGain(), n = c.currentTime;
+      o.frequency.value = 880; g.gain.setValueAtTime(1e-4, n); g.gain.exponentialRampToValueAtTime(0.07, n + 0.015); g.gain.exponentialRampToValueAtTime(1e-4, n + 0.09);
+      o.connect(g); g.connect(c.destination); o.start(n); o.stop(n + 0.1);
+      setTimeout(() => { try { c.close(); } catch (e) {} }, 300);
+    } catch (e) {}
+  }
+
+  // ---------- 녹음 (정밀 인식용) ----------
+  async function ensureAudio() {
+    const a = audioRef.current;
+    const live = a && a.stream && a.stream.getTracks().some((t) => t.readyState === "live");
+    if (!live) {
+      teardownAudio();
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      const AC = window.AudioContext || window.webkitAudioContext;
+      const ctx = new AC();
+      const src = ctx.createMediaStreamSource(stream);
+      // v269: 녹음용(웅웅거리는 낮은 소리만 덜어냄)과 '말소리 판단용'(사람 목소리 대역 300~3400Hz) 두 갈래로 나눔
+      //  → 차·선풍기·바람 같은 낮은 소음을 말소리로 착각해서 말 끝을 못 찾고 12초에서 잘리던 문제 해결
+      const hpRec = ctx.createBiquadFilter(); hpRec.type = "highpass"; hpRec.frequency.value = 120;
+      const hpV = ctx.createBiquadFilter(); hpV.type = "highpass"; hpV.frequency.value = 300;
+      const hpV2 = ctx.createBiquadFilter(); hpV2.type = "highpass"; hpV2.frequency.value = 300;
+      const lpV = ctx.createBiquadFilter(); lpV.type = "lowpass"; lpV.frequency.value = 3400;
+      const merger = ctx.createChannelMerger(2);
+      const proc = ctx.createScriptProcessor(4096, 2, 1);
+      src.connect(hpRec); hpRec.connect(merger, 0, 0);
+      src.connect(hpV); hpV.connect(hpV2); hpV2.connect(lpV); lpV.connect(merger, 0, 1);
+      merger.connect(proc);
+      proc.onaudioprocess = (e) => {
+        const cap = capRef.current;
+        if (!cap) return;
+        const ib = e.inputBuffer;
+        const rec = ib.getChannelData(0);
+        const vad = ib.numberOfChannels > 1 ? ib.getChannelData(1) : rec;
+        cap.onData(rec, ctx.sampleRate || 48000, vad);
+      };
+      proc.connect(ctx.destination);
+      audioRef.current = { stream, ctx, src, proc, nodes: [hpRec, hpV, hpV2, lpV, merger] };
+    }
+    const ctx = audioRef.current.ctx;
+    if (ctx.state === "suspended") { try { await ctx.resume(); } catch (e) {} }
+    return ctx;
+  }
+  function teardownAudio() {
+    const a = audioRef.current;
+    audioRef.current = null;
+    capRef.current = null;
+    if (!a) return;
+    try { a.proc.onaudioprocess = null; a.proc.disconnect(); } catch (e) {}
+    try { a.src.disconnect(); } catch (e) {}
+    try { (a.nodes || []).forEach((n) => n.disconnect()); } catch (e) {}
+    try { a.ctx.close(); } catch (e) {}
+    try { a.stream.getTracks().forEach((t) => t.stop()); } catch (e) {}
+  }
+  // 한 마디 녹음 (v269 새 방식)
+  //  - '말소리 대역' 에너지로만 판단하고, 주변 소음 크기(바닥 소음)는 말하지 않을 때의 하위 25% 값으로 계속 따라감
+  //  - 짧은 '탁' 소리는 빼고(가운데 값), 소음 대비 2.4배 이상이 0.17초 넘게 이어지면 말 시작, 1.6배 아래로 1.15초 조용하면 끝 (최대 25초)
+  //  - '버튼으로 끝내기' 모드: 조용해져도 끝내지 않고 버튼을 다시 눌러야 끝 (아주 시끄러운 곳용)
+  function captureOnce() {
+    return new Promise((resolve) => {
+      const fl = floorRef.current;
+      const cap = { chunks: [], pre: [], speechMs: 0, silenceMs: 0, totalMs: 0, heard: false, runMs: 0, peakE: 0, firstV: null, lastV: null, rate: 48000, done: false, manual: endModeRef.current === "button", floorAtStart: fl.floor };
+      const finish = (val) => { if (cap.done) return; cap.done = true; if (capRef.current === cap) capRef.current = null; setLevel(0); resolve(val); };
+      cap.cancel = () => finish(null);
+      cap.finishNow = () => { if (cap.heard && cap.speechMs >= 200) finish(cap); else finish(null); };
+      let lvlT = 0;
+      const pct = (arr, p) => { const x = arr.slice().sort((m, n) => m - n); return x[Math.min(x.length - 1, Math.floor(x.length * p))] || 0; };
+      cap.onData = (buf, rate, vadBuf) => {
+        if (cap.done) return;
+        cap.rate = rate;
+        const copy = new Float32Array(buf);
+        const vb = vadBuf || buf;
+        let sum = 0;
+        for (let i = 0; i < vb.length; i++) sum += vb[i] * vb[i];
+        const e = Math.sqrt(sum / vb.length);
+        const ms = copy.length / rate * 1000;
+        cap.totalMs += ms;
+        // 짧게 '탁·딸깍' 하는 소리(기계·그릇 소리)는 말로 보지 않도록 최근 3~5조각의 가운데 값으로 판단
+        cap.win = (cap.win || []).concat([e]).slice(-5);
+        const med = (arr) => { const x = arr.slice().sort((m, n) => m - n); return x[Math.floor(x.length / 2)]; };
+        const m3 = med(cap.win.slice(-3)), m5 = med(cap.win);
+        // 바닥 소음: 말하지 않을 때만 갱신
+        if (!cap.heard || cap.silenceMs > 400) {
+          fl.hist.push(e); if (fl.hist.length > 40) fl.hist.shift();
+          fl.floor = fl.hist.length >= 4 ? pct(fl.hist, 0.25) : Math.max(fl.floor, e);
+        }
+        const floor = Math.max(fl.floor, 0.0006);
+        const thrOn = Math.max(floor * 2.4, 0.0025), thrOff = Math.max(floor * 1.6, 0.0018);
+        if (Date.now() - lvlT > 100) { lvlT = Date.now(); setLevel(Math.min(1, e / (thrOn * 2))); }
+        if (!cap.heard) {
+          cap.pre.push(copy);
+          if (cap.pre.length > 6) cap.pre.shift();
+          if (m3 > thrOn) {
+            cap.runMs += ms;
+            cap.peakE = Math.max(cap.peakE, e);
+            if (cap.runMs >= 170 || (cap.manual && cap.runMs >= 80)) {
+              cap.heard = true;
+              cap.chunks = cap.pre.slice();
+              cap.speechMs = cap.runMs;
+              cap.firstV = cap.totalMs - cap.runMs;
+              cap.lastV = cap.totalMs;
+              cap.floorAtStart = floor;
+              setPhase("hearing");
+            }
+          } else cap.runMs = Math.max(0, cap.runMs - ms * 0.5);
+          if (!cap.manual && cap.totalMs > 10000) finish(null);
+          return;
+        }
+        cap.chunks.push(copy);
+        if (m5 > thrOff) { cap.speechMs += ms; cap.silenceMs = 0; cap.lastV = cap.totalMs; cap.peakE = Math.max(cap.peakE, e); }
+        else cap.silenceMs += ms;
+        if (!cap.manual && cap.silenceMs >= 1150) finish(cap.speechMs >= 280 ? cap : null);
+        else if (cap.totalMs - cap.firstV > (cap.manual ? 40000 : 25000)) finish(cap);
+      };
+      capRef.current = cap;
+      // 마이크에서 소리 자료가 아예 안 들어오면(폰이 녹음을 막은 경우) 폰 기본 인식으로 바꿈
+      setTimeout(() => { if (!cap.done && cap.totalMs === 0) { cap.noData = true; finish({ noData: true }); } }, 2500);
+      if (!cap.manual) setTimeout(() => { if (!cap.done && !cap.heard) finish(null); }, 11000);
+    });
+  }
+  // 녹음 상태 요약 (사장님 목소리가 소음보다 얼마나 크게 들렸는지)
+  function capStats(cap) {
+    if (!cap || !cap.heard) return "";
+    const ratio = cap.floorAtStart > 0 ? cap.peakE / cap.floorAtStart : 0;
+    return "말 " + (cap.speechMs / 1000).toFixed(1) + "초 · 목소리가 주변 소음의 " + (ratio >= 100 ? "100배 이상" : ratio.toFixed(0) + "배");
+  }
+  // 정밀 받아쓰기: 1차(빠른 모델) → 등록 이름과 안 맞으면 2차(정확한 모델, 후보 여러 개)
+  async function recognizeGemini(cap) {
+    const k = key();
+    try { (window.__talkCaps = window.__talkCaps || []).push({ at: Date.now(), firstV: Math.round(cap.firstV), lastV: Math.round(cap.lastV), total: Math.round(cap.totalMs), speechMs: Math.round(cap.speechMs), stats: capStats(cap) }); } catch (e) {}
+    const b64 = hiResEncodeWav16k(cap.chunks, cap.rate);
+    const s = stRef.current;
+    const cur = [s.vendor && s.vendor.name, s.orderer && s.orderer.name, s.recipient && s.recipient.name].filter(Boolean);
+    const vocab = hiResBuildVocab({ vendors: cur.map((n) => ({ name: n })), customers: [], products });
+    let text = "";
+    try {
+      try { text = await geminiTranscribeWav(b64, vocab, k, { timeoutMs: 8000 }); }
+      catch (e1) { if (!(e1 && (e1.status >= 500 || e1.name === "AbortError"))) throw e1; text = await geminiTranscribeWav(b64, vocab, k, { timeoutMs: 8000 }); }
+    } catch (e) {
+      const stt = e && e.status;
+      geminiOffUntilRef.current = Date.now() + (stt === 429 ? 60000 : stt === 400 || stt === 403 ? 36e5 : 90000);
+      note(stt === 429 ? "⚠️ 정밀 인식 사용량이 잠시 초과돼서 1분 동안 폰 기본 인식으로 들을게요. 방금 말씀을 다시 해 주세요." : stt === 400 || stt === 403 ? "⚠️ Gemini 키 문제로 폰 기본 인식으로 바꿨어요. 방금 말씀을 다시 해 주세요." : "⚠️ 인터넷이 느려서 잠시 폰 기본 인식으로 들을게요. 방금 말씀을 다시 해 주세요.");
+      return { fail: true };
+    }
+    text = String(text || "").trim();
+    if (!text) return { drop: "소리는 났지만 말로 알아듣지 못했어요 (" + capStats(cap) + ")" };
+    const sec = Math.max(0.3, Math.max(cap.lastV - cap.firstV, cap.speechMs) / 1000);
+    const syl = (t) => (t.match(/[가-힣]/g) || []).length + (t.match(/\d/g) || []).length * 1.5 + (t.match(/[a-zA-Z]/g) || []).length * 0.5;
+    if (syl(text) > sec * 10 + 6) return { drop: "'" + text + "' — " + sec.toFixed(1) + "초 말했는데 글자가 너무 많아 받아쓰기가 지어낸 말로 보고 버렸어요" };
+    let alts = [];
+    try {
+      if (talkQuality(talkFix(text), stRef.current, getDb(), stepOpt()).poor) {
+        setInterim("한 번 더 확인 중…");
+        let m2 = "";
+        try { m2 = await getGeminiModel(k); } catch (e) {}
+        const c2 = await geminiTranscribeWav(b64, vocab, k, { model: m2 || undefined, nbest: true, timeoutMs: 7000 });
+        (Array.isArray(c2) ? c2 : []).forEach((a) => { if (a && syl(a) <= sec * 10 + 6 && alts.indexOf(a) < 0 && a !== text) alts.push(a); });
+      }
+    } catch (e) {}
+    return { text, alts, engine: "정밀(Gemini)", stats: capStats(cap) };
+  }
+  // 폰 기본 인식 (Gemini 키가 없거나 정밀 인식을 껐을 때)
+  function recognizeWeb() {
+    return new Promise((resolve) => {
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SR) { resolve({ fail: true, noWeb: true }); return; }
+      let rec;
+      try { rec = new SR(); } catch (e) { resolve({ fail: true }); return; }
+      webRecRef.current = rec;
+      rec.lang = "ko-KR"; rec.continuous = false; rec.interimResults = true; rec.maxAlternatives = 5;
+      let fin = null, interimTxt = "", settled = false;
+      const done = (v) => { if (settled) return; settled = true; webRecRef.current = null; setInterim(""); resolve(v); };
+      rec.onresult = (e) => {
+        let it = "";
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          const r = e.results[i];
+          if (r.isFinal) { const alts = []; for (let a = 0; a < r.length; a++) if (r[a] && r[a].transcript) alts.push(r[a].transcript.trim()); fin = alts; }
+          else it += r[0].transcript;
+        }
+        if (it) { interimTxt = it; setInterim(it); setPhase("hearing"); }
+      };
+      rec.onerror = (e) => { if (e && (e.error === "not-allowed" || e.error === "service-not-allowed")) done({ fail: true, denied: true }); };
+      rec.onend = () => {
+        if (fin && fin.length) done({ text: fin[0], alts: fin.slice(1), engine: "기본(폰)" });
+        else if (interimTxt.trim()) done({ text: interimTxt.trim(), alts: [], engine: "기본(폰)" });
+        else done(null);
+      };
+      try { rec.start(); } catch (e) { done({ fail: true }); }
+    });
+  }
+  function stopListening() {
+    loopRef.current++;
+    try { capRef.current && capRef.current.cancel(); } catch (e) {}
+    try { webRecRef.current && webRecRef.current.abort(); } catch (e) {}
+    setInterim("");
+    setPhase((p) => (p === "listening" || p === "hearing" ? "idle" : p));
+  }
+  async function listen() {
+    if (!aliveRef.current || doneRef.current) return;
+    const my = ++loopRef.current;
+    const stale = () => !aliveRef.current || loopRef.current !== my;
+    setPhase("listening");
+    playCue();
+    let res = null;
+    if (useGemini()) {
+      try { await ensureAudio(); }
+      catch (e) {
+        if (e && (e.name === "NotAllowedError" || e.name === "SecurityError")) { note("⚠️ 마이크 사용이 막혀 있어요. 주소창 자물쇠(사이트 설정)에서 마이크를 '허용'으로 바꿔 주세요."); setPhase("idle"); return; }
+        geminiOffUntilRef.current = Date.now() + 120000;
+      }
+      if (stale()) return;
+      if (audioRef.current && useGemini()) {
+        setEngineName("정밀(Gemini)");
+        let cap = await captureOnce();
+        if (stale()) return;
+        if (cap && cap.noData) {
+          cap = null;
+          geminiOffUntilRef.current = Date.now() + 600000;
+          teardownAudio();
+          note("⚠️ 이 폰에서 정밀 녹음이 시작되지 않아 폰 기본 인식으로 들을게요.");
+          if (hasWeb()) { res = await webOnce(); if (stale()) return; }
+        }
+        if (cap) {
+          setPhase("recognizing");
+          setInterim("받아쓰는 중…");
+          res = await recognizeGemini(cap);
+          setInterim("");
+          if (stale()) return;
+          if (res && res.fail) { if (autoRef.current) setTimeout(() => { if (!stale()) listen(); }, 300); else setPhase("idle"); return; }
+        }
+      } else res = await webOnce();
+    } else res = await webOnce();
+    if (stale()) return;
+    if (res && res.denied) { note("⚠️ 마이크 사용이 막혀 있어요. 사이트 설정에서 마이크를 '허용'으로 바꿔 주세요."); setPhase("idle"); return; }
+    if (res && res.noWeb) { note("⚠️ 이 브라우저는 음성 인식을 지원하지 않아요. Gemini 키를 넣고 정밀 인식을 켜거나, 아래에 글자로 입력해 주세요."); setPhase("idle"); return; }
+    if (!res || res.fail) {
+      silentRef.current++;
+      if (silentRef.current >= 3 || !autoRef.current) { setPhase("idle"); if (silentRef.current >= 3) note("🎤 한동안 말씀이 없어서 듣기를 멈췄어요. 마이크 버튼을 누르면 다시 들어요."); silentRef.current = 0; return; }
+      listen();
+      return;
+    }
+    silentRef.current = 0;
+    if (res.drop) { note("🔇 " + res.drop + ". 다시 말씀해 주세요."); if (autoRef.current) listen(); else setPhase("idle"); return; }
+    await handleSpeech(res);
+  }
+  async function webOnce() {
+    setEngineName("기본(폰)");
+    return recognizeWeb();
+  }
+
+  // ---------- 들은 말 → 주문 엔진 ----------
+  async function handleSpeech(res) {
+    const db = getDb();
+    const pick = talkPickBest(res.text, res.alts, db, stRef.current, stepOpt());
+    await handleText(pick.text, { heard: res.text, alts: res.alts || [], picked: pick.picked, engine: res.engine, stats: res.stats || "" });
+  }
+  async function handleText(text, meta) {
+    meta = meta || {};
+    text = talkFix(text);
+    if (!text) return;
+    if (busyRef.current) { queueRef.current.push([text, meta]); return; }
+    busyRef.current = true;
+    try { await turn(text, meta); } finally { busyRef.current = false; }
+    if (queueRef.current.length) { const nx = queueRef.current.shift(); handleText(nx[0], nx[1]); }
+  }
+  async function turn(text, meta) {
+    stopListening();
+    const heard = meta.heard && meta.heard.replace(/\s/g, "") !== text.replace(/\s/g, "") ? meta.heard : "";
+    addLog({ k: "user", text, heard, alts: meta.alts && meta.alts.length ? meta.alts : null, engine: (meta.engine || "") + (meta.stats ? " · " + meta.stats : "") });
+    if (doneRef.current) {
+      // 확정 뒤에 들은 말: 새 주문 시작 말이면 새로 시작, 아니면 안내
+      if (/(주문|새로|다음)/.test(text) && !/(바꿔|빼|수정|변경)/.test(text)) { newOrder(true); doneRef.current = false; }
+      else { await reply("이미 주문이 확정되었습니다. 새 주문은 '새 주문' 버튼을 누르시거나 '주문할게'라고 말씀해 주세요.", { noListen: true }); return; }
+    }
+    setPhase("thinking");
+    const db = getDb();
+    const prev = stRef.current;
+    let r = null;
+    try { r = VO2.step(prev, text, db, stepOpt()); } catch (e) { r = null; }
+    let llm = null;
+    const k = key();
+    if (r && !r.understood && k) {
+      try {
+        const lines = await vo2LlmRewrite(text, prev, db.__vo2idx, k);
+        llm = lines;
+        if (lines && lines.length) {
+          let s2 = prev, last = null;
+          const said = [];
+          for (const ln of lines) {
+            last = VO2.step(s2, ln, db, stepOpt());
+            s2 = last.state;
+            if (last.reply) last.reply.split(/(?<=[.?!])\s+/).forEach((x) => { if (x && said.indexOf(x) < 0) said.push(x); });
+            if (last.confirmed || last.cancelled) break;
+          }
+          if (last && last.understood) { r = last; r.reply = said.join(" "); }
+        }
+      } catch (e) {}
+    }
+    if (!r) { await reply("처리 중 문제가 생겼어요. 다시 말씀해 주세요."); return; }
+    // 진단 기록 (🔍 진단 화면과 같은 형식)
+    try {
+      const an = VO2.analyze(text, db, prev);
+      const rec = { t: Date.now(), engine: meta.engine || "?", stt: meta.heard || text, chosen: text, alts: meta.alts || [], altPicked: meta.picked || "", prep: [], analysis: an, llm, reply: r.reply, items: (r.state.items || []).map((it) => VO2.itemLabel(it, db.__vo2idx)).join(", "), verdict: VO2.verdict(an, r) };
+      if (llm && r.understood) rec.verdict = { stage: "AI 보조", ok: true, msg: "규칙으로 못 알아들어 AI가 '" + llm.join(" / ") + "'(으)로 바꿔 처리했어요" };
+      vo2DiagPush(rec);
+    } catch (e) {}
+    setState(r.state);
+    // v269: "앞으로 '대솔 본점'은 대솔수곡점으로 알아들을까요?" → '응' 하면 사전에 저장
+    try {
+      const lo = r.state.ctx && r.state.ctx.learnOut;
+      if (lo && lo.turn === r.state.ctx.turn) {
+        const uid = aiUserId();
+        const vm = aiVoiceMemGet(uid) || {};
+        vm.approved = vm.approved || {};
+        vm.approved[lo.from] = lo.to;
+        aiVoiceMemSave(uid, vm);
+        dbRef.current = null;
+      }
+    } catch (e) {}
+    if (r.cancelled) { doneRef.current = true; await reply(r.reply || "주문을 취소했어요.", { noListen: true }); return; }
+    if (r.confirmed) { await reply(commit(r), { noListen: true }); return; }
+    if (!r.understood) {
+      let hint = "";
+      try {
+        const an = VO2.analyze(text, db, prev);
+        const u = (an.unknown || []).filter((x) => x.closest && x.closest.length);
+        if (u.length) hint = "'" + u[0].word + "'은(는) 등록된 이름에서 못 찾았어요. 비슷한 이름: " + u[0].closest.map((c) => c.name + "(" + c.kind + ")").join(", ") + ". 맞는 이름으로 다시 말씀해 주세요.";
+        else if ((an.unknown || []).length) hint = "'" + an.unknown.map((x) => x.word).join(", ") + "'은(는) 등록된 상품·업체·고객 이름에 없어요. 다시 말씀해 주세요.";
+      } catch (e) {}
+      await reply(hint || "잘 못 알아들었어요. 예를 들어 '적상추 4박스', '받는 사람 홍길동', '그대로 주문해'처럼 말씀해 주세요.");
+      return;
+    }
+    await reply(r.reply || "네.");
+  }
+  function commit(r) {
+    let created = null;
+    try { created = createVoiceOrder ? createVoiceOrder(r.order) : null; } catch (e) { created = null; }
+    if (!created || (Array.isArray(created) && !created.length)) {
+      setState(Object.assign({}, r.state, { status: "collecting" }));
+      return "주문 등록에 실패했어요. 받는 분과 상품을 확인해 주세요.";
+    }
+    doneRef.current = true;
+    try {
+      const arr = JSON.parse(localStorage.getItem("joassam_vo2_log") || "[]");
+      arr.push({ t: Date.now(), summary: r.summary, log: (r.state.log || []).slice(-40), talk: logRef.current.slice(-40).map((x) => ({ k: x.k, text: x.text, heard: x.heard || "" })) });
+      localStorage.setItem("joassam_vo2_log", JSON.stringify(arr.slice(-30)));
+    } catch (e) {}
+    try { onCommitted && onCommitted(created); } catch (e) {}
+    return r.reply + " 주문 목록에 등록했어요.";
+  }
+  async function reply(msg, o) {
+    o = o || {};
+    addLog({ k: "bot", text: msg });
+    if (!aliveRef.current) return;
+    await speak(msg);
+    if (!aliveRef.current) return;
+    setPhase("idle");
+    if (!o.noListen && autoRef.current && !doneRef.current) setTimeout(() => { if (aliveRef.current && !busyRef.current) listen(); }, 300);
+  }
+
+  // ---------- 화면 조작 ----------
+  function screenEdit(action) {
+    const r = VO2.edit(stRef.current, action, getDb());
+    setState(r.state);
+  }
+  async function screenConfirm() {
+    stopListening();
+    try { speakRef.current && speakRef.current.stop(); } catch (e) {}
+    const r = VO2.step(Object.assign({}, stRef.current, { status: "confirming" }), "응 그대로 해", getDb(), stepOpt());
+    setState(r.state);
+    addLog({ k: "user", text: "(화면) 주문 확정" });
+    if (r.confirmed) await reply(commit(r), { noListen: true });
+    else await reply(r.reply);
+  }
+  async function screenCancel() {
+    stopListening();
+    try { speakRef.current && speakRef.current.stop(); } catch (e) {}
+    setState(Object.assign({}, stRef.current, { status: "cancelled" }));
+    doneRef.current = true;
+    addLog({ k: "user", text: "(화면) 주문 취소" });
+    await reply("주문을 취소했어요.", { noListen: true });
+  }
+  function newOrder(silent) {
+    doneRef.current = false;
+    setState(VO2.newState());
+    if (!silent) { addLog({ k: "note", text: "── 새 주문 ──" }); reply("새 주문을 시작할게요. 어느 업체나 누구 주문인지 말씀해 주세요."); }
+  }
+  function micButton() {
+    if (phase === "speaking") { try { speakRef.current && speakRef.current.stop(); } catch (e) {} setTimeout(listen, 150); return; }
+    if ((phase === "listening" || phase === "hearing") && endModeRef.current === "button" && capRef.current) { capRef.current.finishNow(); return; }
+    if (phase === "listening" || phase === "hearing") { stopListening(); return; }
+    if (phase === "idle") { silentRef.current = 0; listen(); }
+  }
+  async function sendTyped() {
+    const t = inp.trim();
+    if (!t) return;
+    setInp("");
+    try { speakRef.current && speakRef.current.stop(); } catch (e) {}
+    await handleText(t, { engine: "키보드" });
+  }
+  function closeAll() {
+    aliveRef.current = false;
+    loopRef.current++;
+    try { capRef.current && capRef.current.cancel(); } catch (e) {}
+    try { webRecRef.current && webRecRef.current.abort(); } catch (e) {}
+    try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
+    teardownAudio();
+    onClose && onClose();
+  }
+
+  React.useEffect(() => {
+    aliveRef.current = true;
+    try { window.__talk = { say: (t) => handleText(t, { engine: "시험" }), heard: (t, alts) => handleSpeech({ text: t, alts: alts || [], engine: "시험" }), state: () => stRef.current, log: () => logRef.current }; } catch (e) {}
+    if (firstText && String(firstText).trim()) handleText(firstText, { engine: "조비서에서 넘어옴" });
+    else reply("대화 주문을 시작할게요. 어느 업체나 누구 주문인지 말씀해 주세요.");
+    return () => {
+      aliveRef.current = false;
+      loopRef.current++;
+      try { capRef.current && capRef.current.cancel(); } catch (e) {}
+      try { webRecRef.current && webRecRef.current.abort(); } catch (e) {}
+      try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
+      teardownAudio();
+      try { delete window.__talk; } catch (e) {}
+    };
+  }, []);
+  React.useEffect(() => { const el = scrollRef.current; if (el) el.scrollTop = el.scrollHeight; }, [log, interim]);
+
+  // ---------- 그리기 ----------
+  const C = { bg: "#0b1626", panel: "rgba(255,255,255,0.05)", line: "rgba(255,255,255,0.12)", txt: "#e8f1ff", sub: "rgba(232,241,255,0.6)", acc: "#7fd1a0", warn: "#ffcc80" };
+  const phaseText = { idle: auto ? "🎤 버튼을 누르면 들어요" : "🎤 버튼을 눌러 말씀하세요", listening: endMode === "button" ? "🎤 말씀하시고, 끝나면 버튼을 한 번 더 누르세요" : "🎤 말씀하세요", hearing: endMode === "button" ? "🎙️ 듣는 중… 다 말씀하셨으면 버튼을 누르세요" : "🎙️ 듣는 중…", recognizing: "⏳ 받아쓰는 중…", thinking: "⏳ 처리 중…", speaking: "🔊 조비서가 말하는 중 (누르면 끊고 듣기)" }[phase] || "";
+  const micColor = phase === "listening" || phase === "hearing" ? "#2e7d32" : phase === "speaking" ? "#1565c0" : phase === "idle" ? "#455a64" : "#6d4c41";
+  const bubble = (e, i) => {
+    if (e.k === "note") return h("div", { key: i, style: { alignSelf: "center", color: C.warn, fontSize: 12, padding: "3px 10px", border: "1px dashed rgba(255,204,128,0.4)", borderRadius: 10, maxWidth: "94%", textAlign: "center", lineHeight: 1.45 } }, e.text);
+    const me = e.k === "user";
+    return h("div", { key: i, style: { alignSelf: me ? "flex-end" : "flex-start", maxWidth: "86%", background: me ? "rgba(33,150,243,0.25)" : "rgba(76,175,80,0.18)", color: me ? "#e0f2fe" : "#e8f5e9", borderRadius: me ? "14px 14px 4px 14px" : "14px 14px 14px 4px", padding: "8px 12px", fontSize: 14.5, lineHeight: 1.45, wordBreak: "keep-all", overflowWrap: "anywhere" } },
+      (me ? "👤 " : "🤖 ") + e.text,
+      me && e.heard ? h("div", { style: { fontSize: 11.5, opacity: 0.7, marginTop: 3 } }, "🎧 들은 말: " + e.heard) : null,
+      me && e.alts ? h("div", { style: { fontSize: 11, opacity: 0.55, marginTop: 2 } }, "다른 후보: " + e.alts.join(" / ")) : null,
+      me && e.engine ? h("div", { style: { fontSize: 10.5, opacity: 0.45, marginTop: 2, textAlign: "right" } }, e.engine) : null);
+  };
+  const done = st && (st.status === "confirmed" || st.status === "cancelled");
+  let idx = null;
+  try { idx = getDb().__vo2idx; } catch (e) {}
+  return h("div", { style: { position: "fixed", inset: 0, zIndex: 5000, background: C.bg, color: C.txt, display: "flex", flexDirection: "column", paddingTop: "env(safe-area-inset-top, 0px)", paddingBottom: "env(safe-area-inset-bottom, 0px)" } },
+    // 머리
+    h("div", { style: { display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderBottom: `1px solid ${C.line}` } },
+      h("div", { style: { fontSize: 17, fontWeight: 800, flex: 1, minWidth: 0 } }, "📝 대화 주문 ", h("span", { style: { fontSize: 11, color: C.sub, fontWeight: 600 } }, TALK_VERSION + (engineName ? " · " + engineName : ""))),
+      h("button", { onClick: () => setEndMode((m) => { const n = m === "button" ? "auto" : "button"; try { localStorage.setItem("joassam_talk_endmode", n); } catch (e) {} return n; }), title: "말 끝을 어떻게 알아챌지", style: { border: `1px solid ${C.line}`, background: endMode === "button" ? "rgba(255,204,128,0.18)" : "transparent", color: endMode === "button" ? C.warn : C.sub, borderRadius: 14, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, endMode === "button" ? "✋ 말 끝: 버튼" : "⏱ 말 끝: 자동"),
+      h("button", { onClick: () => setAuto((a) => !a), style: { border: `1px solid ${C.line}`, background: auto ? "rgba(127,209,160,0.18)" : "transparent", color: auto ? C.acc : C.sub, borderRadius: 14, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, auto ? "🔁 자동 듣기 ON" : "자동 듣기 OFF"),
+      h("button", { onClick: closeAll, "aria-label": "닫기", style: { border: "none", background: "rgba(255,255,255,0.08)", color: C.txt, borderRadius: 10, width: 36, height: 32, fontSize: 16, cursor: "pointer" } }, "✕")),
+    // 주문 카드
+    h("div", { style: { padding: "8px 10px 0", maxHeight: cardOpen ? "46vh" : "auto", overflowY: "auto", flexShrink: 0 } },
+      h("div", { onClick: () => setCardOpen((o) => !o), style: { display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: C.sub, cursor: "pointer", padding: "2px 2px 6px" } },
+        h("span", { style: { flex: 1 } }, "주문 내용 " + (st.items && st.items.length ? "· 상품 " + st.items.length + "개" : "") + (st.vendor ? " · " + st.vendor.name : st.orderer ? " · " + st.orderer.name : "")),
+        h("span", null, cardOpen ? "접기 ▲" : "펼치기 ▼")),
+      done ? h("div", { style: { display: "flex", gap: 8, margin: "8px 0" } },
+        h("button", { onClick: () => newOrder(false), style: { flex: 1, border: "none", background: "#2e7d32", color: "#fff", borderRadius: 10, padding: "10px 0", fontSize: 15, fontWeight: 800, cursor: "pointer" } }, "➕ 새 주문"),
+        h("button", { onClick: closeAll, style: { flex: 1, border: `1px solid ${C.line}`, background: "transparent", color: C.txt, borderRadius: 10, padding: "10px 0", fontSize: 15, cursor: "pointer" } }, "닫기")) : null,
+      cardOpen && idx ? h(VoiceOrderCard, { st, idx, products, vendors, customers, onEdit: screenEdit, onConfirm: screenConfirm, onCancel: screenCancel }) : null),
+    // 대화 기록 (전부)
+    h("div", { ref: scrollRef, style: { flex: 1, minHeight: 0, overflowY: "auto", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8, borderTop: `1px solid ${C.line}`, marginTop: 6 } },
+      log.map(bubble),
+      interim ? h("div", { style: { alignSelf: "flex-end", color: C.sub, fontSize: 13, fontStyle: "italic" } }, "… " + interim) : null),
+    // 아래: 상태·마이크·입력
+    h("div", { style: { borderTop: `1px solid ${C.line}`, padding: "10px 12px 12px", display: "flex", flexDirection: "column", gap: 8 } },
+      h("div", { style: { display: "flex", alignItems: "center", gap: 12 } },
+        h("button", { onClick: micButton, disabled: phase === "thinking" || phase === "recognizing", "aria-label": "마이크", style: { width: 64, height: 64, borderRadius: "50%", border: "none", background: micColor, color: "#fff", fontSize: 28, cursor: "pointer", flexShrink: 0, boxShadow: phase === "hearing" ? `0 0 0 ${4 + Math.round(level * 14)}px rgba(46,125,50,0.35)` : "none", transition: "box-shadow 0.12s" } }, phase === "speaking" ? "⏹" : "🎤"),
+        h("div", { style: { flex: 1, minWidth: 0, fontSize: 14, color: C.txt, lineHeight: 1.4 } }, phaseText,
+          // 내 목소리 크기 막대: 가운데 선을 넘으면 '말'로 들음
+          phase === "listening" || phase === "hearing" ? h("div", { style: { position: "relative", height: 8, borderRadius: 4, background: "rgba(255,255,255,0.1)", marginTop: 6, overflow: "hidden" } },
+            h("div", { style: { position: "absolute", left: 0, top: 0, bottom: 0, width: Math.round(level * 100) + "%", background: level >= 0.5 ? "#66bb6a" : "#90a4ae", transition: "width 0.08s" } }),
+            h("div", { style: { position: "absolute", left: "50%", top: -2, bottom: -2, width: 2, background: "rgba(255,255,255,0.55)" } })) : null)),
+      h("div", { style: { display: "flex", gap: 8 } },
+        h("input", { value: inp, onChange: (e) => setInp(e.target.value), onKeyDown: (e) => { if (e.key === "Enter") sendTyped(); }, placeholder: "글자로 입력 (예: 적상추 4박스)", style: { flex: 1, minWidth: 0, background: "rgba(255,255,255,0.07)", border: `1px solid ${C.line}`, color: C.txt, borderRadius: 10, padding: "9px 10px", fontSize: 15 } }),
+        h("button", { onClick: sendTyped, style: { border: "none", background: "#1565c0", color: "#fff", borderRadius: 10, padding: "0 14px", fontSize: 14, fontWeight: 700, cursor: "pointer" } }, "보내기"))));
+}
+
+function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onClose, onAppCommand, subscriptions, openBundlePlanner, openPersonPicker, openBulkModeChoice, closeOrderPickers, onSetOrderMemo , onOpenTalkOrder}) {
   var _a, _b;
   const [phase, setPhase] = React.useState("idle");
   const [interim, setInterim] = React.useState("");
@@ -12991,6 +13749,16 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         }
       }
     }
+    // v269: 주문 말은 '대화 주문 전용 화면'으로 넘김 (새로 만든 한 줄 경로)
+    if (onOpenTalkOrder && vo2Enabled() && (vo2ActiveRef.current || detectVoiceOrderIntent(text))) {
+      clearInterval(countdownRef.current);
+      setRetryCountdown(0);
+      processingRef.current = false;
+      vo2End();
+      try { pushExchange(text, "대화 주문 화면으로 넘어갈게요."); } catch (e) {}
+      onOpenTalkOrder(text);
+      return;
+    }
     if (vo2ActiveRef.current) {
       clearInterval(countdownRef.current);
       setRetryCountdown(0);
@@ -14138,6 +14906,8 @@ function voiceErrorText(code) {
 }
 function JarvisButton({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onAppCommand, subscriptions, openBundlePlanner, openPersonPicker, openBulkModeChoice, closeOrderPickers, onSetOrderMemo }) {
   const [sheetOpen, setSheetOpen] = React.useState(false);
+  const [talkOpen, setTalkOpen] = React.useState(false);
+  const [talkFirst, setTalkFirst] = React.useState("");
   const [wakeActive, setWakeActive] = React.useState(false);
   const [toastMsg, setToastMsg] = React.useState("");
   const wakeRecRef = React.useRef(null);
@@ -14151,6 +14921,16 @@ function JarvisButton({ orders, customers, products, tab, setTab, geminiKey, set
     setToastMsg(msg);
     clearTimeout(toastTimerRef.current);
     toastTimerRef.current = setTimeout(() => setToastMsg(""), 2500);
+  }
+  // v269: 대화 주문 전용 화면 열기 (조비서에서 주문 말이 나오면 여기로 넘김)
+  function openTalk(first) {
+    clearTimeout(wakeRestartRef.current);
+    wakeActiveRef.current = false;
+    setWakeActive(false);
+    try { wakeRecRef.current && wakeRecRef.current.stop(); } catch (e) {}
+    setSheetOpen(false);
+    setTalkFirst(String(first || ""));
+    setTimeout(() => setTalkOpen(true), 60);
   }
   function startWakeListen() {
     if (!wakeActiveRef.current) return;
@@ -14264,9 +15044,19 @@ function JarvisButton({ orders, customers, products, tab, setTab, geminiKey, set
       }
     },
     sheetOpen ? "\u2715" : "\u{1F3A4}"
-  )), sheetOpen && /* @__PURE__ */ React.createElement(
+  ), !sheetOpen && /* @__PURE__ */ React.createElement("button", {
+    onClick: () => openTalk(""),
+    title: "대화 주문",
+    style: { position: "absolute", bottom: 60, left: 0, height: 34, padding: "0 12px", borderRadius: 17, border: "none", background: "linear-gradient(135deg,#1565c0 0%,#42a5f5 100%)", color: "#fff", fontSize: 13, fontWeight: 800, whiteSpace: "nowrap", boxShadow: "0 3px 12px rgba(21,101,192,0.45)", cursor: "pointer" }
+  }, "\u{1F4DD} 대화 주문")), talkOpen && /* @__PURE__ */ React.createElement(TalkOrderScreen, {
+    products, customers, vendors, orders, geminiKey, createVoiceOrder,
+    firstText: talkFirst,
+    onCommitted: () => { try { setSearchQuery && setSearchQuery(""); setStatusFilter && setStatusFilter("all"); setDateFilter && setDateFilter("all"); setTab && setTab("orders"); } catch (e) {} },
+    onClose: () => { setTalkOpen(false); setTalkFirst(""); setTimeout(() => { wakeActiveRef.current = true; setWakeActive(true); startWakeListen(); }, 1e3); }
+  }), sheetOpen && /* @__PURE__ */ React.createElement(
     JarvisSheet,
     {
+      onOpenTalkOrder: openTalk,
       orders,
       customers,
       products,
@@ -23326,8 +24116,8 @@ function GuideTab({ onBack }) {
         { h: "\uBE48 \uC591\uC2DD \uB2E4\uC6B4\uB85C\uB4DC", b: '"\uC5D1\uC140 \uD30C\uC77C \uC8FC\uBB38 \uB4F1\uB85D" \uD654\uBA74\uC5D0\uC11C "\u2B07 \uBE48 \uC591\uC2DD \uB2E4\uC6B4\uB85C\uB4DC"\uB97C \uB204\uB974\uBA74 \uCEEC\uB7FC\uB9CC \uC788\uB294 \uBE48 \uD30C\uC77C\uC744 \uBC1B\uC744 \uC218 \uC788\uC5B4\uC694. \uB2E4\uB978 \uC1FC\uD551\uBAB0(\uC2A4\uB9C8\uD2B8\uC2A4\uD1A0\uC5B4, \uCFE0\uD321 \uB4F1) \uC8FC\uBB38 \uB0B4\uC6A9\uC744 \uC774 \uC591\uC2DD\uC5D0 \uC62E\uACA8 \uC801\uC740 \uB4A4, \uAC19\uC740 \uD654\uBA74\uC5D0\uC11C \uB2E4\uC2DC \uC5C5\uB85C\uB4DC\uD558\uBA74 \uB4F1\uB85D\uB3FC\uC694.' },
         { h: "\uD655\uC778\uC774 \uD544\uC694\uD574\uC694 \uC54C\uB9BC", b: '\uC0C8\uB85C \uB4F1\uB85D\uB418\uB294 \uACE0\uAC1D\xB7\uC5C5\uCCB4\uAC00 \uAE30\uC874 \uC815\uBCF4\uC640 \uC560\uB9E4\uD558\uAC8C \uACB9\uCE58\uBA74(\uC804\uD654\uBC88\uD638\uB294 \uAC19\uC740\uB370 \uC774\uB984\uC774 \uB2E4\uB974\uAC70\uB098, \uC774\uB984\uC740 \uAC19\uC740\uB370 \uC8FC\uC18C\uAC00 \uB2E4\uB978 \uACBD\uC6B0) "\u26A0 \uD655\uC778\uC774 \uD544\uC694\uD574\uC694" \uCC3D\uC774 \uB5A0\uC694. \uAC19\uC740 \uC0AC\uB78C\uC774\uBA74 "\uC0AD\uC81C\uD558\uAE30", \uB2E4\uB978 \uC0AC\uB78C\uC774\uBA74 "\uADF8\uB300\uB85C \uB450\uAE30"\uB97C \uB204\uB974\uBA74 \uB3FC\uC694.' },
         { h: "\uC0C1\uD488\uBA85\uC774 \uD655\uC2E4\uD558\uC9C0 \uC54A\uC73C\uBA74", b: '\uC5D1\uC140 \uC0C1\uD488\uBA85\uC774 \uB4F1\uB85D\uB41C \uC0C1\uD488\uACFC \uD655\uC2E4\uD558\uAC8C \uC548 \uB9DE\uC73C\uBA74, \uCD94\uCE21\uD574\uC11C \uC5C9\uB6B1\uD55C \uC0C1\uD488\uC73C\uB85C \uB4F1\uB85D\uD558\uC9C0 \uC54A\uACE0 \uC6D0\uBCF8 \uC774\uB984 \uADF8\uB300\uB85C \uB0A8\uACA8\uB450\uACE0 "\uD655\uC778 \uD544\uC694" \uD45C\uC2DC\uB97C \uD574\uC918\uC694. \uBBF8\uB9AC\uBCF4\uAE30 \uD654\uBA74\uC5D0\uC11C \uC9C1\uC811 \uD655\uC778\uD558\uACE0 \uC62C\uBC14\uB978 \uC0C1\uD488\uC744 \uACE8\uB77C\uC8FC\uC138\uC694.' },
-        { h: "⑥ 조비서와 대화로 주문 (음성)", b: "🎤 조비서를 열고 '매일소풍 주문할게'처럼 말하면 대화 주문이 시작돼요. 이어서 '적상추 4박스', '로메인 2키로 하나', '아니 5박스야', '로메인은 빼', '받는 사람 배수련 씨' 처럼 편하게 말하면 화면 카드에 바로 반영돼요. 등록된 이름이 확실하지 않으면 지어내지 않고 번호로 물어봐요('1번', '2번'으로 대답). 상품이 2개 이상이면 확정 전에 묶음 발송(전부 한 박스 / 자동으로 나눠 / 상품마다 따로 / '적상추랑 로메인 한 박스, 케일 따로')을 물어보고, 고른 대로 주문의 발송 박스가 만들어져요. 마지막에 '응'이라고 하면 주문 목록에 등록돼요." },
-        { h: "대화 주문이 잘 안 들릴 때", b: "대화창의 내 말풍선 아래 '🎧 들은 말'은 받아쓰기가 실제로 들은 문장이에요(앱이 고친 말과 다를 때만 보여요). 주황색 '🔇' 줄은 들렸지만 버린 말과 그 이유예요(조비서 자기 목소리, 너무 짧은 소리 등). 정밀 인식(Gemini)이 켜져 있으면, 들은 말이 등록 이름과 안 맞을 때 더 정확한 모델로 한 번 더 받아써서 맞는 쪽을 골라요. 조비서가 말하는 중에는 끼어들지 말고 끝난 뒤 '띵' 소리 다음에 말하면 가장 정확해요. 🔍진단을 켜면 단계별(받아쓰기→보정→결과) 기록을 볼 수 있어요." }
+        { h: "⑥ 대화 주문 화면 (음성으로 주문)", b: "화면 아래 '📝 대화 주문' 버튼을 누르거나, 조비서에게 '매일소풍 주문할게'처럼 말하면 대화 주문 전용 화면이 열려요. '띵' 소리 뒤에 '적상추 4박스', '로메인 2키로 하나', '아니 5박스야', '로메인은 빼', '받는 사람 배수련 씨'처럼 말하면 위쪽 주문 카드에 바로 반영돼요. 등록된 이름이 확실하지 않으면 지어내지 않고 '크리스탈 벨 말씀이세요?'나 번호로 물어봐요('응', '1번'으로 대답). 등록에 없는 이름(예: '대솔 본점')은 지점을 고른 뒤 '앞으로 이렇게 알아들을까요?'에 '응' 하면 다음부터 바로 알아들어요. 상품이 2개 이상이면 확정 전에 묶음 발송(전부 한 박스 / 자동으로 나눠 / 상품마다 따로 / '적상추랑 로메인 한 박스, 케일 따로')을 묻고, 고른 대로 주문의 발송 박스가 만들어져요. 카드에서 직접 수량·받는 분·묶음을 고칠 수도 있어요. 마지막에 '응'(또는 '주문 확정' 버튼)이면 주문 목록에 등록돼요." },
+        { h: "대화 주문이 잘 안 들릴 때", b: "조비서가 말하는 동안에는 듣지 않아요. '띵' 소리가 난 뒤에 말씀하세요(🎤 버튼을 누르면 말을 끊고 바로 들어요). 듣는 중에는 마이크 옆 막대가 움직이는데, 가운데 선을 넘어야 '말'로 들어요. 주변이 아주 시끄러워 말이 안 끝나거나 잘리면 위쪽 '⏱ 말 끝: 자동'을 눌러 '✋ 말 끝: 버튼'으로 바꾸세요. 말을 다 한 뒤 🎤 버튼을 한 번 누르면 그때 받아써요. 내 말풍선 아래 '🎧 들은 말'은 받아쓰기가 실제로 들은 문장이고, 작은 글씨로 '말 2.1초 · 목소리가 주변 소음의 15배'처럼 얼마나 잘 들렸는지 나와요(5배보다 작으면 폰을 입 가까이). 주황색 '🔇' 줄은 들렸지만 버린 말과 그 이유예요. 정밀 인식(Gemini 키)이 있으면 더 정확하고, 들은 말이 등록 이름과 안 맞으면 더 정확한 모델로 한 번 더 받아써서 맞는 쪽을 골라요." }
       ]
     },
     {
