@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 266;
+const APP_VERSION = 267;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2386,7 +2386,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v266 (상품·업체 이름이 조금 달라도 후보 제시·못 알아들은 말 안내)";
+const APP_BUILD = "v267 (대화 주문에 묶음 발송 추가: 한 박스·자동·따로·직접 묶기)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8097,7 +8097,7 @@ null       : \uC774\uB3D9 \uBD88\uD544\uC694\uD55C \uC77C\uBC18 \uB300\uD654
   const stripped = cleaned.replace(/^[^{]*\{/, "").replace(/["']?\s*text\s*["']?\s*:\s*["']?/i, "").replace(/["']?\s*,?\s*["']?action["']?\s*:[\s\S]*$/i, "").replace(/[{}"]/g, "").trim();
   return { text: stripped || "\uB2E4\uC2DC \uB9D0\uC500\uD574 \uC8FC\uC138\uC694.", action: null };
 }
-// ===== VO2: 대화형 음성 주문 엔진 (v266) =====
+// ===== VO2: 대화형 음성 주문 엔진 (v267) =====
 // 말 → 정규화 → 의도/항목 추출 → 등록된 DB(상품·고객·업체·지점)에서 후보 검색 → 현재 주문 상태에 '바뀐 것만' 반영 → 답변
 // 주문 상태는 문자열이 아니라 구조화된 객체로 관리하고, 애매하면 추측하지 않고 질문함.
 var VO2 = (function () {
@@ -8152,7 +8152,7 @@ var VO2 = (function () {
   }
   function ns(s) { return String(s || "").replace(/\s+/g, ""); }
   function hasJong(word) {
-    var s = String(word || "").trim();
+    var s = String(word || "").trim().replace(/\s*\([^)]*\)\s*$/, "");
     if (!s) return false;
     var ch = s.charCodeAt(s.length - 1);
     if (ch >= 0xac00 && ch <= 0xd7a3) return (ch - 0xac00) % 28 !== 0;
@@ -8163,7 +8163,7 @@ var VO2 = (function () {
   function eul(w) { return w + (hasJong(w) ? "을" : "를"); }
   function eun(w) { return w + (hasJong(w) ? "은" : "는"); }
   function ro(w) {
-    var s = String(w || "").trim();
+    var s = String(w || "").trim().replace(/\s*\([^)]*\)\s*$/, "");
     var ch = s.charCodeAt(s.length - 1);
     if (ch >= 0xac00 && ch <= 0xd7a3) { var j = (ch - 0xac00) % 28; return w + (j === 0 || j === 8 ? "로" : "으로"); }
     return w + (hasJong(w) ? "으로" : "로");
@@ -8603,7 +8603,7 @@ var VO2 = (function () {
       orderer: null, // { name, phone, customerId, address }
       recipient: null, // { name, phone, address, recipientId, kind } (없으면 주문자/업체와 같음)
       items: [], // OrderItem
-      shipping: { memo: "", senderName: "", senderAuto: true, addressOverride: null, phoneOverride: null },
+      shipping: { memo: "", senderName: "", senderAuto: true, addressOverride: null, phoneOverride: null, boxPlan: null },
       reserveDate: "",
       ctx: { lastItemKey: null, lastTurnKeys: [], lastPersonRole: null, pending: null, turn: 0 },
       log: []
@@ -8663,6 +8663,8 @@ var VO2 = (function () {
     var memo = deliveryMemoText(st);
     if (memo) L.push("배송 메모: " + memo);
     if (st.reserveDate) L.push("발송일: " + st.reserveDate);
+    var bt = boxPlanText(st, idx);
+    if (bt) L.push("묶음: " + bt);
     return L;
   }
   // 기존 앱의 주문 생성(createVoiceOrder)에 넘길 형태로 변환 — 기존 데이터 형식 그대로 사용
@@ -8684,6 +8686,7 @@ var VO2 = (function () {
       deliveryMessage: deliveryMemoText(st),
       memo: notes.join(" / "),
       forceNew: true,
+      _boxPlan: legacyBoxPlan(st),
       _senderName: senderName,
       _senderPhone: senderPhone,
       _recipientName: rec ? rec.name : "",
@@ -8719,6 +8722,7 @@ var VO2 = (function () {
   // ---------- 핵심: 한 번의 말 처리 ----------
   function handle(stIn, utterance, db, opts) {
     opts = opts || {};
+    CUR_OPTS = opts;
     var idx = db && db.__vo2idx ? db.__vo2idx : buildIndex(db);
     var st = stIn ? clone(stIn) : newState();
     st.ctx.turn = (st.ctx.turn || 0) + 1;
@@ -8746,7 +8750,15 @@ var VO2 = (function () {
     // 1) 확인 대기 중인 질문에 대한 답
     if (st.ctx.pending) {
       var pr = resolvePending(st, norm, raw, idx, R, logChange);
-      if (pr === "handled") { popQueue(st, R); return finish(st, res, R, idx, raw); }
+      if (pr === "handled") {
+        popQueue(st, R);
+        if (R._thenConfirm && !st.ctx.pending) {
+          var cr = confirmFlow(st, res, R, idx, raw);
+          cr.reply = (R.changes.length ? R.changes.join(". ") + ". " : "") + cr.reply;
+          return cr;
+        }
+        return finish(st, res, R, idx, raw);
+      }
       if (pr === "cancel-pending") st.ctx.pending = null;
     }
 
@@ -8784,6 +8796,15 @@ var VO2 = (function () {
       try { var dt = opts.parseDate(raw); if (dt && dt !== st.reserveDate) { logChange("reserveDate", st.reserveDate, dt); st.reserveDate = dt; R.changes.push("발송일을 " + dt + "로 정했습니다"); } } catch (e) {}
     }
 
+    // 3-1) 묶음 발송 말("한 박스로 묶어", "따로 보내", "로메인이랑 루꼴라 한 박스")은 상품 수량으로 보지 않고 묶음으로 처리
+    if (st.items.length && BUNDLE_RX.test(norm) && !RX.del.test(norm)) {
+      var bplan = parseBundle(norm, st, idx);
+      if (bplan) {
+        setBoxPlan(st, bplan, R, logChange, idx);
+        if (st.status === "confirming") st.status = "collecting";
+        return finish(st, res, R, idx, raw);
+      }
+    }
     // 4) 절 나누기 (쉼표·그리고·하고)
     var clauses = norm.split(/\s,\s|\s,|,\s|,|\s그리고\s|\s또\s/).map(function (s) { return s.trim(); }).filter(Boolean);
     if (!clauses.length) clauses = [norm];
@@ -8850,7 +8871,82 @@ var VO2 = (function () {
     st.ctx.pending = { type: "branch", companyNS: company.nameNS, options: vs.map(function (v) { return v.id; }) };
     return "어느 지점인가요? " + vs.slice(0, 6).map(function (v) { return v.branch; }).join(", ") + (vs.length > 6 ? " 등" : "") + ".";
   }
+  // ---------- v267: 묶음 발송 (한 박스 / 자동 / 따로 / 직접 묶기) ----------
+  var CUR_OPTS = {};
+  var BUNDLE_RX = /(묶어|묶음|합쳐|같이\s*(보내|담아|넣어|포장)|따로|각각|개별|낱개로|자동으로|알아서|규칙대로|한\s*박스로|한\s*상자로|박스\s*하나로|한\s*박스에|전부\s*한\s*박스|모두\s*한\s*박스|다\s*한\s*박스|박스\s*나눠|나눠서\s*(보내|담아))/;
+  function totalUnits(st) { return st.items.reduce(function (a, it) { return a + (Number(it.quantity) || 0); }, 0); }
+  function boxPlanText(st, idx) {
+    var bp = st.shipping && st.shipping.boxPlan;
+    if (!bp) return "";
+    if (bp.mode === "all") return "전부 한 박스";
+    if (bp.mode === "each") return "상품마다 따로(" + totalUnits(st) + "박스)";
+    if (bp.mode === "auto") { var n = CUR_OPTS.autoBoxCount ? CUR_OPTS.autoBoxCount(st.items) : 0; return "자동으로 나눔" + (n ? "(" + n + "박스)" : ""); }
+    if (bp.mode === "explicit") {
+      var name = function (k) { var it = st.items.find(function (x) { return x.key === k; }); return it ? it.productName : ""; };
+      var used = {};
+      var boxes = bp.groups.map(function (g) { g.forEach(function (k) { used[k] = 1; }); return g.map(name).filter(Boolean).join("+"); }).filter(Boolean);
+      st.items.forEach(function (it) { if (!used[it.key]) boxes.push(it.productName); });
+      return boxes.map(function (b, i) { return (i + 1) + "번 박스 " + b; }).join(" / ");
+    }
+    return "";
+  }
+  function legacyBoxPlan(st) {
+    var bp = st.shipping && st.shipping.boxPlan;
+    if (!bp || bp.mode === "auto") return null;
+    var it2 = function (it, q) { return { productId: it.productId, name: it.productName, qty: q != null ? q : it.quantity }; };
+    if (bp.mode === "all") return [st.items.map(function (it) { return it2(it); })];
+    if (bp.mode === "each") { var out = []; st.items.forEach(function (it) { for (var i = 0; i < Math.max(1, it.quantity); i++) out.push([it2(it, 1)]); }); return out; }
+    if (bp.mode === "explicit") {
+      var used = {}, boxes = [];
+      bp.groups.forEach(function (g) { var b = st.items.filter(function (it) { return g.indexOf(it.key) >= 0; }); b.forEach(function (it) { used[it.key] = 1; }); if (b.length) boxes.push(b.map(function (it) { return it2(it); })); });
+      st.items.forEach(function (it) { if (!used[it.key]) boxes.push([it2(it)]); });
+      return boxes;
+    }
+    return null;
+  }
+  // 묶음 말 해석: 상품 이름이 있으면 그 상품끼리 묶기, 없으면 전체 방식
+  function parseBundle(c, st, idx) {
+    var t = ns(c);
+    if (/(자동|알아서|규칙대로|박스나눠|나눠서보내|나눠서담)/.test(t)) return { mode: "auto" };
+    var toks = tokensOf(normalize(c));
+    var mentions = findProducts(normalize(c), idx).filter(function (m) { return m.baseNS; });
+    var keyOfBase = function (b) { var it = st.items.find(function (x) { return x.baseNS === b; }); return it ? it.key : null; };
+    if (mentions.length) {
+      var groups = [], cur = [];
+      var mi = 0;
+      for (var i = 0; i < toks.length; i++) {
+        var m = mentions[mi];
+        if (m && i === m.start) { var k = keyOfBase(m.baseNS); if (k && cur.indexOf(k) < 0) cur.push(k); i = m.end - 1; mi++; continue; }
+        var w = toks[i];
+        if (/(따로|각각|개별|낱개)/.test(w)) { cur.forEach(function (k2) { groups.push([k2]); }); cur = []; }
+        else if (/(박스|상자|묶|같이|합쳐|하나로)/.test(w) && !/^\d/.test(w)) { if (cur.length) groups.push(cur); cur = []; }
+      }
+      if (cur.length) groups.push(cur);
+      groups = groups.filter(function (g) { return g.length; });
+      if (groups.length) return { mode: "explicit", groups: groups };
+    }
+    if (/(따로|각각|개별|낱개)/.test(t)) return { mode: "each" };
+    if (/(한박스|한상자|하나로|묶|합쳐|같이|전부|모두)/.test(t)) return { mode: "all" };
+    return null;
+  }
+  function setBoxPlan(st, plan, R, logChange, idx) {
+    var b = boxPlanText(st, idx);
+    st.shipping.boxPlan = plan;
+    var a = boxPlanText(st, idx);
+    logChange("boxPlan", b, a);
+    R.changes.push(plan.mode === "explicit" ? "묶음 발송은 " + a + "로 할게요" : "묶음 발송은 " + ro(a) + " 할게요");
+  }
   function confirmFlow(st, res, R, idx, raw) {
+    // 상품이 2개 이상인데 묶음 방법을 아직 안 정했으면 먼저 물어봄
+    if (!st.ctx.pending && st.status !== "confirming" && st.items.length && totalUnits(st) >= 2 && !st.shipping.boxPlan && st.items.every(function (it) { return it.productId; }) && (st.vendor || st.orderer)) {
+      var n = CUR_OPTS.autoBoxCount ? CUR_OPTS.autoBoxCount(st.items) : 0;
+      st.ctx.pending = { type: "bundle", q: "" };
+      var q = "묶음 발송은 어떻게 할까요? '전부 한 박스', '자동으로 나눠'" + (n ? "(" + n + "박스)" : "") + ", '상품마다 따로' 중에 말씀하시거나 '로메인이랑 루꼴라 한 박스, 크리스탈벨 따로'처럼 말씀해 주세요.";
+      st.ctx.pending.q = q;
+      res.understood = true; res.state = st; res.summary = summaryLines(st, idx);
+      res.reply = q;
+      return res;
+    }
     if (st.ctx.pending && st.ctx.pending.q) {
       res.understood = true; res.state = st; res.summary = summaryLines(st, idx);
       res.reply = "먼저 확인할 게 있어요. " + st.ctx.pending.q;
@@ -9039,6 +9135,18 @@ var VO2 = (function () {
         return "handled";
       }
       if (no) { st.ctx.pending = null; return "handled"; }
+      return "pass";
+    }
+    if (p.type === "bundle") {
+      var plan = parseBundle(norm, st, idx);
+      if (!plan && yes) plan = { mode: "auto" };
+      if (plan) {
+        st.ctx.pending = null;
+        setBoxPlan(st, plan, R, logChange, idx);
+        // 묶음을 정했으면 바로 최종 확인으로
+        R._thenConfirm = true;
+        return "handled";
+      }
       return "pass";
     }
     if (p.type === "vendorPick") {
@@ -9676,6 +9784,7 @@ var VO2 = (function () {
     else if (a.type === "address") { var ra = effRecipient(s); lg("address", ra ? ra.address : "", a.value); s.shipping.addressOverride = a.value || null; }
     else if (a.type === "phone") { var rp = effRecipient(s); lg("phone", rp ? rp.phone : "", a.value); s.shipping.phoneOverride = a.value || null; }
     else if (a.type === "memo") { lg("memo", s.shipping.memo, a.value); s.shipping.memo = a.value || ""; }
+    else if (a.type === "boxPlan") { var bb = boxPlanText(s, idx); s.shipping.boxPlan = a.value ? { mode: a.value } : null; lg("boxPlan", bb, boxPlanText(s, idx)); }
     else if (a.type === "reserveDate") { lg("reserveDate", s.reserveDate, a.value || ""); s.reserveDate = a.value || ""; }
     else if (a.type === "senderAuto") { lg("senderAuto", s.shipping.senderAuto, !!a.value); s.shipping.senderAuto = !!a.value; if (!a.value) s.shipping.senderName = ""; }
     if (s.status === "confirming") s.status = "collecting";
@@ -9758,6 +9867,7 @@ var VO2 = (function () {
 
 
   return {
+    boxPlanText: boxPlanText, parseBundle: parseBundle,
     analyze: analyze, scoreText: scoreText, verdict: verdict, closestNames: closestNames,
     llmPrompt: llmPrompt,
     normalize: normalize, parseQuantities: parseQuantities, buildIndex: buildIndex, findProducts: findProducts, findPersons: findPersons,
@@ -9871,6 +9981,14 @@ function VoiceOrderCard({ st, idx, products, vendors, customers, onEdit, onConfi
         h("input", { type: "checkbox", disabled: done, checked: !!(st.shipping.senderAuto || st.shipping.senderName), onChange: (e) => onEdit({ type: "senderAuto", value: e.target.checked }) }),
         "보내는 분 표시") : null,
       memoTxt ? h("div", { style: { color: "#ffe082", fontSize: 12, marginTop: 3 } }, "→ " + memoTxt) : null)),
+    st.items.reduce((a, it) => a + (Number(it.quantity) || 0), 0) >= 2 ? row("묶음 발송", h("div", null,
+      h("select", { value: st.shipping.boxPlan ? (st.shipping.boxPlan.mode === "explicit" ? "explicit" : st.shipping.boxPlan.mode) : "", disabled: done, onChange: (e) => onEdit({ type: "boxPlan", value: e.target.value === "explicit" ? (st.shipping.boxPlan && st.shipping.boxPlan.mode) : e.target.value }), style: { width: "100%", background: "rgba(255,255,255,0.07)", color: C.txt, border: `1px solid ${C.line}`, borderRadius: 6, padding: "3px 6px", fontSize: 13 } },
+        h("option", { value: "", style: { color: "#000" } }, "정하지 않음 (자동으로 나눔)"),
+        h("option", { value: "auto", style: { color: "#000" } }, "자동으로 나눔"),
+        h("option", { value: "all", style: { color: "#000" } }, "전부 한 박스"),
+        h("option", { value: "each", style: { color: "#000" } }, "상품마다 따로"),
+        st.shipping.boxPlan && st.shipping.boxPlan.mode === "explicit" ? h("option", { value: "explicit", style: { color: "#000" } }, "말로 정한 묶음") : null),
+      st.shipping.boxPlan ? h("div", { style: { color: "#ffe082", fontSize: 12, marginTop: 3 } }, "→ " + VO2.boxPlanText(st, idx)) : null)) : null,
     row("발송일", inp(st.reserveDate, (v) => onEdit({ type: "reserveDate", value: v }), "YYYY-MM-DD", "date")),
     done ? null : h("div", { style: { display: "flex", gap: 8, marginTop: 8 } },
       h("button", { onClick: onConfirm, style: { flex: 2, border: "none", background: status === "confirming" ? "#e65100" : "#2e7d32", color: "#fff", borderRadius: 10, padding: "10px 0", fontSize: 15, fontWeight: 800, cursor: "pointer" } }, status === "confirming" ? "✅ 이대로 주문 확정" : "✅ 주문 확정"),
@@ -10758,6 +10876,8 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
         hiResNoiseRef.current = Math.min(0.06, nf);
       }
       if (rms > thr) {
+        if (cap.firstV == null) cap.firstV = cap.totalMs - ms;
+        cap.lastV = cap.totalMs;
         cap.speechMs += ms;
         cap.runMs = (cap.runMs || 0) + ms;
         cap.peak = Math.max(cap.peak || 0, rms);
@@ -10827,8 +10947,10 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
       // v265: 말한 시간에 비해 글자가 너무 많으면 받아쓰기가 지어낸 문장으로 보고 버림 ("주문 할께요"→"배수련 모듬쌈채소 1kg 한 박스 추가요")
       if (text) {
         const _syl = (text.match(/[가-힣]/g) || []).length + (text.match(/\d/g) || []).length * 1.5 + (text.match(/[a-zA-Z]/g) || []).length * 0.5;
-        const _sec = Math.max(0.3, cap.speechMs / 1000);
-        if (_syl > _sec * 9 + 6) {
+        // 말소리가 시작~끝난 시간(무성음·짧은 쉼 포함) 기준. 빠르게 말해도 1초에 10글자는 넘기 어려움
+        const _span = cap.firstV != null && cap.lastV != null ? (cap.lastV - cap.firstV) : cap.speechMs;
+        const _sec = Math.max(0.3, Math.max(_span, cap.speechMs) / 1000);
+        if (_syl > _sec * 10 + 6) {
           noteStt("정밀(Gemini)", text, [], "", { rejected: true, speechMs: Math.round(cap.speechMs) });
           try {
             const rec = { t: Date.now(), engine: "정밀(Gemini)", stt: text, alts: [], prep: [], analysis: { normalized: "", products: [], companies: [], branches: [], persons: [], quantities: [], unknown: [] }, reply: "", items: "", verdict: { stage: "STT", ok: false, msg: "약 " + _sec.toFixed(1) + "초 말했는데 " + Math.round(_syl) + "글자가 나와서, 받아쓰기가 지어낸 문장으로 보고 버렸어요" } };
@@ -11596,6 +11718,13 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     vo2DbRef.current = { p: products, c: customers, v: vendors, d: _dictSig, db };
     return db;
   }
+  function vo2AutoBoxCount(items) {
+    try {
+      const pm = {};
+      (products || []).forEach((p) => { if (p && p.id) pm[p.id] = p; });
+      return splitIntoBoxes((items || []).map((it) => ({ productId: it.productId, name: it.productName, qty: it.quantity })), pm).length;
+    } catch (e) { return 0; }
+  }
   function vo2SetState(st) {
     vo2Ref.current = st;
     try { window.__vo2State = st; } catch (e) {}
@@ -11646,7 +11775,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
   async function vo2Turn(text) {
     setPhaseSync("thinking", "order");
     const db = vo2Db();
-    const opt = { parseDate: (t) => typeof parseDate === "function" ? parseDate(t, /* @__PURE__ */ new Date()) : null };
+    const opt = { parseDate: (t) => typeof parseDate === "function" ? parseDate(t, /* @__PURE__ */ new Date()) : null, autoBoxCount: vo2AutoBoxCount };
     const prevState = vo2Ref.current;
     const _now = Date.now();
     const pieces = (sttLogRef.current || []).filter((x) => _now - x.at < 2e4 && !x.rejected);
@@ -11728,7 +11857,7 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     if (!cur) return;
     try { stopRec(); } catch (e) {}
     try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {}
-    const r = VO2.step(Object.assign({}, cur, { status: "confirming" }), "응 그대로 해", vo2Db());
+    const r = VO2.step(Object.assign({}, cur, { status: "confirming" }), "응 그대로 해", vo2Db(), { autoBoxCount: vo2AutoBoxCount });
     vo2SetState(r.state);
     const msg = r.confirmed ? vo2Commit(r) : r.reply;
     setLastAI(msg);
@@ -18593,6 +18722,15 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       isBusiness: !!(vo.vendorId || (vendors && vendors.some((v) => v.name && recipient.name && v.name === recipient.name))),
       vendorId: vo.vendorId || ((vendors && vendors.find((v) => v.name && recipient && recipient.name && v.name === recipient.name)) || {}).id || ""
     }));
+    // v267: 대화 주문에서 정한 묶음(전부 한 박스 / 따로 / 직접 묶기)을 주문의 박스 구성으로 저장 — 주문 상세 '발송 박스'에 그대로 나옴
+    if (Array.isArray(vo._boxPlan) && vo._boxPlan.length && newOrders.length === 1) {
+      try {
+        newOrders[0].manualBoxes = vo._boxPlan.map((box) => {
+          const its = box.map((it) => ({ productId: it.productId || null, name: it.name || "", qty: Number(it.qty) || 1 }));
+          return { items: its, volume: volumeForBoxItems(its, productMap) };
+        });
+      } catch (e) {}
+    }
     setOrders((prev) => {
       const nmNS = (recipient.name || "").replace(/\s/g, "");
       const addrNS = (recipient.address || "").replace(/\s/g, "");
