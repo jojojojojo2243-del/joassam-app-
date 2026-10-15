@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 272;
+const APP_VERSION = 273;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2410,7 +2410,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v272 (검색: 띄어쓰기·하이픈 무시, 필터에 가린 주문 안내, 비슷한 이름 구분 / 고객 이름·전화 형식 정리, 안심번호 중복 합치기)";
+const APP_BUILD = "v273 (대화 주문: 고객 목록의 가게 이름도 업체로 찾기, 받아쓰기 힌트를 등록 목록으로, 더 정확한 모델 먼저, 소리 크기 맞춤, 받아쓰기 엔진 바꾸기 버튼)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8327,6 +8327,8 @@ var VO2 = (function () {
     [["곱슬캐일", "곱슬케이", "곱실케일", "꼽슬케일"], "곱슬케일"],
     [["캐일", "케이", "께일"], "케일"]
   ];
+  // 가게·회사로 보이는 이름 (고객 목록에 있어도 업체로 찾음)
+  var BIZ_NAME_RX = /(점|카페|까페|베이커리|빵집|정육|식당|소풍|버거|갈비|쌈밥|국수|칼국수|가든|마트|상회|농장|회사|\(주\)|㈜|센터|학교|연구소|빌딩|레스토랑|커피|치킨|족발|고기|횟집|뷔페|호텔|펜션|푸드|키친|하우스|스토어|샵|반찬|분식|김밥|도시락|급식|요양원|어린이집|교회|성당|협회|조합|공장|본사|지사)$|(카페|베이커리|정육|식당|쌈밥|갈비|국수|버거|우리)/;
   // [잘못 들린 말들, 업체 이름(띄어쓰기 무시)] — 등록된 업체에만 연결
   var SEED_VENDORS = [
     [["대설", "데솔", "대쏠", "태솔", "대솔이", "대술", "대소", "대쏘", "대설이"], "대솔"],
@@ -8397,9 +8399,19 @@ var VO2 = (function () {
     products.forEach(function (p) { (p.raw.aliases || []).forEach(function (a) { addPA(a, p.baseNS); }); });
     var prodAliasMulti = {};
     // 업체·지점
-    var vendors = (db.vendors || []).filter(function (v) { return v && v.name; }).map(function (v) {
+    // v273: 고객 목록에 '업체처럼' 등록된 곳(대솔오송점, ○○카페, ○○정육 …)도 업체·지점으로 찾음 (주문은 고객으로 연결)
+    var vendNames = {};
+    (db.vendors || []).forEach(function (v) { if (v && v.name) vendNames[ns(v.name)] = 1; });
+    var bizCust = (db.customers || []).filter(function (c) {
+      if (!c || !c.name) return false;
+      var n = ns(c.name);
+      return n.length >= 3 && !vendNames[n] && BIZ_NAME_RX.test(n);
+    });
+    var bizSeen = {};
+    bizCust = bizCust.filter(function (c) { var k = ns(c.name); if (bizSeen[k]) return false; bizSeen[k] = 1; return true; });
+    var vendors = (db.vendors || []).filter(function (v) { return v && v.name; }).concat(bizCust.map(function (c) { return { id: c.id, name: c.name, phone: c.phone, address: c.address, aliases: c.aliases, fromCustomer: true }; })).map(function (v) {
       var cb = splitCompanyBranch(v.name);
-      return { id: v.id, name: String(v.name).trim(), company: cb.company, companyNS: ns(cb.company), branch: cb.branch, branchNS: ns(cb.branch), phone: v.phone || "", address: v.address || "", aliases: (v.aliases || []).map(ns), raw: v };
+      return { id: v.id, name: String(v.name).trim(), company: cb.company, companyNS: ns(cb.company), branch: cb.branch, branchNS: ns(cb.branch), phone: v.phone || "", address: v.address || "", aliases: (v.aliases || []).map(ns), raw: v, fromCustomer: !!v.fromCustomer };
     });
     // v263: 띄어쓰기 없이 등록된 지점 이름("대솔동남점", "대솔본점")도 업체+지점으로 나눔
     //  ① 다른 업체에서 쓰는 지점 이름으로 끝나면 그 앞부분이 업체 ② 같은 앞부분을 가진 '…점' 업체가 2곳 이상이면 그 앞부분이 업체
@@ -8800,8 +8812,8 @@ var VO2 = (function () {
       name: senderName || (rec && rec.name) || "",
       phone: senderPhone,
       address: (rec && rec.address) || "",
-      customerId: (st.recipient && st.recipient.kind !== "vendor" && st.recipient.recipientId) || (st.orderer && st.orderer.customerId) || null,
-      vendorId: st.vendor ? st.vendor.id : "",
+      customerId: (st.recipient && st.recipient.kind !== "vendor" && st.recipient.recipientId) || (st.orderer && st.orderer.customerId) || (st.vendor && st.vendor.fromCustomer ? st.vendor.id : null),
+      vendorId: st.vendor && !st.vendor.fromCustomer ? st.vendor.id : "",
       items: st.items.map(function (it) { return { productId: it.productId, name: it.productName, qty: it.quantity }; }),
       reserveDate: st.reserveDate || "",
       deliveryMessage: deliveryMemoText(st),
@@ -9501,7 +9513,7 @@ var VO2 = (function () {
   function setVendor(st, v, R, logChange, how) {
     var before = st.vendor ? st.vendor.name : "";
     var prevBranch = st.vendor ? st.vendor.branch : "";
-    st.vendor = { id: v.id, name: v.name, company: v.company, branch: v.branch, phone: v.phone, address: v.address };
+    st.vendor = { id: v.id, name: v.name, company: v.company, branch: v.branch, phone: v.phone, address: v.address, fromCustomer: !!v.fromCustomer };
     st.company = { name: v.company, nameNS: v.companyNS };
     logChange(prevBranch && v.branch ? "branch" : "vendor", before, v.name);
     if (st.ctx.pending && st.ctx.pending.type === "branch") st.ctx.pending = null;
@@ -10314,7 +10326,8 @@ function VoiceOrderCard({ st, idx, products, vendors, customers, onEdit, onConfi
     onChange: (e) => onEdit({ type: "vendor", vendorId: e.target.value }),
     style: { width: "100%", background: "rgba(255,255,255,0.07)", color: C.txt, border: `1px solid ${C.line}`, borderRadius: 6, padding: "3px 6px", fontSize: 13 }
   }, h("option", { value: "", style: { color: "#000" } }, st.company && !st.vendor ? `${st.company.name} (지점 선택)` : "(업체 아님 · 일반 고객)"),
-    (vendors || []).filter((v) => v && v.name).map((v) => h("option", { key: v.id, value: v.id, style: { color: "#000" } }, v.name)));
+    (vendors || []).filter((v) => v && v.name).map((v) => h("option", { key: v.id, value: v.id, style: { color: "#000" } }, v.name)),
+    st.vendor && st.vendor.fromCustomer ? h("option", { key: "c_" + st.vendor.id, value: st.vendor.id, style: { color: "#000" } }, st.vendor.name + " (고객 목록)") : null);
   const personPicker = (role) => pick === role ? h("div", { style: { marginTop: 4 } },
     h("input", { autoFocus: true, value: q, placeholder: "이름 검색", onChange: (e) => setQ(e.target.value), style: { width: "100%", boxSizing: "border-box", background: "rgba(255,255,255,0.1)", border: `1px solid ${C.acc}`, borderRadius: 6, color: C.txt, padding: "5px 8px", fontSize: 13 } }),
     h("div", { style: { display: "flex", flexDirection: "column", gap: 2, marginTop: 3 } },
@@ -10571,7 +10584,7 @@ function VoiceDiagModal({ db, onClose }) {
 // 녹음 → 말 끝 판단 → 받아쓰기(정밀 Gemini, 안 되면 폰 기본 인식) → 등록 이름과 맞춰 고르기 → 주문 엔진(VO2) → 카드·대화 기록 → 짧은 음성 답
 // 조비서(JarvisSheet)의 예전 처리 단계(문장 덮어쓰기, 메아리 필터, 다른 명령 판단)는 거치지 않음.
 // 말하는 동안에는 마이크를 듣지 않음(반이중) → 조비서 자기 목소리를 받아쓰는 일이 없어 메아리 필터가 필요 없음.
-var TALK_VERSION = "v271";
+var TALK_VERSION = "v273";
 function talkSpoken(msg) {
   var t = String(msg || "");
   t = t.replace(/주문 내용을 확인해 주세요\.[\s\S]*?이대로 주문할까요\?/, "화면의 주문 내용을 확인하시고, 맞으면 '응', 고칠 게 있으면 말씀해 주세요.");
@@ -10852,6 +10865,22 @@ function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, crea
       if (!cap.manual) setTimeout(() => { if (!cap.done && !cap.heard) finish(null); }, 11000);
     });
   }
+  function talkVocab(s) {
+    const out = [], seen = new Set();
+    const add = (n) => { const t = String(n || "").trim(); if (t.length >= 2 && t.length <= 24 && !seen.has(t)) { seen.add(t); out.push(t); } };
+    let idx = null;
+    try { idx = getDb().__vo2idx; } catch (e) {}
+    [s.vendor && s.vendor.name, s.orderer && s.orderer.name, s.recipient && s.recipient.name].forEach(add);
+    const known = !!(s.vendor || s.orderer);
+    if (!known && idx) {
+      // 업체·가게 이름 (최근 주문이 많은 곳부터)
+      const rec = idx.recent || {};
+      idx.vendors.slice().sort((a, b) => (rec[String(b.name).replace(/\s/g, "")] || 0) - (rec[String(a.name).replace(/\s/g, "")] || 0)).slice(0, 120).forEach((v) => add(v.name));
+    }
+    const groups = idx ? Object.keys(idx.groups).map((g) => idx.groups[g].base) : (products || []).map((p) => p.name);
+    groups.slice(0, 80).forEach(add);
+    return out;
+  }
   // 녹음 상태 요약 (사장님 목소리가 소음보다 얼마나 크게 들렸는지)
   function capStats(cap) {
     if (!cap || !cap.heard) return "";
@@ -10864,12 +10893,16 @@ function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, crea
     try { (window.__talkCaps = window.__talkCaps || []).push({ at: Date.now(), firstV: Math.round(cap.firstV), lastV: Math.round(cap.lastV), total: Math.round(cap.totalMs), speechMs: Math.round(cap.speechMs), stats: capStats(cap) }); } catch (e) {}
     const b64 = hiResEncodeWav16k(cap.chunks, cap.rate);
     const s = stRef.current;
-    const cur = [s.vendor && s.vendor.name, s.orderer && s.orderer.name, s.recipient && s.recipient.name].filter(Boolean);
-    const vocab = hiResBuildVocab({ vendors: cur.map((n) => ({ name: n })), customers: [], products });
+    // v273: 받아쓰기 힌트를 '등록된 목록'에서 만듦 — 아직 업체를 모르면 업체·가게 이름(업체 목록 + 고객 목록의 가게 이름)을 먼저, 정해졌으면 상품 위주
+    const vocab = talkVocab(s);
+    const lastBot = (logRef.current.slice().reverse().find((x) => x.k === "bot") || {}).text || "";
     let text = "";
+    let model1 = "";
+    try { model1 = await getGeminiModel(k); } catch (e) {}
     try {
-      try { text = await geminiTranscribeWav(b64, vocab, k, { timeoutMs: 8000 }); }
-      catch (e1) { if (!(e1 && (e1.status >= 500 || e1.name === "AbortError"))) throw e1; text = await geminiTranscribeWav(b64, vocab, k, { timeoutMs: 8000 }); }
+      // 더 정확한 모델(flash)로 먼저, 안 되면 빠른 모델(lite)로
+      try { text = await geminiTranscribeWav(b64, vocab, k, { timeoutMs: 9000, model: model1 || undefined, context: lastBot }); }
+      catch (e1) { if (e1 && e1.status === 429 && !model1) throw e1; text = await geminiTranscribeWav(b64, vocab, k, { timeoutMs: 8000, context: lastBot }); }
     } catch (e) {
       const stt = e && e.status;
       geminiOffUntilRef.current = Date.now() + (stt === 429 ? 60000 : stt === 400 || stt === 403 ? 36e5 : 90000);
@@ -11211,6 +11244,7 @@ function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, crea
         h("div", { style: { fontSize: 17, fontWeight: 800, flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, "📝 대화 주문 ", h("span", { style: { fontSize: 11, color: C.sub, fontWeight: 600 } }, TALK_VERSION + (engineName ? " · " + engineName : ""))),
         h("button", { onClick: closeAll, "aria-label": "닫기", style: { border: "none", background: "rgba(255,255,255,0.08)", color: C.txt, borderRadius: 10, width: 36, height: 32, fontSize: 16, cursor: "pointer" } }, "✕")),
       h("div", { style: { display: "flex", gap: 6, flexWrap: "wrap" } },
+        h("button", { onClick: () => { const next = !hiResWanted(); try { localStorage.setItem("joassam_hires_voice_v1", next ? "1" : "0"); } catch (e) {} geminiOffUntilRef.current = 0; setEngineName(next ? "정밀(Gemini)" : "기본(폰)"); note(next ? "🎙 받아쓰기를 정밀(Gemini)로 바꿨어요." : "🎙 받아쓰기를 폰 기본(구글 음성 인식)으로 바꿨어요. 어느 쪽이 더 잘 알아듣는지 비교해 보세요."); }, title: "받아쓰기 엔진 바꾸기", style: { border: `1px solid ${C.line}`, background: "transparent", color: C.txt, borderRadius: 14, padding: "5px 9px", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, "🎙 " + (hiResWanted() && key() ? "Gemini" : "폰 인식")),
         h("button", { onClick: () => setDictOpen(true), title: "잘못 들린 말 사전", style: { border: `1px solid ${C.line}`, background: "transparent", color: C.txt, borderRadius: 14, padding: "5px 9px", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, "📖 사전"),
         h("button", { onClick: () => setEndMode((m) => { const n = m === "button" ? "auto" : "button"; try { localStorage.setItem("joassam_talk_endmode", n); } catch (e) {} return n; }), title: "말 끝을 어떻게 알아챌지", style: { border: `1px solid ${C.line}`, background: endMode === "button" ? "rgba(255,204,128,0.18)" : "transparent", color: endMode === "button" ? C.warn : C.sub, borderRadius: 14, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, endMode === "button" ? "✋ 말 끝: 버튼" : "⏱ 말 끝: 자동"),
         h("button", { onClick: () => setAuto((a) => !a), style: { border: `1px solid ${C.line}`, background: auto ? "rgba(127,209,160,0.18)" : "transparent", color: auto ? C.acc : C.sub, borderRadius: 14, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, auto ? "🔁 자동 듣기 ON" : "자동 듣기 OFF"))),
@@ -15074,6 +15108,11 @@ function hiResEncodeWav16k(chunks, srcRate) {
   const all = new Float32Array(total);
   let o = 0;
   for (const c of chunks) { all.set(c, o); o += c.length; }
+  // v273: 목소리가 작게 녹음되면 받아쓰기가 약해짐 → 가장 큰 소리가 0.9가 되도록 키움(최대 8배)
+  let pk = 0;
+  for (let i = 0; i < all.length; i++) { const av = all[i] < 0 ? -all[i] : all[i]; if (av > pk) pk = av; }
+  const gain = pk > 0.001 ? Math.min(8, 0.9 / pk) : 1;
+  if (gain > 1.05) for (let i = 0; i < all.length; i++) all[i] *= gain;
   const outRate = 16000;
   const ratio = srcRate / outRate;
   const n = Math.max(1, Math.floor(all.length / ratio));
@@ -15149,7 +15188,8 @@ async function geminiTranscribeWav(b64, vocab, apiKey, opt) {
   var _a, _b, _c, _d, _e;
   opt = opt || {};
   const hint = (vocab || []).join(", ");
-  const prompt = (opt.nbest ? "[출력 형식] 들린 말의 받아쓰기 후보를 가능성 높은 순서로 최대 3줄 출력하세요(한 줄에 하나, 번호·설명 없이). 확실하면 1줄만.\n" : "") + "이 오디오는 한국의 농산물(쌈채소) 판매 사장님이 주문관리 앱에 대고 말한 음성입니다. 들리는 말을 한국어로 그대로 정확히 받아쓰세요.\n" +
+  const ctxLine = opt.context ? "지금 대화 상황: 조비서가 방금 \"" + String(opt.context).slice(0, 120) + "\"라고 물었고, 사장님이 그 대답을 말한 음성입니다.\n" : "";
+  const prompt = ctxLine + (opt.nbest ? "[출력 형식] 들린 말의 받아쓰기 후보를 가능성 높은 순서로 최대 3줄 출력하세요(한 줄에 하나, 번호·설명 없이). 확실하면 1줄만.\n" : "") + "이 오디오는 한국의 농산물(쌈채소) 판매 사장님이 주문관리 앱에 대고 말한 음성입니다. 들리는 말을 한국어로 그대로 정확히 받아쓰세요.\n" +
     "규칙: 받아쓴 문장만 출력(설명·따옴표·번역·마침표 추가 금지). 말이 없거나 잡음뿐이면 아무것도 출력하지 마세요. 들리지 않는 말을 지어내지 마세요. 이름 목록에서 임의로 골라 적지 마세요(실제로 그 이름을 말한 경우만 적기). 발음이 확실히 비슷하지 않으면 목록의 이름으로 바꾸지 말고 들린 그대로 적으세요(예: '채소'를 다른 상품·업체 이름으로 바꾸지 않기). 숫자와 단위(키로·박스·개)는 빠뜨리지 마세요. 짧게 말했으면 짧게만 적고, 말하지 않은 상품·이름·수량을 덧붙이지 마세요.\n" +
     "숫자·수량은 말한 그대로(예: 두 박스, 3키로). 아래는 자주 나오는 업체·고객·상품 이름입니다. 발음이 비슷하게 들리면 이 표기를 쓰되, 이 목록에 없는 말은 들린 대로 적으세요.\n" +
     "이름 목록: " + hint + "\n자주 쓰는 말: 주문, 발송, 입금대기, 결제완료, 발송준비, 박스, 키로, 업체, 고객, 취소, 등록, 목록, 보여줘";
