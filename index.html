@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 265;
+const APP_VERSION = 266;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2386,7 +2386,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v265 (지어낸 받아쓰기 거르기·주문 바꾸는 음성 명령은 확인 후 실행·상품+수량은 주문으로)";
+const APP_BUILD = "v266 (상품·업체 이름이 조금 달라도 후보 제시·못 알아들은 말 안내)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8097,7 +8097,7 @@ null       : \uC774\uB3D9 \uBD88\uD544\uC694\uD55C \uC77C\uBC18 \uB300\uD654
   const stripped = cleaned.replace(/^[^{]*\{/, "").replace(/["']?\s*text\s*["']?\s*:\s*["']?/i, "").replace(/["']?\s*,?\s*["']?action["']?\s*:[\s\S]*$/i, "").replace(/[{}"]/g, "").trim();
   return { text: stripped || "\uB2E4\uC2DC \uB9D0\uC500\uD574 \uC8FC\uC138\uC694.", action: null };
 }
-// ===== VO2: 대화형 음성 주문 엔진 (v263) =====
+// ===== VO2: 대화형 음성 주문 엔진 (v266) =====
 // 말 → 정규화 → 의도/항목 추출 → 등록된 DB(상품·고객·업체·지점)에서 후보 검색 → 현재 주문 상태에 '바뀐 것만' 반영 → 답변
 // 주문 상태는 문자열이 아니라 구조화된 객체로 관리하고, 애매하면 추측하지 않고 질문함.
 var VO2 = (function () {
@@ -8545,7 +8545,8 @@ var VO2 = (function () {
             cos.forEach(function (c) {
               c.aliases.forEach(function (a) {
                 if (a.length < 3) return;
-                var s = a.indexOf(w1) === 0 && w1.length >= 4 ? 0.9 : sim(w1, a);
+                // 들린 말이 등록 이름을 품고 있거나("하레하레베이커리카페"⊃"하레하레"), 등록 이름의 앞부분이면 같은 업체로 봄
+                var s = a.indexOf(w1) === 0 && w1.length >= 4 ? 0.9 : L === 1 && w1.indexOf(a) === 0 && a.length >= 3 && a.length >= w1.length * 0.4 && !/점/.test(w1.slice(a.length)) ? 0.86 : sim(w1, a);
                 if (s >= 0.78 && (!bestC.has(c) || s > bestC.get(c))) bestC.set(c, s);
               });
             });
@@ -9342,7 +9343,7 @@ var VO2 = (function () {
   }
 
   // ---------- 상품 ----------
-  var ITEM_STOP = /^(아니|아니요|아니야|아냐|그거|그것|그건|이거|방금|아까|마지막|그|저|바꿔|바꿔줘|변경|변경해|수정|해|해줘|줘|주세요|로|으로|말고|아니고|아니라|더|빼|빼줘|추가|추가해|추가해줘|야|이야|요|만|씩|각|박스|개|정도|쯤|최소|최대|이상|이하|내가|라고|했잖아|했어|할게|할께|해요|하고|하나|넣어|넣어줘|담아|담아줘|주문|주문해|좀|다시|그리고|또|네|응|예|좋아|대신|각각|전부|모두|다|상품|물건|품목|것|거|건|그상품|아까그)$/;
+  var ITEM_STOP = /^(넣을게|넣을께|넣을게요|넣을께요|넣어요|등록해|등록해줘|등록|주문넣을게|해줘요|할게요|할께요|부탁해|부탁해요|아니|아니요|아니야|아냐|그거|그것|그건|이거|방금|아까|마지막|그|저|바꿔|바꿔줘|변경|변경해|수정|해|해줘|줘|주세요|로|으로|말고|아니고|아니라|더|빼|빼줘|추가|추가해|추가해줘|야|이야|요|만|씩|각|박스|개|정도|쯤|최소|최대|이상|이하|내가|라고|했잖아|했어|할게|할께|해요|하고|하나|넣어|넣어줘|담아|담아줘|주문|주문해|좀|다시|그리고|또|네|응|예|좋아|대신|각각|전부|모두|다|상품|물건|품목|것|거|건|그상품|아까그)$/;
   function findItem(st, baseNS) { return st.items.find(function (it) { return it.baseNS === baseNS; }) || null; }
   function addOrMergeItem(st, add, R, logChange, idx) {
     var ex = st.items.find(function (it) { return it.productId && it.productId === add.productId; });
@@ -9516,6 +9517,18 @@ var VO2 = (function () {
       var STOP = ITEM_STOP;
       var unknown = tokensOf(c).filter(function (tk) { return !isQtyTok(tk); }).map(stripParticles).filter(function (w) { return w.length >= 2 && !STOP.test(w) && !/(바꿔|변경|해줘|주세요|했잖아|라고|으로|이야|한|했던|하던|했던거|말한거)$/.test(w); });
       if (unknown.length) {
+        var uw = unknown[0];
+        var keysP = Object.keys(idx.groups);
+        var contP = keysP.filter(function (k) { return uw.length >= 2 && k.indexOf(uw) >= 0; });
+        var closeP = keysP.map(function (k) { return { k: k, s: sim(uw, k) }; }).filter(function (x) { return x.s >= 0.55; }).sort(function (a, b) { return b.s - a.s; }).map(function (x) { return x.k; });
+        var sugg = contP.concat(closeP.filter(function (k) { return contP.indexOf(k) < 0; })).slice(0, 4);
+        if (sugg.length) {
+          var qq = qtys.filter(function (q) { return q.kind === "count"; });
+          var wq0 = qtys.filter(function (q) { return q.kind === "weight" && !q.cond; });
+          var addU = { quantity: qq.length ? qq[qq.length - 1].value : 1, quantityUnit: qq.length ? qq[qq.length - 1].unit : "개", countGiven: !!qq.length, wantGrams: wq0.length ? wq0[0].grams : null };
+          queueAsk(st, R, { type: "productPick", options: sugg, add: addU }, "'" + uw + "'(이)라는 상품은 등록돼 있지 않아요. " + (sugg.length === 1 ? idx.groups[sugg[0]].base + " 말씀이세요?" : sugg.map(function (b, i) { return (i + 1) + "번 " + idx.groups[b].base; }).join(", ") + " 중에 있나요?"));
+          return;
+        }
         R.notes.push("'" + unknown.join(" ") + "'은(는) 등록된 상품에서 찾지 못했어요. 상품 이름을 다시 말씀해 주세요.");
         return;
       }
@@ -11692,7 +11705,15 @@ function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setS
     if (r.confirmed) { vo2Say(text, vo2Commit(r)); return; }
     if (!r.understood) {
       try { addProblemLog(text, "(음성주문) 못 알아들음", "fail", snapshotTurns(text, "")); } catch (e) {}
-      vo2Say(text, "잘 못 알아들었어요. 예를 들어 '적상추 4박스', '받는 사람 홍길동', '그대로 주문해'처럼 말씀해 주세요.");
+      // v266: 무엇을 못 알아들었는지와 비슷한 등록 이름을 알려 줌
+      let _hint = "";
+      try {
+        const _an = VO2.analyze(text, db, prevState);
+        const _u = (_an.unknown || []).filter((u) => u.closest && u.closest.length);
+        if (_u.length) _hint = "'" + _u[0].word + "'은(는) 등록된 이름에서 못 찾았어요. 비슷한 이름: " + _u[0].closest.map((c) => c.name + "(" + c.kind + ")").join(", ") + ". 맞는 이름으로 다시 말씀해 주세요.";
+        else if ((_an.unknown || []).length) _hint = "'" + _an.unknown.map((u) => u.word).join(", ") + "'은(는) 등록된 상품·업체·고객 이름에 없어요. 다시 말씀해 주세요.";
+      } catch (e) {}
+      vo2Say(text, _hint || "잘 못 알아들었어요. 예를 들어 '적상추 4박스', '받는 사람 홍길동', '그대로 주문해'처럼 말씀해 주세요.");
       return;
     }
     vo2Say(text, r.reply || "네.");
