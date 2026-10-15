@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 271;
+const APP_VERSION = 272;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -71,8 +71,32 @@ function fmtPhoneKo(p) {
   if (!d) return raw;
   if (/^01[016789]\d{7,8}$/.test(d)) return d.length === 11 ? d.slice(0, 3) + "-" + d.slice(3, 7) + "-" + d.slice(7) : d.slice(0, 3) + "-" + d.slice(3, 6) + "-" + d.slice(6);
   if (/^02\d{7,8}$/.test(d)) return d.length === 10 ? "02-" + d.slice(2, 6) + "-" + d.slice(6) : "02-" + d.slice(2, 5) + "-" + d.slice(5);
+  if (/^050\d{9}$/.test(d)) return d.slice(0, 4) + "-" + d.slice(4, 8) + "-" + d.slice(8);
+  if (/^1[5-9]\d{6}$/.test(d)) return d.slice(0, 4) + "-" + d.slice(4);
   if (/^0[3-6]\d{8,9}$/.test(d)) return d.length === 11 ? d.slice(0, 3) + "-" + d.slice(3, 7) + "-" + d.slice(7) : d.slice(0, 3) + "-" + d.slice(3, 6) + "-" + d.slice(6);
   return raw;
+}
+// v272: 주문 검색 — 띄어쓰기·하이픈과 상관없이 이름·전화·상품으로 찾기 ("김 남숙"=김남숙, 01025964571=010-2596-4571)
+function orderMatchesQuery(o, query, customerMap, itemsTextFn) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return true;
+  const qNS = q.replace(/\s/g, "");
+  const qD = q.replace(/[^0-9]/g, "");
+  const onlyDigits = /^[0-9\-\s]+$/.test(q);
+  const c = customerMap && o && customerMap[o.customerId];
+  const r = (o && o.recipient) || {}, sd = (o && o.sender) || {};
+  const names = [r.name, c && c.name, sd.name, o && o.name].filter(Boolean).map((x) => String(x).toLowerCase().replace(/\s/g, ""));
+  if (!onlyDigits && names.some((n) => n.includes(qNS))) return true;
+  if (qD.length >= 3) {
+    const phones = [r.phone, c && c.phone, sd.phone].filter(Boolean).map((x) => String(x).replace(/[^0-9]/g, ""));
+    if (phones.some((ph) => ph.includes(qD))) return true;
+  }
+  if (onlyDigits) return false;
+  let items = "";
+  try { items = (itemsTextFn ? itemsTextFn(o) : (o.items || []).map((it) => it && it.name || "").join(" ")) || ""; } catch (e) {}
+  if (items.toLowerCase().replace(/\s/g, "").includes(qNS)) return true;
+  const addr = String(r.address || (c && c.address) || "").toLowerCase().replace(/\s/g, "");
+  return qNS.length >= 2 && addr.includes(qNS);
 }
 // v241: 글자 수(UTF-8) 어림 계산 — 한글은 3바이트
 function utf8Len(s) {
@@ -2386,7 +2410,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v271 (녹음 대본으로 보강: 빨리 말해 줄어든 말 되살리기·오인식 사전 추가·묶음+확정 한 번에)";
+const APP_BUILD = "v272 (검색: 띄어쓰기·하이픈 무시, 필터에 가린 주문 안내, 비슷한 이름 구분 / 고객 이름·전화 형식 정리, 안심번호 중복 합치기)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -18289,16 +18313,8 @@ function App() {
     const shippedDateStr = (o.shippedAt || o.createdAt || "").slice(0, 10);
     return !shippedDateStr || shippedDateStr >= threeDaysAgoStr;
   }).filter((o) => {
-    var _a, _b, _c, _d;
     if (!searchQuery.trim()) return true;
-    const q = searchQuery.trim().toLowerCase();
-    const c = customerMap[o.customerId];
-    const name = ((_a = o.recipient) == null ? void 0 : _a.name) || (c ? c.name : "") || "";
-    const senderName = ((_b = o.sender) == null ? void 0 : _b.name) || "";
-    const phone = ((_c = o.recipient) == null ? void 0 : _c.phone) || (c ? c.phone : "") || "";
-    const senderPhone = ((_d = o.sender) == null ? void 0 : _d.phone) || "";
-    const productNames = orderItemsText2(o);
-    return [name, senderName, phone, senderPhone, productNames].some((v) => v.toLowerCase().includes(q));
+    return orderMatchesQuery(o, searchQuery, customerMap, orderItemsText2);
   }).sort((a, b) => {
     if (isOrderSearching) {
       const scoreOf = (o) => {
@@ -18322,6 +18338,12 @@ function App() {
     }
     return a.createdAt < b.createdAt ? 1 : -1;
   });
+  // v272: 검색 중인데 상태·날짜·주문수단 필터 때문에 안 보이는 주문 수 (화면에 "전체에서 보기" 안내)
+  const searchHiddenCount = (() => {
+    if (!isOrderSearching) return 0;
+    if (statusFilter === "all" && (!dateFilter || dateFilter === "all") && methodFilter === "all") return 0;
+    try { return Math.max(0, orders.filter((o) => orderMatchesQuery(o, searchQuery, customerMap, orderItemsText2)).length - filteredOrders.length); } catch (e) { return 0; }
+  })();
   const counts = (() => {
     const reg = orders;
     return {
@@ -19674,6 +19696,29 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     }
   }
 
+  // v272: 고객 이름·전화번호 '형식'만 정리 (지우지 않음): "김 민숙"→"김민숙", "01044632612"→"010-4463-2612"
+  function tidyCustomerFormats() {
+    const fixName = (n) => { const t = String(n || "").trim().replace(/\s+/g, " "); return /^[가-힣]{1,2} [가-힣]{1,3}$/.test(t) ? t.replace(/\s/g, "") : t; };
+    const changes = [];
+    customers.forEach((c) => {
+      const nn = fixName(c.name);
+      const np = c.phone ? fmtPhoneKo(c.phone) : c.phone;
+      if (nn !== (c.name || "") || (np || "") !== (c.phone || "")) changes.push({ id: c.id, from: c, nn, np });
+    });
+    if (!changes.length) { fireToast("정리할 이름·전화번호 형식이 없어요"); return; }
+    const nameN = changes.filter((x) => x.nn !== (x.from.name || "")).length;
+    const phN = changes.filter((x) => (x.np || "") !== (x.from.phone || "")).length;
+    const ex = changes.slice(0, 4).map((x) => (x.from.name || "") + " " + (x.from.phone || "") + " → " + x.nn + " " + (x.np || "")).join("\n");
+    askConfirm(
+      "고객 이름·전화번호 형식 정리\n\n· 이름 띄어쓰기: " + nameN + "명\n· 전화번호 하이픈: " + phN + "명\n\n예)\n" + ex + "\n\n고객을 지우지 않고 글자 형식만 고쳐요.",
+      () => {
+        const m = new Map(changes.map((x) => [x.id, x]));
+        setCustomers((prev) => prev.map((c) => { const x = m.get(c.id); return x ? __spreadProps(__spreadValues({}, c), { name: x.nn, phone: x.np }) : c; }));
+        fireToast("✅ 고객 " + changes.length + "명의 이름·전화번호 형식을 정리했어요");
+      },
+      "정리하기"
+    );
+  }
   function mergeDuplicateCustomers() {
     const digitsOf = (p) => String(p || "").replace(/[^0-9]/g, "");
     // 이름 정규화: 마스킹·호칭·별명·괄호 제거
@@ -19710,6 +19755,20 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       }
     });
 
+    // v272: 쇼핑몰 안심번호(0502·0504 등)는 주문마다 바뀌어서 같은 분이 여러 명으로 등록됨 → 이름과 주소가 똑같으면 같은 분으로 봄
+    const addrKey = (a) => String(a || "").replace(/\(발송인[^)]*\)/g, "").replace(/[\s,.\-()]/g, "").toLowerCase();
+    const pool = singleGroups.map((g) => g[0]).concat(noPhoneList);
+    const byNA = {};
+    pool.forEach((c) => { const nn = normName(c.name), ak = addrKey(c.address); if (nn && ak.length >= 8) (byNA[nn + "|" + ak] = byNA[nn + "|" + ak] || []).push(c); });
+    const naGroups = Object.values(byNA).filter((g) => g.length > 1);
+    const inNA = new Set([].concat(...naGroups).map((c) => c.id));
+    if (naGroups.length) {
+      const keepSingles = singleGroups.filter((g) => !inNA.has(g[0].id));
+      singleGroups.splice(0, singleGroups.length, ...keepSingles);
+      const keepNoPhone = noPhoneList.filter((c) => !inNA.has(c.id));
+      noPhoneList.splice(0, noPhoneList.length, ...keepNoPhone);
+      safeGroups.push(...naGroups);
+    }
     const safeRemove = safeGroups.reduce((s, g) => s + g.length - 1, 0);
     const reviewRemove = reviewGroups.reduce((s, g) => s + g.length - 1, 0);
     const skipRemove = skipGroups.reduce((s, g) => s + g.length - 1, 0);
@@ -19723,7 +19782,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
 
     askConfirm(
       `\uC911\uBCF5 \uACE0\uAC1D \uC815\uB9AC\n\n` +
-      `\u2460 \uC548\uC804 (\uAC19\uC740 \uC774\uB984): ${safeGroups.length}\uADF8\uB8F9 ${safeRemove}\uBA85 \uC81C\uAC70\n` +
+      `\u2460 \uC548\uC804 (\uAC19\uC740 \uC774\uB984): ${safeGroups.length}\uADF8\uB8F9 ${safeRemove}\uBA85 \uC81C\uAC70` + (naGroups.length ? ` (\uADF8\uC911 \uC548\uC2EC\uBC88\uD638\uB85C \uBC88\uD638\uB9CC \uB2E4\uB978 \uAC19\uC740 \uC774\uB984\xB7\uC8FC\uC18C ${naGroups.length}\uADF8\uB8F9)` : "") + `\n` +
       `\u2461 \uD655\uC778 \uD6C4 (\uBE44\uC2B7\uD55C \uC774\uB984): ${reviewGroups.length}\uADF8\uB8F9 ${reviewRemove}\uBA85 \uC81C\uAC70\n` +
       `\u2462 \uAC74\uB108\uB700 (\uB2E4\uB978 \uC774\uB984 \uACF5\uC720\uD3F0): ${skipGroups.length}\uADF8\uB8F9\n\n` +
       `${customers.length}\uBA85 \u2192 ${afterCount}\uBA85\uC73C\uB85C \uC815\uB9AC\uD569\uB2C8\uB2E4.\n` +
@@ -21374,6 +21433,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         setSearchQuery,
         counts,
         orders: filteredOrders,
+        searchHiddenCount,
         onExportFiltered: exportFilteredOrders,
         customers,
         vendors,
@@ -21533,6 +21593,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         askConfirm,
         backfillMissingCustomers,
         mergeDuplicateCustomers,
+        tidyCustomerFormats,
         removeInactiveCustomers
       }
     ), tab === "linkfarm" && /* @__PURE__ */ React.createElement(LinkFarmTab, { fireToast }), tab === "subscriptions" && /* @__PURE__ */ React.createElement(
@@ -24418,6 +24479,7 @@ function GuideTab({ onBack }) {
     {
       title: "5. \uACE0\uAC1D \uAD00\uB9AC",
       items: [
+        { h: "검색이 안 될 때 / 고객 정보 정리", b: "검색은 띄어쓰기와 하이픈을 무시해요('김민숙'으로 '김 민숙'도, 01025964571로 010-2596-4571도 찾아요). 주문 탭에서 상태·날짜를 골라 둔 채 검색하면 가려진 주문 수가 주황색 줄로 나오고, 누르면 전체에서 보여줘요. 이름이 비슷하기만 한 고객은 '비슷한 이름' 표시가 붙어요. 고객 탭의 '✏️ 이름·전화번호 형식 정리'는 '김 민숙'→'김민숙', '01044632612'→'010-4463-2612'처럼 글자 형식만 고쳐요(지우지 않음). '🧹 중복 고객 정리'는 쇼핑몰 안심번호(0502 등)로 번호만 다르고 이름·주소가 같은 분도 한 분으로 합쳐요." },
         { h: "\uACE0\uAC1D \uB4F1\uB85D / \uC218\uC815 / \uC0AD\uC81C", b: '\uACE0\uAC1D \uD0ED\uC5D0\uC11C \uC774\uB984\xB7\uC804\uD654\uBC88\uD638\xB7\uC8FC\uC18C\xB7\uBA54\uBAA8\uB97C \uC785\uB825\uD574 \uB4F1\uB85D\uD558\uACE0, \uAC01 \uACE0\uAC1D \uC606 "\uC218\uC815"\uC73C\uB85C \uC815\uBCF4\uB97C \uACE0\uCE58\uAC70\uB098 "\uC0AD\uC81C"\uD560 \uC218 \uC788\uC5B4\uC694. \uC8FC\uC18C\uB97C \uC785\uB825\uD558\uBA74 \uC6B0\uD3B8\uBC88\uD638\uAC00 \uC790\uB3D9\uC73C\uB85C \uCC44\uC6CC\uC838\uC694.' },
         { h: "\uC5D1\uC140 \uB2E4\uC6B4\uB85C\uB4DC / \uC5C5\uB85C\uB4DC", b: '"\uC804\uCCB4 \uB2E4\uC6B4\uB85C\uB4DC"\uB85C \uACE0\uAC1D \uBA85\uB2E8\uC744 \uC5D1\uC140\uB85C \uBC1B\uACE0, "\uC5C5\uB85C\uB4DC"\uB85C \uC5D1\uC140 \uD30C\uC77C\uC744 \uC62C\uB9AC\uBA74 \uAC19\uC740 \uC774\uB984\uC758 \uACE0\uAC1D\uC740 \uC815\uBCF4\uAC00 \uAC31\uC2E0\uB418\uACE0 \uC0C8 \uC774\uB984\uC740 \uCD94\uAC00\uB3FC\uC694. \uB2E4\uC6B4\uB85C\uB4DC \uD30C\uC77C\uC5D0\uB294 \uCD5C\uADFC1\uB144\xB7\uCD5C\uADFC\uD55C\uB2EC \uC8FC\uBB38\uD69F\uC218\uC640 \uB2E8\uACE8\uC5EC\uBD80\uB3C4 \uAC19\uC774 \uB098\uC640\uC694.' },
         { h: "\uB2E8\uACE8 \uACE0\uAC1D (\uC790\uB3D9 + \uC218\uB3D9)", b: '\uCD5C\uADFC 1\uB144\uAC04 10\uD68C \uC774\uC0C1, \uB610\uB294 \uCD5C\uADFC \uD55C \uB2EC \uC548\uC5D0 4\uD68C \uC774\uC0C1(\uC8FC 1\uD68C \uD398\uC774\uC2A4) \uC8FC\uBB38\uD55C \uACE0\uAC1D\uC740 "\u2B50 \uB2E8\uACE8"\uB85C \uC790\uB3D9 \uD45C\uC2DC\uB3FC\uC694. \uAC01 \uACE0\uAC1D \uCE74\uB4DC\uC758 "\uB2E8\uACE8\uB85C \uC9C0\uC815"/"\uB2E8\uACE8 \uD574\uC81C"\uB85C \uC9C1\uC811 \uC870\uC815\uD560 \uC218\uB3C4 \uC788\uACE0, \uD55C\uBC88 \uC218\uB3D9\uC73C\uB85C \uC815\uD558\uBA74 \uADF8 \uC124\uC815\uC774 \uC6B0\uC120\uB3FC\uC694.' },
@@ -24522,6 +24584,7 @@ function LinkFarmTab({ fireToast }) {
   return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", { style: { fontSize: 19, fontWeight: 700, margin: "2px 0 14px", letterSpacing: "-0.02em" } }, "\uB9C1\uD06C\uD31C"), /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", border: "1px solid #E2E4DD", borderRadius: 14, padding: "40px 20px", textAlign: "center" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, color: "#5F5E5A", marginBottom: 10 } }, "\uB098\uB9CC\uC758 \uC8FC\uBB38 \uB9C1\uD06C \uD398\uC774\uC9C0\uB97C \uB9CC\uB4DC\uB294 \uAE30\uB2A5\uC740 \uC900\uBE44\uC911\uC785\uB2C8\uB2E4."), /* @__PURE__ */ React.createElement("button", { onClick: () => fireToast("\uB9C1\uD06C\uD31C \uAE30\uB2A5\uC740 \uC900\uBE44\uC911\uC785\uB2C8\uB2E4"), style: { padding: "8px 16px", borderRadius: 8, border: "1px solid #2F6F4E", background: "#fff", color: "#27500A", fontWeight: 700, fontSize: 12, cursor: "pointer" } }, "\uC54C\uB9BC \uBC1B\uAE30")));
 }
 function OrdersTab({
+  searchHiddenCount,
   statusFilter,
   setStatusFilter,
   methodFilter,
@@ -24568,11 +24631,17 @@ function OrdersTab({
     if (!q) return [];
     const qNS = q.replace(/\s/g, "");
     const qNum = q.replace(/-/g, "");
-    const hit = (x) => {
+    // v272: 이름(띄어쓰기 무시)·전화(하이픈 무시)·주소·메모가 실제로 맞는 것을 먼저, '비슷한 이름'은 아주 비슷할 때만 뒤에 따로 표시
+    const qDig = q.replace(/[^0-9]/g, "");
+    const exactHit = (x) => {
       const nameNS = (x.name || "").toLowerCase().replace(/\s/g, "");
-      return (x.name || "").toLowerCase().includes(q) || qNS.length >= 2 && typeof simJamo === "function" && simJamo(nameNS, qNS) >= 0.5 || // ★ v129: 비슷한 이름도 후보로
-      (x.phone || "").replace(/-/g, "").includes(qNum) || (x.address || "").toLowerCase().includes(q) || (x.memo || "").toLowerCase().includes(q);
+      return nameNS.includes(qNS) || qDig.length >= 3 && (x.phone || "").replace(/[^0-9]/g, "").includes(qDig) || qNS.length >= 2 && (x.address || "").toLowerCase().replace(/\s/g, "").includes(qNS) || (x.memo || "").toLowerCase().includes(q);
     };
+    const simOf = (x) => qNS.length >= 2 && typeof simJamo === "function" && !/^[0-9\-\s]+$/.test(q) ? simJamo((x.name || "").toLowerCase().replace(/\s/g, ""), qNS) : 0;
+    const allC = [...(vendors || []).map((v) => [v, "vendor"]), ...(customers || []).map((c) => [c, "customer"])];
+    const anyExact = allC.some(([x]) => exactHit(x));
+    const simTh = anyExact ? 0.75 : 0.6;
+    const hit = (x) => exactHit(x) || simOf(x) >= simTh;
     const score = (x) => {
       const name = (x.name || "").toLowerCase();
       const nameNS = name.replace(/\s/g, "");
@@ -24584,9 +24653,11 @@ function OrdersTab({
       if (qNum.length >= 3 && phoneNS.includes(qNum)) return 300;
       return 100;
     };
-    const cs = (customers || []).filter(hit).map((c) => __spreadProps(__spreadValues({}, c), { _kind: "customer" }));
-    const vs = (vendors || []).filter(hit).map((v) => __spreadProps(__spreadValues({}, v), { _kind: "vendor" }));
-    return [...vs, ...cs].map((x) => ({ x, s: score(x) })).sort((a, b) => b.s - a.s || (a.x._kind === b.x._kind ? 0 : a.x._kind === "vendor" ? -1 : 1) || String(a.x.name || "").localeCompare(String(b.x.name || ""))).map((e) => e.x).slice(0, 8);
+    const cs = (customers || []).filter(hit).map((c) => __spreadProps(__spreadValues({}, c), { _kind: "customer", _similar: !exactHit(c) }));
+    const vs = (vendors || []).filter(hit).map((v) => __spreadProps(__spreadValues({}, v), { _kind: "vendor", _similar: !exactHit(v) }));
+    const sorted = [...vs, ...cs].map((x) => ({ x, s: score(x) - (x._similar ? 400 : 0) })).sort((a, b) => b.s - a.s || (a.x._kind === b.x._kind ? 0 : a.x._kind === "vendor" ? -1 : 1) || String(a.x.name || "").localeCompare(String(b.x.name || ""))).map((e) => e.x);
+    const ex = sorted.filter((x) => !x._similar), si = sorted.filter((x) => x._similar);
+    return ex.slice(0, 12).concat(si.slice(0, ex.length ? 3 : 6));
   })();
   return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement(
     "button",
@@ -24641,14 +24712,14 @@ function OrdersTab({
       placeholder: "\uC8FC\uBB38\uC790 / \uC5F0\uB77D\uCC98 / \uC0C1\uD488\uBA85 / \uACE0\uAC1D \uAC80\uC0C9",
       style: { flex: 1, border: "none", outline: "none", fontSize: 13 }
     }
-  ), searchQuery && /* @__PURE__ */ React.createElement("button", { onClick: () => setSearchQuery(""), style: { border: "none", background: "none", color: "#888780", fontSize: 13, cursor: "pointer" } }, "\u2715")), searchQuery.trim() && /* @__PURE__ */ React.createElement("div", { style: { background: "#F2F7EE", border: "1px solid #C0DD97", borderRadius: 10, padding: "8px 10px", marginBottom: 10 } }, contactMatches.length > 0 ? /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 700, color: "#27500A", marginBottom: 6 } }, "\uB4F1\uB85D\uB41C \uACE0\uAC1D\xB7\uC5C5\uCCB4 ", contactMatches.length, "\uACF3 \xB7 \uB20C\uB7EC\uC11C \uC0C8 \uC8FC\uBB38 \uC791\uC131"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6 } }, contactMatches.map((c) => /* @__PURE__ */ React.createElement(
+  ), searchQuery && /* @__PURE__ */ React.createElement("button", { onClick: () => setSearchQuery(""), style: { border: "none", background: "none", color: "#888780", fontSize: 13, cursor: "pointer" } }, "\u2715")), searchQuery.trim() && searchHiddenCount > 0 && /* @__PURE__ */ React.createElement("button", { onClick: () => { try { setStatusFilter("all"); } catch (e) {} try { setDateFilter && setDateFilter("all"); } catch (e) {} try { setMethodFilter && setMethodFilter("all"); } catch (e) {} }, style: { width: "100%", textAlign: "left", background: "#FFF6E5", border: "1px solid #F0C27B", color: "#854F0B", borderRadius: 10, padding: "9px 12px", marginBottom: 10, fontSize: 12.5, fontWeight: 700, cursor: "pointer" } }, "\u{1F50E} \uC9C0\uAE08 \uACE8\uB77C \uB454 \uC0C1\uD0DC\xB7\uB0A0\uC9DC \uB54C\uBB38\uC5D0 '", searchQuery.trim(), "' \uC8FC\uBB38 ", searchHiddenCount, "\uAC74\uC774 \uC548 \uBCF4\uC5EC\uC694 \xB7 \uC804\uCCB4\uC5D0\uC11C \uBCF4\uAE30 \u203A"), searchQuery.trim() && /* @__PURE__ */ React.createElement("div", { style: { background: "#F2F7EE", border: "1px solid #C0DD97", borderRadius: 10, padding: "8px 10px", marginBottom: 10 } }, contactMatches.length > 0 ? /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, fontWeight: 700, color: "#27500A", marginBottom: 6 } }, "\uB4F1\uB85D\uB41C \uACE0\uAC1D\xB7\uC5C5\uCCB4 ", contactMatches.length, "\uACF3 \xB7 \uB20C\uB7EC\uC11C \uC0C8 \uC8FC\uBB38 \uC791\uC131"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 6 } }, contactMatches.map((c) => /* @__PURE__ */ React.createElement(
     "button",
     {
       key: c._kind + c.id,
       onClick: () => onPickCustomerForOrder(c),
       style: { display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", textAlign: "left", background: "#fff", border: "1px solid #D7E6C4", borderRadius: 8, padding: "8px 10px", cursor: "pointer" }
     },
-    /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, fontWeight: 700, color: "#1B2430" } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 9.5, fontWeight: 700, color: c._kind === "vendor" ? "#854F0B" : "#2F6F4E", background: c._kind === "vendor" ? "#FAEEDA" : "#EAF3DE", padding: "1px 5px", borderRadius: 6, marginRight: 5 } }, c._kind === "vendor" ? "\uC5C5\uCCB4" : "\uACE0\uAC1D"), c.name, " ", /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 400, color: "#888780", fontSize: 11 } }, c.phone)), c.address && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#888780", marginTop: 1 } }, c.address)),
+    /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, fontWeight: 700, color: "#1B2430" } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 9.5, fontWeight: 700, color: c._kind === "vendor" ? "#854F0B" : "#2F6F4E", background: c._kind === "vendor" ? "#FAEEDA" : "#EAF3DE", padding: "1px 5px", borderRadius: 6, marginRight: 5 } }, c._kind === "vendor" ? "\uC5C5\uCCB4" : "\uACE0\uAC1D"), c.name, c._similar ? /* @__PURE__ */ React.createElement("span", { style: { fontSize: 9.5, fontWeight: 700, color: "#888780", border: "1px solid #D3D1C7", padding: "0 4px", borderRadius: 5, marginLeft: 4 } }, "\uBE44\uC2B7\uD55C \uC774\uB984") : null, " ", /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 400, color: "#888780", fontSize: 11 } }, fmtPhoneKo(c.phone))), c.address && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#888780", marginTop: 1 } }, c.address)),
     /* @__PURE__ */ React.createElement("span", { style: { fontSize: 11, fontWeight: 700, color: "#2F6F4E", flexShrink: 0, marginLeft: 8 } }, "\uC8FC\uBB38 \uC791\uC131 \u203A")
   ))), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#888780", marginTop: 8, paddingTop: 8, borderTop: "1px dashed #C0DD97" } }, "\uCC3E\uB294 \uBD84\uC774 \uC5C6\uB098\uC694?")) : /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11.5, fontWeight: 700, color: "#854F0B", marginBottom: 8 } }, '"', searchQuery.trim(), '" \u2014 \uB4F1\uB85D\uB41C \uACE0\uAC1D\xB7\uC5C5\uCCB4\uC5D0 \uC5C6\uC5B4\uC694. \uC2E0\uADDC\uB85C \uBCFC\uAC8C\uC694.'), onNewNameOrder && /* @__PURE__ */ React.createElement(
     "button",
@@ -26832,7 +26903,7 @@ function CustomerAvatar({ name }) {
   const idx = ((name == null ? void 0 : name.charCodeAt(0)) || 0) % AVATAR_COLORS.length;
   return /* @__PURE__ */ React.createElement("div", { style: { width: 38, height: 38, borderRadius: "50%", background: AVATAR_COLORS[idx], display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 } }, /* @__PURE__ */ React.createElement("span", { style: { fontSize: 14, fontWeight: 700, color: "#fff" } }, name ? name[0] : "?"));
 }
-function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, removeCustomer, removeCustomersMulti, updateCustomer, orders, subscriptions, exportCustomersExcel, customerInputRef, handleCustomerUpload, askConfirm, backfillMissingCustomers, mergeDuplicateCustomers, removeInactiveCustomers, onMoveToVendor }) {
+function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, removeCustomer, removeCustomersMulti, updateCustomer, orders, subscriptions, exportCustomersExcel, customerInputRef, handleCustomerUpload, askConfirm, backfillMissingCustomers, mergeDuplicateCustomers, tidyCustomerFormats, removeInactiveCustomers, onMoveToVendor }) {
   const [searchQuery, setSearchQuery] = useState("");
   const [checkedIds, setCheckedIds] = useState(/* @__PURE__ */ new Set());
   function toggleChecked(id) {
@@ -26866,8 +26937,13 @@ function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, rem
         }
         return s;
       };
+      // v272: 띄어쓰기·하이픈 무시하고 정확히 맞는 고객 먼저. '비슷한 이름'은 아주 비슷할 때만(정확한 결과가 없으면 조금 넓게)
+      const qNS2 = q.replace(/\s/g, ""), qDig2 = q.replace(/[^0-9]/g, ""), digitsOnly = /^[0-9\-\s]+$/.test(q);
+      const exact = (c) => (!digitsOnly && (c.name || "").toLowerCase().replace(/\s/g, "").includes(qNS2)) || qDig2.length >= 3 && (c.phone || "").replace(/[^0-9]/g, "").includes(qDig2) || (!digitsOnly && qNS2.length >= 2 && (c.address || "").toLowerCase().replace(/\s/g, "").includes(qNS2)) || (!digitsOnly && (c.memo || "").toLowerCase().includes(q));
+      const anyEx = list.some(exact);
+      const th = anyEx ? 0.75 : 0.6;
       list = list.filter(
-        (c) => (c.name || "").toLowerCase().includes(q) || qNum.length >= 2 && typeof simJamo === "function" && simJamo((c.name || "").replace(/\s/g, ""), q.replace(/\s/g, "")) >= 0.5 || (c.phone || "").replace(/-/g, "").includes(qNum) || (c.address || "").toLowerCase().includes(q) || (c.memo || "").toLowerCase().includes(q)
+        (c) => exact(c) || !digitsOnly && qNS2.length >= 2 && typeof simJamo === "function" && simJamo((c.name || "").toLowerCase().replace(/\s/g, ""), qNS2) >= th
       );
       list = [...list].sort((a, b) => cscore(b) - cscore(a) || compareByName(a, b));
     } else {
@@ -26891,7 +26967,7 @@ function CustomersTab({ customers, newCustomer, setNewCustomer, addCustomer, rem
   return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", { style: { fontSize: 19, fontWeight: 700, margin: "2px 0 14px", letterSpacing: "-0.02em" } }, "\uACE0\uAC1D"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, color: "#5F5E5A", fontWeight: 600, margin: "-8px 0 12px" } }, "\uC804\uCCB4 \uACE0\uAC1D ", customers.length, "\uBA85"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 10 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => exportCustomersExcel(), style: toolBtnStyle("#2F6F4E") }, "\uC804\uCCB4 \uB2E4\uC6B4\uB85C\uB4DC"), /* @__PURE__ */ React.createElement("button", { onClick: () => {
     var _a;
     return (_a = customerInputRef.current) == null ? void 0 : _a.click();
-  }, style: toolBtnStyle("#185FA5") }, "\uC5C5\uB85C\uB4DC"), /* @__PURE__ */ React.createElement("input", { ref: customerInputRef, type: "file", accept: ".xlsx,.xls,.csv", multiple: true, onChange: handleCustomerUpload, style: { display: "none" } })), /* @__PURE__ */ React.createElement("button", { onClick: backfillMissingCustomers, style: { width: "100%", padding: "10px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12.5, cursor: "pointer", marginBottom: 16 } }, "\uACFC\uAC70 \uC8FC\uBB38\uC5D0\uC11C \uBE60\uC9C4 \uACE0\uAC1D \uCC44\uC6B0\uAE30"), /* @__PURE__ */ React.createElement("button", { onClick: mergeDuplicateCustomers, style: { width: "100%", padding: "10px 0", borderRadius: 8, border: "1px solid #854F0B", background: "#fff", color: "#854F0B", fontWeight: 700, fontSize: 12.5, cursor: "pointer", marginBottom: 8 } }, "\uD83E\uDDF9 \uC911\uBCF5 \uACE0\uAC1D \uC815\uB9AC (\uAC19\uC740 \uBD84 \uD569\uCE58\uAE30)"),
+  }, style: toolBtnStyle("#185FA5") }, "\uC5C5\uB85C\uB4DC"), /* @__PURE__ */ React.createElement("input", { ref: customerInputRef, type: "file", accept: ".xlsx,.xls,.csv", multiple: true, onChange: handleCustomerUpload, style: { display: "none" } })), /* @__PURE__ */ React.createElement("button", { onClick: backfillMissingCustomers, style: { width: "100%", padding: "10px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12.5, cursor: "pointer", marginBottom: 16 } }, "\uACFC\uAC70 \uC8FC\uBB38\uC5D0\uC11C \uBE60\uC9C4 \uACE0\uAC1D \uCC44\uC6B0\uAE30"), /* @__PURE__ */ React.createElement("button", { onClick: mergeDuplicateCustomers, style: { width: "100%", padding: "10px 0", borderRadius: 8, border: "1px solid #854F0B", background: "#fff", color: "#854F0B", fontWeight: 700, fontSize: 12.5, cursor: "pointer", marginBottom: 8 } }, "\uD83E\uDDF9 \uC911\uBCF5 \uACE0\uAC1D \uC815\uB9AC (\uAC19\uC740 \uBD84 \uD569\uCE58\uAE30)"), tidyCustomerFormats && /* @__PURE__ */ React.createElement("button", { onClick: tidyCustomerFormats, style: { width: "100%", padding: "10px 0", borderRadius: 8, border: "1px solid #2F6F4E", background: "#fff", color: "#2F6F4E", fontWeight: 700, fontSize: 12.5, cursor: "pointer", marginBottom: 8 } }, "✏️ 이름·전화번호 형식 정리 (김 민숙→김민숙, 하이픈 넣기)"),
 removeInactiveCustomers && /* @__PURE__ */ React.createElement("button", { onClick: removeInactiveCustomers, style: { width: "100%", padding: "10px 0", borderRadius: 8, border: "1px solid #A32D2D", background: "#fff", color: "#A32D2D", fontWeight: 700, fontSize: 12.5, cursor: "pointer", marginBottom: 16 } }, "\uD83D\uDDD1\uFE0F 1\uB144 \uBBF8\uC8FC\uBB38 \uACE0\uAC1D \uC0AD\uC81C"), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11, color: "#888780", margin: "0 0 14px" } }, "\uC5D1\uC140\uC5D0\uB294 \uC774\uB984/\uC804\uD654\uBC88\uD638/\uC6B0\uD3B8\uBC88\uD638/\uC8FC\uC18C/\uBA54\uBAA8\uC640 \uD568\uAED8 \uC815\uAE30\uBC30\uC1A1 \uC5EC\uBD80\xB7\uC9C4\uD589\uD68C\uCC28\xB7\uB0A8\uC740\uD68C\uC218\uAC00 \uD3EC\uD568\uB3FC\uC694."), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 } }, /* @__PURE__ */ React.createElement("input", { placeholder: "\uC774\uB984", value: newCustomer.name, onChange: (e) => setNewCustomer(__spreadProps(__spreadValues({}, newCustomer), { name: e.target.value })), style: inputStyle() }), /* @__PURE__ */ React.createElement("input", { placeholder: "\uC804\uD654\uBC88\uD638", value: newCustomer.phone, onChange: (e) => setNewCustomer(__spreadProps(__spreadValues({}, newCustomer), { phone: e.target.value })), style: inputStyle() }), /* @__PURE__ */ React.createElement("input", { placeholder: "\uC8FC\uC18C", value: newCustomer.address, onChange: (e) => setNewCustomer(__spreadProps(__spreadValues({}, newCustomer), { address: e.target.value })), style: inputStyle() }), newCustomer.address.trim() && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#185FA5", padding: "0 2px" } }, "\uC790\uB3D9 \uC785\uB825\uB41C \uC6B0\uD3B8\uBC88\uD638: ", estimatePostalCode(newCustomer.address)), /* @__PURE__ */ React.createElement("input", { placeholder: "\uBA54\uBAA8", value: newCustomer.memo, onChange: (e) => setNewCustomer(__spreadProps(__spreadValues({}, newCustomer), { memo: e.target.value })), style: inputStyle() }), /* @__PURE__ */ React.createElement("button", { onClick: addCustomer, style: addBtnStyle }, "\uACE0\uAC1D \uCD94\uAC00")), /* @__PURE__ */ React.createElement(
     "button",
     {
