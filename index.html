@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 269;
+const APP_VERSION = 270;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2386,7 +2386,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v269 (대화 주문 전용 화면 새로 만듦: 녹음·받아쓰기·주문 처리·대화 기록 한 줄 경로)";
+const APP_BUILD = "v270 (오인식 사전: 기본 사전 124개·자동 생성·말로 등록/삭제·두 번 확인하면 자동 등록·사전 화면)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8278,6 +8278,39 @@ var VO2 = (function () {
     if (noBakery && noBakery.length >= 3 && out.indexOf(noBakery) < 0) out.push(noBakery);
     return out;
   }
+  // ---------- v270: 기본 오인식 사전 ----------
+  // [잘못 들린 말들, 올바른 상품 이름(무게 빼고)] — 사장님 녹음·화면에서 실제로 나온 것 + 자주 틀리는 발음
+  var SEED_PRODUCTS = [
+    [["크스", "크리스", "크리스털벨", "크리스탈밸", "크리스털밸", "크리스탈", "크리스털", "크리스탈벨이", "크스탈", "그리스탈", "크리스타벨"], "크리스탈벨"],
+    [["로인", "로매인", "노메인", "도메인", "로메인상추", "로맨", "로멘", "로메"], "로메인"],
+    [["다청체", "청다체", "청따채", "청다재", "청다채이", "청다치"], "청다채"],
+    [["적다체", "적따채", "적다재", "적다치", "적다채이"], "적다채"],
+    [["적혀자", "적겨장", "적계자", "적거자", "적겨자이", "적가자"], "적겨자"],
+    [["청여자", "청겨장", "청계자", "청거자", "청가자"], "청겨자"],
+    [["토스카", "토스까나", "토스카노", "또스카나", "토스칸"], "토스카나"],
+    [["카이", "카이피", "가이피라", "카이삐라", "카이피아", "카이필라"], "카이피라"],
+    [["바실", "바즐", "바지", "봐질"], "바질"],
+    [["루콜라", "루꼴래", "루꼬라", "누꼴라", "루골라", "루꼴"], "루꼴라"],
+    [["모든쌈채소", "모둠쌈채소", "모듬쌈채", "모듬쌈", "모둠쌈", "모든쌈"], "모듬쌈채소"],
+    [["샐러드야채", "셀러드채소", "샐러드채", "샐럿채소"], "샐러드채소"],
+    [["꽃상치", "꽃상추적치마", "적치마", "꽃상"], "꽃상추/적치마"],
+    [["적상치", "적쌍추", "적상쭈", "적상"], "적상추"],
+    [["청상치", "청쌍추", "청상쭈"], "청상추"],
+    [["곱슬캐일", "곱슬케이", "곱실케일", "꼽슬케일"], "곱슬케일"],
+    [["캐일", "케이", "께일"], "케일"]
+  ];
+  // [잘못 들린 말들, 업체 이름(띄어쓰기 무시)] — 등록된 업체에만 연결
+  var SEED_VENDORS = [
+    [["대설", "데솔", "대쏠", "태솔", "대솔이", "대술"], "대솔"],
+    [["하래하래", "할레할레", "하레하래", "하래하레", "하레하레베이커리", "하래하래베이커리", "하레하레카페", "하레하레빵집", "하레베이커리"], "하레하레베이커리카페"],
+    [["메일소풍", "매일소품", "메일소품", "매일쏘풍", "매일소풍이"], "매일소풍"],
+    [["삼채우리", "쌈채울이", "삼체우리", "쌈재우리"], "쌈채우리"],
+    [["스위트모먼트", "스윗모멘트", "스위트모멘트", "스윗모먼트"], "주식회사스윗모먼트"],
+    [["프랑크버거", "프렝크버거", "프랭크버거집"], "프랭크버거"],
+    [["경희네손칼국수", "경희네칼국수", "경희손칼국수"], "경희네손갈국수"]
+  ];
+  // 자동 생성 별칭으로 쓰지 않을 흔한 말
+  var GEN_STOP = /^(주문|취소|확정|추가|박스|개|키로|그램|하나|두개|세개|그거|이거|저거|아니|네|응|좋아|그래|다시|전부|모두|따로|같이|한번|사람|업체|지점|주소|전화|메모|배송|상추|채소|쌈|이|그|저|것|거|건)$/;
   function buildIndex(db) {
     db = db || {};
     var products = (db.products || []).filter(function (p) { return p && p.name; }).map(function (p) {
@@ -8291,11 +8324,35 @@ var VO2 = (function () {
     products.forEach(function (p) { (groups[p.baseNS] = groups[p.baseNS] || { base: p.base, baseNS: p.baseNS, skus: [] }).skus.push(p); });
     // 상품 별칭: 내장 별칭 + 사장님이 승인한 사전 + 상품 자체의 aliases 필드
     var prodAlias = {};
+    var idxGen = {};
     var addPA = function (from, toBase) { var f = ns(from); if (f.length >= 2 && groups[toBase] && !groups[f]) prodAlias[f] = toBase; };
     var builtIn = db.productAliases || {};
     Object.keys(builtIn).forEach(function (canon) {
       var tb = Object.keys(groups).filter(function (b) { return b === ns(canon) || b.indexOf(ns(canon)) >= 0; });
       if (tb.length === 1) (builtIn[canon] || []).forEach(function (a) { addPA(a, tb[0]); });
+    });
+    // v270: 기본 오인식 사전(SEED) — 실제 받아쓰기에서 나온 잘못 들린 말들. 등록된 상품에만 연결(없는 상품이면 무시)
+    SEED_PRODUCTS.forEach(function (pr) {
+      var tb = Object.keys(groups).filter(function (b) { return b === ns(pr[1]); });
+      if (tb.length === 1) pr[0].forEach(function (a) { if (!prodAlias[ns(a)]) addPA(a, tb[0]); });
+    });
+    // v270: 자동 생성 — 빨리 말해 가운데 글자 하나가 빠지거나 끝 글자가 빠진 말(로메인→로인, 토스카나→토스카, 카이피라→카이피)
+    //       다른 상품 이름과 겹치거나 두 상품에 똑같이 생기는 말, 흔한 낱말은 만들지 않음
+    var genCount = {}, genTo = {};
+    Object.keys(groups).forEach(function (b) {
+      var sy = b.split("");
+      if (sy.length < 3 || !/^[가-힣]+$/.test(b)) return;
+      var vs = [];
+      for (var di = 1; di < sy.length; di++) vs.push(sy.slice(0, di).concat(sy.slice(di + 1)).join(""));
+      vs.forEach(function (v) { if (v.length < 3) return; genCount[v] = (genCount[v] || 0) + 1; genTo[v] = b; });
+    });
+    var allBases = Object.keys(groups);
+    Object.keys(genCount).forEach(function (v) {
+      if (genCount[v] !== 1 || groups[v] || prodAlias[v]) return;
+      if (GEN_STOP.test(v)) return;
+      if (allBases.some(function (b) { return b !== genTo[v] && b.indexOf(v) >= 0; })) return;
+      prodAlias[v] = genTo[v];
+      (idxGen[v] = genTo[v]);
     });
     var learned = db.learnedAliases || {};
     Object.keys(learned).forEach(function (from) {
@@ -8342,6 +8399,18 @@ var VO2 = (function () {
     Object.keys(learned).forEach(function (from) {
       var to = ns(learned[from]);
       if (companies[to] && companies[to].aliases.indexOf(ns(from)) < 0) companies[to].aliases.push(ns(from));
+    });
+    // v270: 기본 업체 오인식 사전
+    SEED_VENDORS.forEach(function (sv) {
+      var to = ns(sv[1]);
+      var co = companies[to];
+      var vend = !co ? vendors.find(function (v) { return ns(v.name) === to; }) : null;
+      sv[0].forEach(function (a) {
+        var f = ns(a);
+        if (companies[f] || vendors.some(function (v) { return ns(v.name) === f; })) return;
+        if (co && co.aliases.indexOf(f) < 0) co.aliases.push(f);
+        else if (vend && vend.aliases.indexOf(f) < 0) vend.aliases.push(f);
+      });
     });
     // 고객
     var custByName = {};
@@ -8399,7 +8468,7 @@ var VO2 = (function () {
       var n = ns((o.recipient && o.recipient.name) || (o.sender && o.sender.name) || "");
       if (n) recent[n] = (recent[n] || 0) + 1;
     });
-    return { products: products, groups: groups, prodAlias: prodAlias, prodAliasMulti: prodAliasMulti, vendors: vendors, companies: companies, customers: customers, custByName: custByName, custAlias: custAlias, aliasLog: aliasLog, weakAlias: weakAlias, recent: recent };
+    return { genAlias: idxGen, products: products, groups: groups, prodAlias: prodAlias, prodAliasMulti: prodAliasMulti, vendors: vendors, companies: companies, customers: customers, custByName: custByName, custAlias: custAlias, aliasLog: aliasLog, weakAlias: weakAlias, recent: recent };
   }
 
   // ---------- 후보 검색 ----------
@@ -8449,6 +8518,8 @@ var VO2 = (function () {
             });
             Object.keys(idx.prodAlias).forEach(function (a) {
               if (Math.abs(a.length - w1.length) > 1) return;
+              // v270: 두 글자짜리 별칭(카이·로인 등)은 정확히 같을 때만 씀 — 비슷하다고 연결하면 "카일"이 카이피라가 됨
+              if (a.length <= 2 || w1.length <= 2) return;
               var s = sim(w1, a) - 0.02;
               var k2 = idx.prodAlias[a];
               if (s >= 0.8 && (!bestBy[k2] || s > bestBy[k2])) bestBy[k2] = s;
@@ -8759,6 +8830,31 @@ var VO2 = (function () {
       }
     }
 
+    // v270: 말로 사전 등록·삭제 ("'크스'는 크리스탈 벨로 기억해", "'크스' 기억 지워")
+    var tch = parseTeach(raw);
+    if (tch) {
+      res.understood = true; res.state = st;
+      if (tch.forget) {
+        var fN = ns(tch.from);
+        if (idx.prodAlias[fN]) delete idx.prodAlias[fN];
+        idx.vendors.forEach(function (v) { v.aliases = v.aliases.filter(function (a) { return a !== fN; }); });
+        Object.keys(idx.companies).forEach(function (k) { idx.companies[k].aliases = idx.companies[k].aliases.filter(function (a) { return a !== fN; }); });
+        st.ctx.forgetOut = { from: tch.from, turn: st.ctx.turn };
+        res.reply = "네, '" + tch.from + "' 기억을 지웠어요.";
+        return res;
+      }
+      var tgt = resolveTeachTarget(tch.to, idx);
+      var fromNS = ns(tch.from);
+      if (!tgt) { res.reply = "'" + tch.to + "'" + (hasJong(tch.to) ? "은" : "는") + " 등록된 상품·업체·고객 이름에서 못 찾았어요. 등록된 이름으로 말씀해 주세요."; return res; }
+      if (idx.groups[fromNS] || idx.vendors.some(function (v) { return ns(v.name) === fromNS; }) || idx.custByName[fromNS]) { res.reply = "'" + tch.from + "'" + (hasJong(tch.from) ? "은" : "는") + " 이미 등록된 이름이라 다른 이름으로 바꿀 수 없어요."; return res; }
+      if (tgt.kind === "상품") idx.prodAlias[fromNS] = tgt.key;
+      else if (tgt.kind === "업체" && tgt.vendor) tgt.vendor.aliases.push(fromNS);
+      else if (tgt.kind === "업체" && tgt.company) tgt.company.aliases.push(fromNS);
+      else if (tgt.kind === "고객") idx.custAlias[fromNS] = tgt.key;
+      st.ctx.learnOut = { from: tch.from, to: tgt.name, turn: st.ctx.turn };
+      res.reply = "네, 앞으로 '" + tch.from + "'(이)라고 하시면 " + ro(tgt.name) + " 알아들을게요.";
+      return res;
+    }
     // v269: 다른 질문이 걸려 있어도, 주소처럼 확실한 말("경기 수원시 팔달구 효원로 100")이 오면 받는 분 주소로 씀
     if (st.ctx.pending && st.ctx.pending.type !== "address" && strongAddress(raw) && !findProducts(norm, idx).length) {
       var er0 = effRecipient(st);
@@ -8867,6 +8963,49 @@ var VO2 = (function () {
     return finish(st, res, R, idx, raw);
   }
 
+  function parseTeach(t) {
+    var x = String(t || "").trim().replace(/[.!?]+$/, "");
+    var q = "['\"‘’“”]";
+    var m = x.match(new RegExp("^" + q + "?(.+?)" + q + "?\\s*(?:은|는|을|를|이|가)?\\s*(?:사전에서|기억에서)\\s*(?:지워|빼|삭제|잊어)")) ||
+      x.match(new RegExp("^" + q + "?(.+?)" + q + "?\\s*(?:은|는|을|를)?\\s*(?:잊어\\s*버려|잊어|기억\\s*(?:지워|삭제|빼))"));
+    if (m && m[1].trim().length >= 1) return { forget: true, from: m[1].replace(/['"‘’“”]/g, "").trim() };
+    m = x.match(new RegExp("^" + q + "?(.+?)" + q + "?\\s*(?:은|는|을|를|이|가)\\s*(?:앞으로|이제|다음부터|이제부터)?\\s*" + q + "?(.+?)" + q + "?\\s*(?:으로|로)\\s*(?:기억|알아\\s*들어|외워|사전에)")) ||
+      x.match(new RegExp("^" + q + "(.+?)" + q + "\\s*(?:앞으로|이제|다음부터)?\\s*" + q + "?(.+?)" + q + "?\\s*(?:으로|로)\\s*(?:기억|알아\\s*들어|외워|사전에)"));
+    if (!m) return null;
+    var from = m[1].replace(/['"‘’“”]/g, "").trim(), to = m[2].replace(/['"‘’“”]/g, "").replace(/\s*(?:앞으로|이제|다음부터)\s*/, "").trim();
+    if (!from || !to || ns(from) === ns(to)) return null;
+    return { from: from, to: to };
+  }
+  function resolveTeachTarget(to, idx) {
+    var t = ns(to).replace(/(\d+(?:\.\d+)?)(kg|g|키로|그램)$/i, "");
+    if (idx.groups[t]) return { kind: "상품", key: t, name: idx.groups[t].base };
+    var pm = findProducts(normalize(to), idx).filter(function (m) { return m.baseNS && (m.how === "exact" || m.how === "alias" || m.how === "contains"); });
+    if (pm.length === 1) return { kind: "상품", key: pm[0].baseNS, name: idx.groups[pm[0].baseNS].base };
+    var v = idx.vendors.find(function (x) { return ns(x.name) === t; });
+    if (v) return { kind: "업체", vendor: v, name: v.name };
+    if (idx.companies[t]) return { kind: "업체", company: idx.companies[t], name: idx.companies[t].name };
+    if (idx.custByName[t]) return { kind: "고객", key: t, name: idx.custByName[t][0].name };
+    return null;
+  }
+  // v270: 사전 항목 검사 (화면에서 추가할 때) — 올바른 말이 등록 이름인지, 잘못 들린 말이 이미 등록된 이름은 아닌지
+  function checkDictEntry(from, to, db) {
+    var idx = db && db.__vo2idx ? db.__vo2idx : buildIndex(db);
+    var qe = function (w) { return "'" + w + "'" + (hasJong(w) ? "은" : "는"); };
+    var f = ns(from);
+    if (f.length < 2) return { ok: false, msg: "잘못 들린 말은 두 글자 이상이어야 해요." };
+    var tgt = resolveTeachTarget(to, idx);
+    if (!tgt) return { ok: false, msg: qe(to) + " 등록된 상품·업체·고객 이름에 없어요." };
+    if (idx.groups[f] || idx.vendors.some(function (v) { return ns(v.name) === f; }) || idx.custByName[f]) return { ok: false, msg: qe(from) + " 이미 등록된 이름이라 사전에 넣을 수 없어요." };
+    if (GEN_STOP.test(f) || /^(그대로|이대로|주문|취소|확정|응|네|아니|좋아)/.test(f)) return { ok: false, msg: qe(from) + " 대화에서 자주 쓰는 말이라 사전에 넣으면 위험해요." };
+    if (tgt.kind === "상품" && Object.keys(idx.groups).some(function (g) { return g !== tgt.key && g.indexOf(f) >= 0; })) return { ok: false, msg: qe(from) + " 다른 상품 이름에도 들어 있어서 사전에 넣으면 헷갈려요." };
+    return { ok: true, name: tgt.name, kind: tgt.kind };
+  }
+  function seedList() {
+    var out = [];
+    SEED_PRODUCTS.forEach(function (p) { p[0].forEach(function (a) { out.push({ from: a, to: p[1], kind: "상품" }); }); });
+    SEED_VENDORS.forEach(function (p) { p[0].forEach(function (a) { out.push({ from: a, to: p[1], kind: "업체" }); }); });
+    return out;
+  }
   function strongAddress(t) {
     var x = String(t || "").trim();
     if (!/\d/.test(x)) return false;
@@ -9185,6 +9324,10 @@ var VO2 = (function () {
       if (base) {
         st.ctx.pending = null;
         resolveAndAdd(st, base, p.add, R, logChange, idx);
+        // v270: 잘못 들린 말 → 고른 상품을 '학습 후보'로 남김 (같은 확인이 두 번 쌓이면 앱이 사전에 저장)
+        var hd = ns(p.heard || "");
+        if (hd.length >= 2 && hd !== base && !idx.groups[hd] && !GEN_STOP.test(hd) && !Object.keys(idx.groups).some(function (g) { return g.indexOf(hd) >= 0; }))
+          st.ctx.learnCand = { from: p.heard, to: idx.groups[base].base, turn: st.ctx.turn };
         return "handled";
       }
       if (no) { st.ctx.pending = null; R.notes.push("알겠습니다."); return "handled"; }
@@ -9791,7 +9934,7 @@ var VO2 = (function () {
           var qq = qtys.filter(function (q) { return q.kind === "count"; });
           var wq0 = qtys.filter(function (q) { return q.kind === "weight" && (!q.cond || /^(최소|최대)$/.test(uw)); });
           var addU = { quantity: qq.length ? qq[qq.length - 1].value : 1, quantityUnit: qq.length ? qq[qq.length - 1].unit : "개", countGiven: !!qq.length, wantGrams: wq0.length ? wq0[0].grams : null };
-          queueAsk(st, R, { type: "productPick", options: sugg, add: addU }, "'" + uw + "'(이)라는 상품은 등록돼 있지 않아요. " + (sugg.length === 1 ? idx.groups[sugg[0]].base + " 말씀이세요?" : sugg.map(function (b, i) { return (i + 1) + "번 " + idx.groups[b].base; }).join(", ") + " 중에 있나요?"));
+          queueAsk(st, R, { type: "productPick", options: sugg, add: addU, heard: uw }, "'" + uw + "'(이)라는 상품은 등록돼 있지 않아요. " + (sugg.length === 1 ? idx.groups[sugg[0]].base + " 말씀이세요?" : sugg.map(function (b, i) { return (i + 1) + "번 " + idx.groups[b].base; }).join(", ") + " 중에 있나요?"));
           return;
         }
         R.notes.push("'" + unknown.join(" ") + "'은(는) 등록된 상품에서 찾지 못했어요. 상품 이름을 다시 말씀해 주세요.");
@@ -9859,7 +10002,7 @@ var VO2 = (function () {
         if (cands.length === 1 && m.how !== "partial") m.baseNS = cands[0];
         else {
           var addA = { quantity: count ? count.value : 1, quantityUnit: count ? count.unit : "개", countGiven: !!count, wantGrams: weight ? weight.grams : null, condition: condQ ? condQ.cond : null, condGrams: condQ ? condQ.grams : null, more: isMore };
-          queueAsk(st, R, { type: "productPick", options: cands, add: addA }, cands.length === 1 ? "'" + m.surface + "'(이)라고 들렸어요. " + idx.groups[cands[0]].base + " 말씀이세요?" : "'" + m.surface + "'는 " + cands.map(function (b, i) { return (i + 1) + "번 " + idx.groups[b].base; }).join(", ") + " 중 어느 상품인가요?");
+          queueAsk(st, R, { type: "productPick", options: cands, add: addA, heard: stripParticles(ns(m.surface)) }, cands.length === 1 ? "'" + m.surface + "'(이)라고 들렸어요. " + idx.groups[cands[0]].base + " 말씀이세요?" : "'" + m.surface + "'는 " + cands.map(function (b, i) { return (i + 1) + "번 " + idx.groups[b].base; }).join(", ") + " 중 어느 상품인가요?");
           return;
         }
       }
@@ -10045,7 +10188,7 @@ var VO2 = (function () {
     analyze: analyze, scoreText: scoreText, verdict: verdict, closestNames: closestNames,
     llmPrompt: llmPrompt,
     normalize: normalize, parseQuantities: parseQuantities, buildIndex: buildIndex, findProducts: findProducts, findPersons: findPersons,
-    findCompanies: findCompanies, findBranches: findBranches, needsSecondOpinion: needsSecondOpinion, similar: similar, newState: newState, step: step, edit: edit, summaryLines: summaryLines,
+    findCompanies: findCompanies, findBranches: findBranches, needsSecondOpinion: needsSecondOpinion, similar: similar, checkDictEntry: checkDictEntry, seedList: seedList, parseTeach: parseTeach, newState: newState, step: step, edit: edit, summaryLines: summaryLines,
     toLegacyOrder: toLegacyOrder, itemLabel: itemLabel, effRecipient: effRecipient, deliveryMemoText: deliveryMemoText, sim: sim,
     splitCompanyBranch: splitCompanyBranch, fmtWeight: fmtWeight, extractPhone: extractPhone
   };
@@ -10374,7 +10517,7 @@ function VoiceDiagModal({ db, onClose }) {
 // 녹음 → 말 끝 판단 → 받아쓰기(정밀 Gemini, 안 되면 폰 기본 인식) → 등록 이름과 맞춰 고르기 → 주문 엔진(VO2) → 카드·대화 기록 → 짧은 음성 답
 // 조비서(JarvisSheet)의 예전 처리 단계(문장 덮어쓰기, 메아리 필터, 다른 명령 판단)는 거치지 않음.
 // 말하는 동안에는 마이크를 듣지 않음(반이중) → 조비서 자기 목소리를 받아쓰는 일이 없어 메아리 필터가 필요 없음.
-var TALK_VERSION = "v269";
+var TALK_VERSION = "v270";
 function talkSpoken(msg) {
   var t = String(msg || "");
   t = t.replace(/주문 내용을 확인해 주세요\.[\s\S]*?이대로 주문할까요\?/, "화면의 주문 내용을 확인하시고, 맞으면 '응', 고칠 게 있으면 말씀해 주세요.");
@@ -10441,6 +10584,8 @@ function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, crea
   const endModeRef = React.useRef("auto");
   endModeRef.current = endMode;
   const floorRef = React.useRef({ hist: [], floor: 0 });
+  const [dictOpen, setDictOpen] = React.useState(false);
+  const [dictVer, setDictVer] = React.useState(0);
   const stRef = React.useRef(st);
   const logRef = React.useRef([]);
   const aliveRef = React.useRef(true);
@@ -10470,13 +10615,15 @@ function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, crea
 
   function getDb() {
     const c = dbRef.current;
-    if (c && c.p === products && c.c === customers && c.v === vendors) return c.db;
+    let dsig = "";
+    try { dsig = JSON.stringify((aiVoiceMemGet(aiUserId()) || {}).approved || {}); } catch (e) {}
+    if (c && c.p === products && c.c === customers && c.v === vendors && c.d === dsig) return c.db;
     let learned = {}, userDict = {};
     try { learned = typeof getLearnedAliases === "function" ? getLearnedAliases() : {}; } catch (e) {}
     try { userDict = (aiVoiceMemGet(aiUserId()) || {}).approved || {}; } catch (e) {}
     const db = { products: products || [], customers: customers || [], vendors: vendors || [], orders: orders || [], learnedAliases: learned, productAliases: typeof PRODUCT_ALIASES !== "undefined" ? PRODUCT_ALIASES : {}, userDict, sttAliases: typeof FARM_AI_ALIASES !== "undefined" ? FARM_AI_ALIASES : {} };
     db.__vo2idx = VO2.buildIndex(db);
-    dbRef.current = { p: products, c: customers, v: vendors, db };
+    dbRef.current = { p: products, c: customers, v: vendors, d: dsig, db };
     return db;
   }
   function autoBoxCount(items) {
@@ -10839,17 +10986,7 @@ function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, crea
     } catch (e) {}
     setState(r.state);
     // v269: "앞으로 '대솔 본점'은 대솔수곡점으로 알아들을까요?" → '응' 하면 사전에 저장
-    try {
-      const lo = r.state.ctx && r.state.ctx.learnOut;
-      if (lo && lo.turn === r.state.ctx.turn) {
-        const uid = aiUserId();
-        const vm = aiVoiceMemGet(uid) || {};
-        vm.approved = vm.approved || {};
-        vm.approved[lo.from] = lo.to;
-        aiVoiceMemSave(uid, vm);
-        dbRef.current = null;
-      }
-    } catch (e) {}
+    try { dictAfterTurn(r.state); } catch (e) {}
     if (r.cancelled) { doneRef.current = true; await reply(r.reply || "주문을 취소했어요.", { noListen: true }); return; }
     if (r.confirmed) { await reply(commit(r), { noListen: true }); return; }
     if (!r.understood) {
@@ -10864,6 +11001,45 @@ function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, crea
       return;
     }
     await reply(r.reply || "네.");
+  }
+  // ---------- v270: 오인식 사전 ----------
+  //  - learnOut: 사장님이 '응'으로 확인했거나 말로 등록한 것 → 바로 사전 저장
+  //  - forgetOut: "'크탈' 기억 지워" → 사전에서 삭제
+  //  - learnCand: "'크탈'(이)라는 상품은 없어요. 크리스탈 벨 말씀이세요?" → '응'. 같은 확인이 2번 쌓이면 사전 저장
+  function dictSave(from, to) {
+    const uid = aiUserId();
+    const vm = aiVoiceMemGet(uid) || {};
+    vm.approved = vm.approved || {};
+    vm.approved[(typeof aiVoiceNS === "function" ? aiVoiceNS(from) : from)] = to;
+    aiVoiceMemSave(uid, vm);
+    dbRef.current = null;
+  }
+  function dictDelete(from) {
+    try { aiVoiceDictRemove(aiUserId(), from); } catch (e) {}
+    try { const uid = aiUserId(); const vm = aiVoiceMemGet(uid) || {}; if (vm.approved) { delete vm.approved[from]; delete vm.approved[String(from).replace(/\s/g, "")]; } if (vm.talkCand) Object.keys(vm.talkCand).forEach((k) => { if (k.split("→")[0] === String(from).replace(/\s/g, "")) delete vm.talkCand[k]; }); aiVoiceMemSave(uid, vm); } catch (e) {}
+    dbRef.current = null;
+  }
+  function dictAfterTurn(s) {
+    const c = s.ctx || {};
+    if (c.learnOut && c.learnOut.turn === c.turn) { dictSave(c.learnOut.from, c.learnOut.to); setDictVer((v) => v + 1); }
+    if (c.forgetOut && c.forgetOut.turn === c.turn) { dictDelete(c.forgetOut.from); setDictVer((v) => v + 1); }
+    if (c.learnCand && c.learnCand.turn === c.turn) {
+      const uid = aiUserId();
+      const vm = aiVoiceMemGet(uid) || {};
+      vm.talkCand = vm.talkCand || {};
+      const k = String(c.learnCand.from).replace(/\s/g, "") + "→" + c.learnCand.to;
+      vm.talkCand[k] = (vm.talkCand[k] || 0) + 1;
+      aiVoiceMemSave(uid, vm);
+      if (vm.talkCand[k] >= 2) {
+        delete vm.talkCand[k];
+        aiVoiceMemSave(uid, vm);
+        dictSave(c.learnCand.from, c.learnCand.to);
+        const jong = (w) => { const ch = String(w || "").charCodeAt(String(w || "").length - 1); return ch >= 0xac00 && ch <= 0xd7a3 ? (ch - 0xac00) % 28 : -1; };
+        const j1 = jong(c.learnCand.from), j2 = jong(c.learnCand.to);
+        note("📖 '" + c.learnCand.from + "'" + (j1 > 0 ? "을" : "를") + " 두 번 확인하셔서 앞으로 " + c.learnCand.to + (j2 > 0 && j2 !== 8 ? "으로" : "로") + " 바로 알아들을게요. (📖 사전에서 지울 수 있어요)");
+      }
+      setDictVer((v) => v + 1);
+    }
   }
   function commit(r) {
     let created = null;
@@ -10976,11 +11152,14 @@ function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, crea
   try { idx = getDb().__vo2idx; } catch (e) {}
   return h("div", { style: { position: "fixed", inset: 0, zIndex: 5000, background: C.bg, color: C.txt, display: "flex", flexDirection: "column", paddingTop: "env(safe-area-inset-top, 0px)", paddingBottom: "env(safe-area-inset-bottom, 0px)" } },
     // 머리
-    h("div", { style: { display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderBottom: `1px solid ${C.line}` } },
-      h("div", { style: { fontSize: 17, fontWeight: 800, flex: 1, minWidth: 0 } }, "📝 대화 주문 ", h("span", { style: { fontSize: 11, color: C.sub, fontWeight: 600 } }, TALK_VERSION + (engineName ? " · " + engineName : ""))),
-      h("button", { onClick: () => setEndMode((m) => { const n = m === "button" ? "auto" : "button"; try { localStorage.setItem("joassam_talk_endmode", n); } catch (e) {} return n; }), title: "말 끝을 어떻게 알아챌지", style: { border: `1px solid ${C.line}`, background: endMode === "button" ? "rgba(255,204,128,0.18)" : "transparent", color: endMode === "button" ? C.warn : C.sub, borderRadius: 14, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, endMode === "button" ? "✋ 말 끝: 버튼" : "⏱ 말 끝: 자동"),
-      h("button", { onClick: () => setAuto((a) => !a), style: { border: `1px solid ${C.line}`, background: auto ? "rgba(127,209,160,0.18)" : "transparent", color: auto ? C.acc : C.sub, borderRadius: 14, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, auto ? "🔁 자동 듣기 ON" : "자동 듣기 OFF"),
-      h("button", { onClick: closeAll, "aria-label": "닫기", style: { border: "none", background: "rgba(255,255,255,0.08)", color: C.txt, borderRadius: 10, width: 36, height: 32, fontSize: 16, cursor: "pointer" } }, "✕")),
+    h("div", { style: { padding: "8px 12px", borderBottom: `1px solid ${C.line}`, display: "flex", flexDirection: "column", gap: 6 } },
+      h("div", { style: { display: "flex", alignItems: "center", gap: 8 } },
+        h("div", { style: { fontSize: 17, fontWeight: 800, flex: 1, minWidth: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, "📝 대화 주문 ", h("span", { style: { fontSize: 11, color: C.sub, fontWeight: 600 } }, TALK_VERSION + (engineName ? " · " + engineName : ""))),
+        h("button", { onClick: closeAll, "aria-label": "닫기", style: { border: "none", background: "rgba(255,255,255,0.08)", color: C.txt, borderRadius: 10, width: 36, height: 32, fontSize: 16, cursor: "pointer" } }, "✕")),
+      h("div", { style: { display: "flex", gap: 6, flexWrap: "wrap" } },
+        h("button", { onClick: () => setDictOpen(true), title: "잘못 들린 말 사전", style: { border: `1px solid ${C.line}`, background: "transparent", color: C.txt, borderRadius: 14, padding: "5px 9px", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, "📖 사전"),
+        h("button", { onClick: () => setEndMode((m) => { const n = m === "button" ? "auto" : "button"; try { localStorage.setItem("joassam_talk_endmode", n); } catch (e) {} return n; }), title: "말 끝을 어떻게 알아챌지", style: { border: `1px solid ${C.line}`, background: endMode === "button" ? "rgba(255,204,128,0.18)" : "transparent", color: endMode === "button" ? C.warn : C.sub, borderRadius: 14, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, endMode === "button" ? "✋ 말 끝: 버튼" : "⏱ 말 끝: 자동"),
+        h("button", { onClick: () => setAuto((a) => !a), style: { border: `1px solid ${C.line}`, background: auto ? "rgba(127,209,160,0.18)" : "transparent", color: auto ? C.acc : C.sub, borderRadius: 14, padding: "5px 10px", fontSize: 12, fontWeight: 700, cursor: "pointer" } }, auto ? "🔁 자동 듣기 ON" : "자동 듣기 OFF"))),
     // 주문 카드
     h("div", { style: { padding: "8px 10px 0", maxHeight: cardOpen ? "46vh" : "auto", overflowY: "auto", flexShrink: 0 } },
       h("div", { onClick: () => setCardOpen((o) => !o), style: { display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: C.sub, cursor: "pointer", padding: "2px 2px 6px" } },
@@ -11005,7 +11184,71 @@ function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, crea
             h("div", { style: { position: "absolute", left: "50%", top: -2, bottom: -2, width: 2, background: "rgba(255,255,255,0.55)" } })) : null)),
       h("div", { style: { display: "flex", gap: 8 } },
         h("input", { value: inp, onChange: (e) => setInp(e.target.value), onKeyDown: (e) => { if (e.key === "Enter") sendTyped(); }, placeholder: "글자로 입력 (예: 적상추 4박스)", style: { flex: 1, minWidth: 0, background: "rgba(255,255,255,0.07)", border: `1px solid ${C.line}`, color: C.txt, borderRadius: 10, padding: "9px 10px", fontSize: 15 } }),
-        h("button", { onClick: sendTyped, style: { border: "none", background: "#1565c0", color: "#fff", borderRadius: 10, padding: "0 14px", fontSize: 14, fontWeight: 700, cursor: "pointer" } }, "보내기"))));
+        h("button", { onClick: sendTyped, style: { border: "none", background: "#1565c0", color: "#fff", borderRadius: 10, padding: "0 14px", fontSize: 14, fontWeight: 700, cursor: "pointer" } }, "보내기"))),
+    dictOpen ? h(TalkDictPanel, { db: getDb(), ver: dictVer, onClose: () => setDictOpen(false), onSave: (f, t) => { dictSave(f, t); setDictVer((v) => v + 1); }, onDelete: (f) => { dictDelete(f); setDictVer((v) => v + 1); } }) : null);
+}
+// v270: 잘못 들린 말 사전 화면 (사장님 사전 · 학습 중 · 기본 사전)
+function TalkDictPanel({ db, ver, onClose, onSave, onDelete }) {
+  const h = React.createElement;
+  const [from, setFrom] = React.useState("");
+  const [to, setTo] = React.useState("");
+  const [bulk, setBulk] = React.useState("");
+  const [msg, setMsg] = React.useState("");
+  const [showSeed, setShowSeed] = React.useState(false);
+  let vm = {};
+  try { vm = aiVoiceMemGet(aiUserId()) || {}; } catch (e) {}
+  const approved = vm.approved || {};
+  const cand = vm.talkCand || {};
+  const C = { bg: "#0f1d31", line: "rgba(255,255,255,0.14)", txt: "#e8f1ff", sub: "rgba(232,241,255,0.6)", acc: "#7fd1a0", warn: "#ffcc80" };
+  const inpS = { flex: 1, minWidth: 0, background: "rgba(255,255,255,0.08)", border: `1px solid ${C.line}`, color: C.txt, borderRadius: 8, padding: "8px 9px", fontSize: 14 };
+  const addOne = (f, t) => {
+    const r = VO2.checkDictEntry(f, t, db);
+    if (!r.ok) return r.msg;
+    onSave(f.trim(), r.name);
+    return "";
+  };
+  const add = () => {
+    if (!from.trim() || !to.trim()) { setMsg("잘못 들린 말과 올바른 이름을 모두 넣어 주세요."); return; }
+    const e = addOne(from, to);
+    if (e) { setMsg("⚠️ " + e); return; }
+    setMsg("✅ 등록했어요: " + from.trim() + " → " + to.trim()); setFrom(""); setTo("");
+  };
+  const addBulk = () => {
+    const lines = bulk.split(/\n+/).map((l) => l.trim()).filter(Boolean);
+    let ok = 0; const bad = [];
+    lines.forEach((l) => {
+      const m = l.split(/\s*(?:→|->|=>|=|:|\t|,)\s*/);
+      if (m.length < 2 || !m[0] || !m[1]) { bad.push(l + " (형식)"); return; }
+      const e = addOne(m[0], m[1]);
+      if (e) bad.push(l + " — " + e); else ok++;
+    });
+    setMsg("✅ " + ok + "개 등록" + (bad.length ? " · ⚠️ " + bad.length + "개 안 됨: " + bad.slice(0, 5).join(" / ") + (bad.length > 5 ? " …" : "") : ""));
+    if (!bad.length) setBulk("");
+  };
+  const keys = Object.keys(approved).sort();
+  const candKeys = Object.keys(cand);
+  const row = (k, a, b, extra) => h("div", { key: k, style: { display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderBottom: `1px solid ${C.line}`, fontSize: 14 } },
+    h("span", { style: { color: C.warn, minWidth: 0, flex: 1, wordBreak: "keep-all" } }, a), h("span", { style: { color: C.sub } }, "→"), h("span", { style: { flex: 1, minWidth: 0 } }, b), extra || null);
+  return h("div", { style: { position: "fixed", inset: 0, zIndex: 5100, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "flex-end", justifyContent: "center" } },
+    h("div", { style: { background: C.bg, color: C.txt, width: "100%", maxWidth: 560, maxHeight: "92vh", overflowY: "auto", borderRadius: "16px 16px 0 0", padding: "14px 16px 20px", boxSizing: "border-box" } },
+      h("div", { style: { display: "flex", alignItems: "center", marginBottom: 6 } },
+        h("div", { style: { fontSize: 17, fontWeight: 800, flex: 1 } }, "📖 잘못 들린 말 사전"),
+        h("button", { onClick: onClose, "aria-label": "사전 닫기", style: { border: "none", background: "rgba(255,255,255,0.1)", color: C.txt, borderRadius: 8, width: 34, height: 30, fontSize: 15, cursor: "pointer" } }, "✕")),
+      h("div", { style: { fontSize: 12.5, color: C.sub, lineHeight: 1.5, marginBottom: 10 } }, "받아쓰기가 자주 틀리게 적는 말을 올바른 상품·업체·고객 이름에 연결해요. 대화 중에 \"'크탈'은 크리스탈 벨로 기억해\", \"'크탈' 기억 지워\"라고 말해도 돼요. '~ 말씀이세요?'에 '응'을 두 번 하면 저절로 등록돼요."),
+      h("div", { style: { display: "flex", gap: 6, marginBottom: 6 } },
+        h("input", { value: from, onChange: (e) => setFrom(e.target.value), placeholder: "잘못 들린 말 (예: 크탈)", style: inpS }),
+        h("input", { value: to, onChange: (e) => setTo(e.target.value), placeholder: "올바른 이름 (예: 크리스탈 벨)", style: inpS }),
+        h("button", { onClick: add, style: { border: "none", background: "#2e7d32", color: "#fff", borderRadius: 8, padding: "0 12px", fontWeight: 800, cursor: "pointer" } }, "추가")),
+      h("textarea", { value: bulk, onChange: (e) => setBulk(e.target.value), placeholder: "여러 개 한꺼번에 (한 줄에 하나)\n크탈 → 크리스탈 벨\n대솔 본점 = 대솔수곡점", rows: 3, style: Object.assign({}, inpS, { width: "100%", boxSizing: "border-box", resize: "vertical", fontFamily: "inherit" }) }),
+      h("button", { onClick: addBulk, disabled: !bulk.trim(), style: { marginTop: 6, width: "100%", border: `1px solid ${C.acc}`, background: "transparent", color: C.acc, borderRadius: 8, padding: "8px 0", fontWeight: 700, cursor: "pointer" } }, "여러 개 등록"),
+      msg ? h("div", { style: { marginTop: 8, fontSize: 13, color: /⚠️/.test(msg) ? C.warn : C.acc, lineHeight: 1.45 } }, msg) : null,
+      h("div", { style: { marginTop: 14, fontWeight: 800, fontSize: 14 } }, "사장님 사전 (" + keys.length + "개)"),
+      keys.length ? keys.map((k) => row(k, k, approved[k], h("button", { onClick: () => onDelete(k), style: { border: "none", background: "transparent", color: "#ff8a80", fontSize: 13, cursor: "pointer" } }, "삭제"))) : h("div", { style: { color: C.sub, fontSize: 13, padding: "6px 0" } }, "아직 없어요."),
+      candKeys.length ? h("div", { style: { marginTop: 14, fontWeight: 800, fontSize: 14 } }, "배우는 중 (한 번 더 확인하면 등록)") : null,
+      candKeys.map((k) => { const [a, b] = k.split("→"); return row("c" + k, a, b, h("span", { style: { color: C.sub, fontSize: 12 } }, cand[k] + "/2")); }),
+      h("div", { onClick: () => setShowSeed(!showSeed), style: { marginTop: 14, fontWeight: 800, fontSize: 14, cursor: "pointer" } }, "기본 사전 (" + VO2.seedList().length + "개, 앱에 들어 있음) " + (showSeed ? "▲" : "▼")),
+      showSeed ? VO2.seedList().map((x, i) => row("s" + i, x.from, x.to + " (" + x.kind + ")")) : null,
+      h("div", { style: { marginTop: 10, fontSize: 12, color: C.sub, lineHeight: 1.5 } }, "※ 등록된 이름이 아닌 말로는 연결하지 않고, 이미 등록된 이름·자주 쓰는 말·다른 상품 이름에 들어 있는 말은 사전에 넣지 않아요(맞게 들은 말을 망가뜨리지 않게).")));
 }
 
 function JarvisSheet({ orders, customers, products, tab, setTab, geminiKey, setSearchQuery, setStatusFilter, setDateFilter, vendors, createVoiceOrder, onClose, onAppCommand, subscriptions, openBundlePlanner, openPersonPicker, openBulkModeChoice, closeOrderPickers, onSetOrderMemo , onOpenTalkOrder}) {
@@ -24117,7 +24360,8 @@ function GuideTab({ onBack }) {
         { h: "\uD655\uC778\uC774 \uD544\uC694\uD574\uC694 \uC54C\uB9BC", b: '\uC0C8\uB85C \uB4F1\uB85D\uB418\uB294 \uACE0\uAC1D\xB7\uC5C5\uCCB4\uAC00 \uAE30\uC874 \uC815\uBCF4\uC640 \uC560\uB9E4\uD558\uAC8C \uACB9\uCE58\uBA74(\uC804\uD654\uBC88\uD638\uB294 \uAC19\uC740\uB370 \uC774\uB984\uC774 \uB2E4\uB974\uAC70\uB098, \uC774\uB984\uC740 \uAC19\uC740\uB370 \uC8FC\uC18C\uAC00 \uB2E4\uB978 \uACBD\uC6B0) "\u26A0 \uD655\uC778\uC774 \uD544\uC694\uD574\uC694" \uCC3D\uC774 \uB5A0\uC694. \uAC19\uC740 \uC0AC\uB78C\uC774\uBA74 "\uC0AD\uC81C\uD558\uAE30", \uB2E4\uB978 \uC0AC\uB78C\uC774\uBA74 "\uADF8\uB300\uB85C \uB450\uAE30"\uB97C \uB204\uB974\uBA74 \uB3FC\uC694.' },
         { h: "\uC0C1\uD488\uBA85\uC774 \uD655\uC2E4\uD558\uC9C0 \uC54A\uC73C\uBA74", b: '\uC5D1\uC140 \uC0C1\uD488\uBA85\uC774 \uB4F1\uB85D\uB41C \uC0C1\uD488\uACFC \uD655\uC2E4\uD558\uAC8C \uC548 \uB9DE\uC73C\uBA74, \uCD94\uCE21\uD574\uC11C \uC5C9\uB6B1\uD55C \uC0C1\uD488\uC73C\uB85C \uB4F1\uB85D\uD558\uC9C0 \uC54A\uACE0 \uC6D0\uBCF8 \uC774\uB984 \uADF8\uB300\uB85C \uB0A8\uACA8\uB450\uACE0 "\uD655\uC778 \uD544\uC694" \uD45C\uC2DC\uB97C \uD574\uC918\uC694. \uBBF8\uB9AC\uBCF4\uAE30 \uD654\uBA74\uC5D0\uC11C \uC9C1\uC811 \uD655\uC778\uD558\uACE0 \uC62C\uBC14\uB978 \uC0C1\uD488\uC744 \uACE8\uB77C\uC8FC\uC138\uC694.' },
         { h: "⑥ 대화 주문 화면 (음성으로 주문)", b: "화면 아래 '📝 대화 주문' 버튼을 누르거나, 조비서에게 '매일소풍 주문할게'처럼 말하면 대화 주문 전용 화면이 열려요. '띵' 소리 뒤에 '적상추 4박스', '로메인 2키로 하나', '아니 5박스야', '로메인은 빼', '받는 사람 배수련 씨'처럼 말하면 위쪽 주문 카드에 바로 반영돼요. 등록된 이름이 확실하지 않으면 지어내지 않고 '크리스탈 벨 말씀이세요?'나 번호로 물어봐요('응', '1번'으로 대답). 등록에 없는 이름(예: '대솔 본점')은 지점을 고른 뒤 '앞으로 이렇게 알아들을까요?'에 '응' 하면 다음부터 바로 알아들어요. 상품이 2개 이상이면 확정 전에 묶음 발송(전부 한 박스 / 자동으로 나눠 / 상품마다 따로 / '적상추랑 로메인 한 박스, 케일 따로')을 묻고, 고른 대로 주문의 발송 박스가 만들어져요. 카드에서 직접 수량·받는 분·묶음을 고칠 수도 있어요. 마지막에 '응'(또는 '주문 확정' 버튼)이면 주문 목록에 등록돼요." },
-        { h: "대화 주문이 잘 안 들릴 때", b: "조비서가 말하는 동안에는 듣지 않아요. '띵' 소리가 난 뒤에 말씀하세요(🎤 버튼을 누르면 말을 끊고 바로 들어요). 듣는 중에는 마이크 옆 막대가 움직이는데, 가운데 선을 넘어야 '말'로 들어요. 주변이 아주 시끄러워 말이 안 끝나거나 잘리면 위쪽 '⏱ 말 끝: 자동'을 눌러 '✋ 말 끝: 버튼'으로 바꾸세요. 말을 다 한 뒤 🎤 버튼을 한 번 누르면 그때 받아써요. 내 말풍선 아래 '🎧 들은 말'은 받아쓰기가 실제로 들은 문장이고, 작은 글씨로 '말 2.1초 · 목소리가 주변 소음의 15배'처럼 얼마나 잘 들렸는지 나와요(5배보다 작으면 폰을 입 가까이). 주황색 '🔇' 줄은 들렸지만 버린 말과 그 이유예요. 정밀 인식(Gemini 키)이 있으면 더 정확하고, 들은 말이 등록 이름과 안 맞으면 더 정확한 모델로 한 번 더 받아써서 맞는 쪽을 골라요." }
+        { h: "대화 주문이 잘 안 들릴 때", b: "조비서가 말하는 동안에는 듣지 않아요. '띵' 소리가 난 뒤에 말씀하세요(🎤 버튼을 누르면 말을 끊고 바로 들어요). 듣는 중에는 마이크 옆 막대가 움직이는데, 가운데 선을 넘어야 '말'로 들어요. 주변이 아주 시끄러워 말이 안 끝나거나 잘리면 위쪽 '⏱ 말 끝: 자동'을 눌러 '✋ 말 끝: 버튼'으로 바꾸세요. 말을 다 한 뒤 🎤 버튼을 한 번 누르면 그때 받아써요. 내 말풍선 아래 '🎧 들은 말'은 받아쓰기가 실제로 들은 문장이고, 작은 글씨로 '말 2.1초 · 목소리가 주변 소음의 15배'처럼 얼마나 잘 들렸는지 나와요(5배보다 작으면 폰을 입 가까이). 주황색 '🔇' 줄은 들렸지만 버린 말과 그 이유예요. 정밀 인식(Gemini 키)이 있으면 더 정확하고, 들은 말이 등록 이름과 안 맞으면 더 정확한 모델로 한 번 더 받아써서 맞는 쪽을 골라요." },
+        { h: "잘못 들린 말 사전 (대화 주문)", b: "받아쓰기가 자주 틀리게 적는 말을 올바른 이름에 연결하는 사전이에요. ① 기본 사전: 크스→크리스탈 벨, 로인→로메인, 다청체→청다채, 메일소풍→매일소풍처럼 실제로 나온 오인식이 앱에 들어 있어요. ② 자동 생성: 등록 상품 이름에서 빨리 말해 한 글자가 빠진 말(토스카→토스카나 등)을 저절로 만들어요. ③ 사장님 사전: 대화 중 \"'크탈'은 크리스탈 벨로 기억해\"라고 말하거나, 대화 주문 화면 위 '📖 사전'에서 직접·여러 줄로 한꺼번에 넣어요. '~ 말씀이세요?'에 '응'을 두 번 하면 저절로 들어가요. 지울 때는 \"'크탈' 기억 지워\" 또는 사전 화면의 '삭제'. 이미 등록된 이름, 자주 쓰는 말, 다른 상품 이름에 들어 있는 말은 사전에 넣지 않아요(맞게 들은 말을 망가뜨리지 않게)." }
       ]
     },
     {
