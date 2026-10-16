@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 278;
+const APP_VERSION = 279;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2421,7 +2421,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v278 (대화 주문: 업체·고객 이름은 목록 전체에서 가장 가까운 이름으로 찾고, 애매하면 목록에서 번호로 고르기)";
+const APP_BUILD = "v279 (음성 사전 확장: 상품·업체 오인식 341개, 수량·단위·명령어 말 고치기, 숫자로 받아쓴 이름 되돌리기)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -8218,8 +8218,48 @@ var VO2 = (function () {
     if (u === "봉지") return "봉";
     return u;
   }
+  // v279: 수량·단위 오인식 사전 — 숫자(수사) 바로 뒤에서만 고침 (다른 말은 건드리지 않음)
+  var NUMW = "(\\d+(?:\\.\\d+)?|한|두|세|네|내|새|다섯|여섯|일곱|여덟|아홉|열|일|이|삼|사|오|육|칠|팔|구|십|반)";
+  var SPOKEN_FIX = [
+    // 무게 단위
+    [new RegExp(NUMW + "\\s*(기로|길로|키루|킬루|끼로|낄로|키러|킬러|키로그람|킬로그람|킬로그램|키로그램|kilo|키로요|킬로요)(?=\\s|$|[가-힣,])", "g"), "$1키로"],
+    [/(\d+)\s*(그람|구램|그렘|크램|그럼|그래암)(?=\s|$|[가-힣,])/g, "$1그램"],
+    [/(^|\s)(오백|5백)\s*(그램|그람|구램|g)/g, "$1500그램"],
+    [/(^|\s)(이백오십|250)\s*(그램|그람|구램|g)/g, "$1250그램"],
+    [/(^|\s)(팔백|8백)\s*(그램|그람|구램|g)/g, "$1800그램"],
+    [/(^|\s)(삼백|3백)\s*(그램|그람|구램|g)/g, "$1300그램"],
+    // 박스
+    [new RegExp(NUMW + "\\s*(박쓰|빡스|빡쓰|박쑤|밖스|빡수|박스요|박스야|빡세|박세)(?=\\s|$|[가-힣,])", "g"), "$1박스"],
+    // 개 ← 게·계
+    [new RegExp("(^|\\s)(한|두|세|네|내|새|다섯|여섯|일곱|여덟|아홉|열|\\d+)\\s*(게|계|깨|캐)(?=$|\\s*(씩|만|요|야|더|추가|빼|주세요|줘|보내|넣어|,|$))", "g"), "$1$2개"],
+    [/(^|\s)(뚜|투|두우)\s*(개|게|박스)(?=\s|$|씩|만|요|더|,)/g, "$1두 $3"],
+    [/(^|\s)(세계|세게|새개|새 개|쎄개|세개요)(?=$|\s*(씩|만|더|추가|요|주세요|줘|보내|넣어|,|$))/g, "$1세 개"],
+    [/(^|\s)(내개|내 개|네게|넷개|넷 개|내게)(?=$|\s*(씩|만|더|추가|요|주세요|줘|보내|넣어|,|$))/g, "$1네 개"],
+    [/(^|\s)(새|쎄)\s*(박스)(?=\s|$|씩|만|더|,)/g, "$1세 $3"],
+    [/(^|\s)(내)\s*(박스)(?=\s|$|씩|만|더|,)/g, "$1네 $3"],
+    [/(^|\s)(다섯|여섯|일곱|여덟|아홉|열)(게|계)(?=\s|$)/g, "$1 개"],
+    [/(^|\s)(한|두|세|네)\s*(상자|박수|빡스)(?=\s|$|씩|만|더|,)/g, "$1$2 박스"],
+    [/(^|\s)(오백|5백)(?=\s+(한|두|세|네|다섯|여섯|\d+\s*(개|박스)))/g, "$1500그램"],
+    // 명령어 (등록·취소·확정)
+    [/(^|\s)(주문\s*)?(등녹|등룩|동록|등로|등눅|덩록|등혹|등록|등로그)(\s*)(해|해요|해줘|해 줘|해주세요|완료|할게|하자)?(?=\s|$)/g, "$1$2등록$4$5"],
+    [/(^|\s)주문\s*(치소|취서|최소|츼소|취쏘|치쏘|추소)(?=\s|$|해|할게|요)/g, "$1주문 취소"],
+    [/(^|\s)(치소|취서|최소|츼소|취쏘|치쏘)(해|해줘|해 줘|해요|할게|할께)(?=\s|$)/g, "$1취소$3"],
+    [/(^|\s)(화정|확종|학정|확전)(해|해줘|해 줘|해요|할게)?(?=\s|$)/g, "$1확정$3"],
+    [/(^|\s)그대로\s*(주무내|주문내|주무해|주문 해|주므해|줌해)(?=\s|$|요|줘)/g, "$1그대로 주문해"],
+    [/(^|\s)(그래도|그대루|그데로|그대로요)\s*(주문|해)/g, "$1그대로 $3"]
+  ];
+  // 짧은 대답 (말 전체가 이것일 때만)
+  var YES_WORDS = /^(넵|넹|넴|내|웅|으응|어|어어|예스|예압|옙|네엡|녜|네에|에|ㅇㅇ|ㅇㅋ|오키|오키요|굿)$/;
+  function spokenFix(text) {
+    var t0 = String(text || "").trim().replace(/[.!?~]+$/, "");
+    if (YES_WORDS.test(t0)) return "네";
+    var t = " " + String(text || "") + " ";
+    SPOKEN_FIX.forEach(function (f) { t = t.replace(f[0], f[1]); });
+    return t.replace(/\s+/g, " ").trim();
+  }
   function normalize(text) {
     // v271: 빨리 말해 줄어든 말 되살리기 ("주할게"→"주문할게", "세 박수"→"세 박스", "주해"→"주문해")
+    text = spokenFix(text);
     text = String(text || "").replace(/(^|\s)주\s?(할게요|할께요|할게|할께|이에요|이요|해줘|해 줘|해요|해|넣을게|넣을께)(?=\s|[.,!?]|$)/g, "$1주문$2")
       .replace(/(^|\s)(전|전부|다)\s+(한|1)\s*박스(?=\s|[.,!?]|$|로|에)/g, "$1전부 한 박스")
       .replace(/((?:\d|한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\s*)박수(?=\s|[.,!?]|$|야|요|로|만|씩)/g, "$1박스");
@@ -8320,23 +8360,32 @@ var VO2 = (function () {
   // ---------- v270: 기본 오인식 사전 ----------
   // [잘못 들린 말들, 올바른 상품 이름(무게 빼고)] — 사장님 녹음·화면에서 실제로 나온 것 + 자주 틀리는 발음
   var SEED_PRODUCTS = [
-    [["크스", "크리스", "크리스털벨", "크리스탈밸", "크리스털밸", "크리스탈", "크리스털", "크리스탈벨이", "크스탈", "그리스탈", "크리스타벨", "크스벨", "크리스벨", "크스밸"], "크리스탈벨"],
-    [["로인", "로매인", "노메인", "도메인", "로메인상추", "로맨", "로멘", "로메", "노인", "도인", "로멘인", "로맨인"], "로메인"],
-    [["다청체", "청다체", "청따채", "청다재", "청다채이", "청다치", "청다", "청다째"], "청다채"],
-    [["적다체", "적따채", "적다재", "적다치", "적다채이"], "적다채"],
-    [["적혀자", "적겨장", "적계자", "적거자", "적겨자이", "적가자"], "적겨자"],
-    [["청여자", "청겨장", "청계자", "청거자", "청가자"], "청겨자"],
-    [["토스카", "토스까나", "토스카노", "또스카나", "토스칸", "포스카노", "포스카나", "토스까노"], "토스카나"],
-    [["카이", "카이피", "가이피라", "카이삐라", "카이피아", "카이필라"], "카이피라"],
-    [["바실", "바즐", "바지", "봐질"], "바질"],
-    [["루콜라", "루꼴래", "루꼬라", "누꼴라", "루골라", "루꼴"], "루꼴라"],
-    [["모든쌈채소", "모둠쌈채소", "모듬쌈채", "모듬쌈", "모둠쌈", "모든쌈", "모든소", "모든산도", "모든상태", "모든쌈소", "모듬소", "모든삼채소", "모든산채소"], "모듬쌈채소"],
-    [["샐러드야채", "셀러드채소", "샐러드채", "샐럿채소"], "샐러드채소"],
-    [["꽃상치", "꽃상추적치마", "적치마", "꽃상"], "꽃상추/적치마"],
-    [["적상치", "적쌍추", "적상쭈", "적상", "적성추", "적상주", "적성쭈", "적상초", "적성초"], "적상추"],
-    [["청상치", "청쌍추", "청상쭈"], "청상추"],
-    [["곱슬캐일", "곱슬케이", "곱실케일", "꼽슬케일"], "곱슬케일"],
-    [["캐일", "케이", "께일"], "케일"]
+    [["크스", "크리스", "크리스털벨", "크리스탈밸", "크리스털밸", "크리스탈", "크리스털", "크리스탈벨이", "크스탈", "그리스탈", "크리스타벨", "크스벨", "크리스벨", "크스밸", "크리스마스벨", "크리스마스 벨", "크리스탈 볼", "크리스탈볼", "크리스털 볼", "크리스탈 밸", "크리스탈 뺄", "크리스탈 베일", "크리스탈 펠", "크리스 벨", "크리스털 벨"], "크리스탈벨"],
+    [["로인", "로매인", "노메인", "도메인", "로메인상추", "로맨", "로멘", "로메", "노인", "도인", "로멘인", "로맨인", "노 메인", "로마인", "로메인 상추", "로메인이", "로매인이", "노매인"], "로메인"],
+    [["다청체", "청다체", "청따채", "청다재", "청다채이", "청다치", "청다", "청다째", "청다채요", "청타채"], "청다채"],
+    [["적다체", "적따채", "적다재", "적다치", "적다채이", "저다채", "적타채"], "적다채"],
+    [["적혀자", "적겨장", "적계자", "적거자", "적겨자이", "적가자", "저겨자", "적 거자", "적겨자잎", "빨간겨자", "빨간 겨자", "적갓"], "적겨자"],
+    [["청여자", "청겨장", "청계자", "청거자", "청가자", "청 계자", "청겨자잎", "초록겨자", "청갓"], "청겨자"],
+    [["토스카", "토스까나", "토스카노", "또스카나", "토스칸", "포스카노", "포스카나", "토스까노", "도스카나", "토스카니", "토스까니", "토스카나케일", "토스카나 케일", "토스까나케일"], "토스카나"],
+    [["카이", "카이피", "가이피라", "카이삐라", "카이피아", "카이필라", "카이 필라", "카피라", "까이피라", "카이피나", "카이비라", "카이빌라", "가이빌라"], "카이피라"],
+    [["바실", "바즐", "바지", "봐질", "바질이", "빠질", "바질잎", "바실리"], "바질"],
+    [["루콜라", "루꼴래", "루꼬라", "누꼴라", "루골라", "루꼴", "로꼴라", "루꼴랴", "르꼴라", "루콜나"], "루꼴라"],
+    [["모든쌈채소", "모둠쌈채소", "모듬쌈채", "모듬쌈", "모둠쌈", "모든쌈", "모든소", "모든산도", "모든상태", "모든쌈소", "모듬소", "모든삼채소", "모든산채소", "모든 쌈채소", "모둠 쌈채소", "모든쌈 채소", "모듬 쌈", "모듬쌈 야채", "모듬야채", "모둠야채", "쌈채소 모듬", "모듬삼채소", "모든 삼채소"], "모듬쌈채소"],
+    [["샐러드야채", "셀러드채소", "샐러드채", "샐럿채소", "셀러드 채소", "샐러드", "쌜러드", "셀러드", "샐럳"], "샐러드채소"],
+    [["꽃상치", "꽃상추적치마", "적치마", "꽃상", "꽃 상추", "곳상추", "꼿상추", "꽃쌍추", "곳쌍추", "적 치마", "저치마", "적치마상추", "적치마 상추", "꽃 상치"], "꽃상추/적치마"],
+    [["적상치", "적쌍추", "적상쭈", "적상", "적성추", "적상주", "적성쭈", "적상초", "적성초", "저상추", "작상추", "적산추", "쩍상추", "적상츄", "적쌍치", "적생추", "빨간상추", "빨간 상추", "적상추요", "적 상치"], "적상추"],
+    [["청상치", "청쌍추", "청상쭈", "총상추", "청상초", "청상츄", "청생추", "파란상추", "초록상추", "청쌍치", "청 상치"], "청상추"],
+    [["곱슬캐일", "곱슬케이", "곱실케일", "꼽슬케일", "꼽슬 케일", "곱실 케일", "곱슬 게일", "곱슬캘", "꼬불케일", "꼬불 케일", "곱쓸케일"], "곱슬케일"],
+    [["캐일", "케이", "께일", "게일", "케이루", "케일이"], "케일"],
+    [["체소", "째소", "채쏘", "야채"], "채소"]
+  ];
+  // v279: 두 상품 중 어느 것인지 애매하게 들리는 말 → 바로 넣지 않고 물어봄
+  var SEED_AMBIG = [
+    [["정상추", "젓상추", "점상추", "전상추"], ["적상추", "청상추"]],
+    [["정겨자", "점겨자", "전겨자"], ["적겨자", "청겨자"]],
+    [["정다채", "점다채", "전다채"], ["적다채", "청다채"]],
+    [["겨자"], ["적겨자", "청겨자"]],
+    [["다채"], ["적다채", "청다채"]]
   ];
   // 가게·회사로 보이는 이름 (고객 목록에 있어도 업체로 찾음)
   var BIZ_NAME_RX = /(점|카페|까페|베이커리|빵집|정육|식당|소풍|버거|갈비|쌈밥|국수|칼국수|가든|마트|상회|농장|회사|\(주\)|㈜|센터|학교|연구소|빌딩|레스토랑|커피|치킨|족발|고기|횟집|뷔페|호텔|펜션|푸드|키친|하우스|스토어|샵|반찬|분식|김밥|도시락|급식|요양원|어린이집|교회|성당|협회|조합|공장|본사|지사)$|(카페|베이커리|정육|식당|쌈밥|갈비|국수|버거|우리)/;
@@ -8344,11 +8393,14 @@ var VO2 = (function () {
   var SEED_VENDORS = [
     [["대설", "데솔", "대쏠", "태솔", "대솔이", "대술", "대소", "대쏘", "대설이"], "대솔"],
     [["하래하래", "할레할레", "하레하래", "하래하레", "하레하레베이커리", "하래하래베이커리", "하레하레카페", "하레하레빵집", "하레베이커리", "하레아레", "바레아레", "아레아레", "화래하래", "화레하레", "하래아래", "하레아레베이커리", "하레하레베이커리까페", "하레하레베이꺼리"], "하레하레베이커리카페"],
-    [["메일소풍", "매일소품", "메일소품", "매일쏘풍", "매일소풍이"], "매일소풍"],
-    [["삼채우리", "쌈채울이", "삼체우리", "쌈재우리"], "쌈채우리"],
+    [["메일소풍", "매일소품", "메일소품", "매일쏘풍", "매일소풍이", "매일 소풍", "메일 소풍", "매일 소품", "메일소통", "매일소통", "매일 쏘풍", "메일 소통"], "매일소풍"],
+    [["삼채우리", "쌈채울이", "삼체우리", "쌈재우리", "쌈 채우리", "삼채 우리", "쌈채 우리", "삼 채우리", "삼채울이"], "쌈채우리"],
     [["스위트모먼트", "스윗모멘트", "스위트모멘트", "스윗모먼트"], "주식회사스윗모먼트"],
-    [["프랑크버거", "프렝크버거", "프랭크버거집"], "프랭크버거"],
-    [["경희네손칼국수", "경희네칼국수", "경희손칼국수"], "경희네손갈국수"]
+    [["프랑크버거", "프렝크버거", "프랭크버거집", "프랑크 버거", "프랭크 버거", "프랭크 바가"], "프랭크버거"],
+    [["경희네손칼국수", "경희네칼국수", "경희손칼국수"], "경희네손갈국수"],
+    [["노 포트", "노포 트", "노퍼트", "노포드", "노 퍼트"], "노포트"],
+    [["우렁쌈밥", "우렁 쌈밥", "맹순정 우렁 쌈밥", "맹순정 우렁"], "맹순정우렁쌈밥"],
+    [["김재술 숯불갈비", "김재술숯불갈비", "명인 숯불갈비", "명인숯불갈비", "김재술 갈비"], "김재술명인숯불갈비"]
   ];
   // [잘못 들린 말들, 고객 이름] — 등록된 고객에만 연결
   var SEED_PEOPLE = [
@@ -8379,7 +8431,7 @@ var VO2 = (function () {
     });
     // v270: 기본 오인식 사전(SEED) — 실제 받아쓰기에서 나온 잘못 들린 말들. 등록된 상품에만 연결(없는 상품이면 무시)
     SEED_PRODUCTS.forEach(function (pr) {
-      var tb = Object.keys(groups).filter(function (b) { return b === ns(pr[1]); });
+      var tb = Object.keys(groups).filter(function (b) { return b === ns(pr[1]) || b === ns(pr[1]).replace(/[\/·]/g, ""); });
       if (tb.length === 1) pr[0].forEach(function (a) { if (!prodAlias[ns(a)]) addPA(a, tb[0]); });
     });
     // v270: 자동 생성 — 빨리 말해 가운데 글자 하나가 빠지거나 끝 글자가 빠진 말(로메인→로인, 토스카나→토스카, 카이피라→카이피)
@@ -8409,6 +8461,16 @@ var VO2 = (function () {
     });
     products.forEach(function (p) { (p.raw.aliases || []).forEach(function (a) { addPA(a, p.baseNS); }); });
     var prodAliasMulti = {};
+    // v279: 애매한 말(정상추 → 적상추·청상추) → 물어보기
+    SEED_AMBIG.forEach(function (am) {
+      var tgs = am[1].map(function (t) { return ns(t); }).filter(function (t) { return groups[t]; });
+      am[0].forEach(function (a) {
+        var f = ns(a);
+        if (groups[f] || !tgs.length) return;
+        if (tgs.length === 1) { if (!prodAlias[f]) prodAlias[f] = tgs[0]; }
+        else { delete prodAlias[f]; prodAliasMulti[f] = tgs; }
+      });
+    });
     // 업체·지점
     // v273: 고객 목록에 '업체처럼' 등록된 곳(대솔오송점, ○○카페, ○○정육 …)도 업체·지점으로 찾음 (주문은 고객으로 연결)
     var vendNames = {};
@@ -8871,7 +8933,7 @@ var VO2 = (function () {
     var st = stIn ? clone(stIn) : newState();
     st.ctx.turn = (st.ctx.turn || 0) + 1;
     var raw = String(utterance || "").trim();
-    var norm = normalize(raw);
+    var norm = restoreDigits(normalize(raw), idx);
     var tNS = ns(norm);
     var R = { changes: [], asks: [], notes: [] };
     var res = { state: st, reply: "", understood: false, confirmed: false, cancelled: false, order: null, summary: null };
@@ -8994,6 +9056,25 @@ var VO2 = (function () {
       res.state = st;
       return res;
     }
+    // v279: "취소"만·"다 취소"·"없던 걸로" → 주문 전체 취소인지 한 번 물어봄
+    if (st.ctx.pending && st.ctx.pending.type === "cancelAsk") {
+      var pc = st.ctx.pending;
+      st.ctx.pending = null;
+      if (RX.confirm.test(norm) && !RX.no.test(norm) && tNS.length <= 10) {
+        res.understood = true; res.cancelled = true; st.status = "cancelled";
+        logChange("status", "collecting", "cancelled");
+        res.reply = "주문을 취소했어요."; res.state = st; return res;
+      }
+      if (RX.no.test(norm) && tNS.length <= 8) { res.understood = true; res.reply = "네, 취소하지 않을게요. 계속 말씀해 주세요."; res.state = st; return res; }
+      void pc;
+    }
+    if (/^(취소|취소해|취소해요|취소요|다\s*취소|전부\s*취소|모두\s*취소|싹\s*취소|취소해\s*줘|없던\s*걸로(\s*해)?(\s*줘)?|없었던\s*걸로(\s*해)?|안\s*할게)$/.test(norm.trim()) && (st.items.length || st.vendor || st.orderer)) {
+      st.ctx.pending = { type: "cancelAsk", q: "" };
+      res.understood = true; res.state = st;
+      res.reply = "주문 전체를 취소할까요? 방금 넣은 것만 빼시려면 '○○ 빼'라고 말씀해 주세요.";
+      st.ctx.pending.q = res.reply;
+      return res;
+    }
     if (RX.clear.test(norm) && !prods0.length) {
       var keepCompany = null;
       logChange("clear", itemsText(st.items, idx), "");
@@ -9114,7 +9195,19 @@ var VO2 = (function () {
     SEED_PRODUCTS.forEach(function (p) { p[0].forEach(function (a) { out.push({ from: a, to: p[1], kind: "상품" }); }); });
     SEED_VENDORS.forEach(function (p) { p[0].forEach(function (a) { out.push({ from: a, to: p[1], kind: "업체" }); }); });
     SEED_PEOPLE.forEach(function (p) { p[0].forEach(function (a) { out.push({ from: a, to: p[1], kind: "고객" }); }); });
+    SEED_AMBIG.forEach(function (p) { p[0].forEach(function (a) { out.push({ from: a, to: p[1].join(" / ") + " 중 물어봄", kind: "애매" }); }); });
+    RULE_LIST.forEach(function (p) { out.push({ from: p[0], to: p[1], kind: p[2] }); });
     return out;
+  }
+  var RULE_LIST = [
+    ["2기로 · 2길로 · 2키루 · 2킬루 · 2끼로", "2키로", "단위"], ["500그람 · 500구램 · 500그렘", "500그램", "단위"], ["오백그램 · 오백 두 개", "500g", "단위"], ["반 키로 · 반킬로", "500g", "단위"],
+    ["3박쓰 · 3빡스 · 3박수 · 세 상자", "3박스", "단위"], ["두게 · 뚜개 · 두 게", "2개", "수량"], ["세게 · 세계 · 새 개", "3개", "수량"], ["네게 · 내 개 · 내개", "4개", "수량"], ["다섯게 · 여섯게 …", "5개 · 6개 …", "수량"],
+    ["2지영 · 5송점 · 100춘화 · 황순2", "이지영 · 오송점 · 백춘화 · 황순이 (숫자로 받아쓴 이름)", "숫자→글자"],
+    ["주문 등녹 · 등룩 · 동록 · 등로", "주문 등록", "명령"], ["주문 치소 · 취서 · 최소해", "주문 취소", "명령"], ["그대로 주무내 · 그래도 주문해", "그대로 주문해", "명령"], ["화정 · 확종", "확정", "명령"], ["주할게 · 주문 할께 · 주물할게", "주문할게", "명령"],
+    ["넵 · 넹 · 내 · 어 · 웅 · 옙", "네 (대답)", "대답"], ["취소 · 다 취소 · 없던 걸로", "주문 전체 취소인지 한 번 물어봄", "명령"]
+  ];
+  function seedListUnused() {
+    return [];
   }
   function strongAddress(t) {
     var x = String(t || "").trim();
@@ -9651,6 +9744,7 @@ var VO2 = (function () {
       if (st.vendor || st.orderer || st.items.length) return null;
       phrase = norm.replace(/\s*(이에요|이예요|예요|이야|입니다|이요|요)$/, "");
     }
+    if (/(그대로|이대로|그래도|등록|확정|취소|완료|접수|넣어|바꿔|변경|빼|추가|그거|이거|방금|아까|다시|처음)/.test(phrase)) return null;
     var toks = phrase.split(/\s+/).filter(Boolean);
     while (toks.length && LF_STOP.test(toks[0])) toks.shift();
     if (!toks.length) return null;
@@ -9658,7 +9752,7 @@ var VO2 = (function () {
     phrase = toks.join(" ").trim();
     var pn = ns(phrase);
     if (pn.length < 2 || pn.length > 20 || /\d/.test(pn)) return null;
-    if (toks.length === 1 && /^[가-힣A-Za-z0-9]{1,5}점$/.test(pn)) return null; // 지점 이름만 → 기존 지점 찾기
+    if (toks.length === 1 && /^[가-힣A-Za-z0-9]{1,3}점$/.test(pn)) return null; // 지점 이름만 → 기존 지점 찾기
     if (/(받는|보내는|주문자|사람|고객|업체|거래처|그대로|이대로|전부|모두|따로|박스|취소|확정|등록|배송|주소|전화|메모|사전|기억)/.test(pn)) return null;
     if (findProducts(phrase, idx).some(function (x) { return x.baseNS && (x.how === "exact" || x.how === "alias" || x.how === "contains"); })) return null;
     // 기존 방식이 확실히 찾는 경우(정확한 이름·별칭)는 그대로 둠
@@ -10356,6 +10450,31 @@ var VO2 = (function () {
   // ---------- 진단: 어떤 후보를 찾았는지, 어느 단계에서 틀렸는지 ----------
   var DIAG_STOP = /^(그대|이대|그대로|이대로|주문할|하는|주문|주문할게|주문할께|주문해|주문해줘|할게|할께|해줘|해|줘|주세요|아니|아니야|네|응|예|그대로|이대로|좋아|빼|빼줘|빼고|추가|추가해|추가해줘|더|바꿔|바꿔줘|변경|말고|아니고|아니라|받는|보내는|사람|분|씨|님|메모|배송|주소|전화|번호|전화번호|그거|방금|아까|마지막|이거|저거|그리고|하고|또|좀|다시|처음부터|취소|확정|등록|해요|이야|야|요|로|으로|은|는|이|가|을|를|도|만|라고|이라고|넣어줘|넣어|적어줘|써줘|했잖아|정도|최소|최대|이상|이하|각|박스|개|상품|업체|고객|지점|그|저|내가|말한|거|것|건)$/;
   // ---------- v278: 목록 기준 이름 찾기 (업체·고객 목록 전체에서 가장 가까운 이름) ----------
+  // v279: 받아쓰기가 이름 속 글자를 숫자로 쓴 것 되돌리기 ("2지영"→이지영, "5송점"→오송점, "100춘화"→백춘화, "황순2"→황순이)
+  var DIG_HAN = { "1": "일", "2": "이", "3": "삼", "4": "사", "5": "오", "6": "육", "7": "칠", "8": "팔", "9": "구", "10": "십", "100": "백", "1000": "천" };
+  var COUNTER_RX = /^(로|가|리|번지|단지|블록|지구|개|박스|박|상자|키로|킬로|그램|번|명|시|분|월|일|주|년|통|봉|단|포기|팩|줄|장|세트|인분|원|만|천|백|마리|층|호|동|길|차|대|살|배|군데|가지|묶음|송이|건|병|캔|컵|잔|접|짝|망|짜리|종|칸|회|등|위|등분|덩이|덩어리|kg|g|키|킬|그|박쓰|빡스|빡쓰|봉지|개월|시간|일치|주일|주치|프로|퍼센트|%|미터|센치|리터)/;
+  function restoreDigits(text, idx) {
+    var toks = String(text || "").split(/\s+/);
+    var changed = false;
+    var nameHit = function (w) {
+      var n = ns(w);
+      if (idx.custByName[n] || idx.vendors.some(function (v) { return ns(v.name) === n || v.companyNS === n || v.branchNS === n; })) return true;
+      return Object.keys(idx.companies).some(function (k) { return idx.companies[k].aliases.indexOf(n) >= 0; });
+    };
+    for (var i = 0; i < toks.length; i++) {
+      var t = toks[i];
+      // 앞 숫자 + 한글(단위가 아님): "2지영", "5송점", "100춘화"
+      var m = t.match(/^(10{0,3}|[1-9])([가-힣].*)$/);
+      if (m && DIG_HAN[m[1]] && (nameHit(DIG_HAN[m[1]] + m[2]) || !COUNTER_RX.test(m[2]))) { toks[i] = DIG_HAN[m[1]] + m[2]; changed = true; continue; }
+      // 한글 사이 숫자: "주식회4삼성"
+      var m2 = t.match(/^([가-힣]+)([1-9])([가-힣]+)$/);
+      if (m2 && !COUNTER_RX.test(m2[3])) { toks[i] = m2[1] + DIG_HAN[m2[2]] + m2[3]; changed = true; continue; }
+      // 한글 + 끝 숫자 한 자리: 목록 이름이 될 때만 ("황순2"→황순이, "양석1"→양석일)
+      var m3 = t.match(/^([가-힣]{1,8})([1-9])$/);
+      if (m3 && nameHit(m3[1] + DIG_HAN[m3[2]])) { toks[i] = m3[1] + DIG_HAN[m3[2]]; changed = true; }
+    }
+    return changed ? toks.join(" ") : text;
+  }
   function listEntries(idx) {
     if (idx._listEntries) return idx._listEntries;
     var out = [], vid = {};
@@ -10449,7 +10568,7 @@ var VO2 = (function () {
   }
   function analyze(text, db, st) {
     var idx = db && db.__vo2idx ? db.__vo2idx : buildIndex(db);
-    var norm = normalize(text);
+    var norm = restoreDigits(normalize(text), idx);
     var prods = findProducts(norm, idx);
     var cos = findCompanies(norm, idx);
     var coCur = cos.length ? cos[cos.length - 1].company : st && st.company ? idx.companies[st.company.nameNS] : null;
@@ -10848,7 +10967,7 @@ function VoiceDiagModal({ db, onClose }) {
 // 녹음 → 말 끝 판단 → 받아쓰기(정밀 Gemini, 안 되면 폰 기본 인식) → 등록 이름과 맞춰 고르기 → 주문 엔진(VO2) → 카드·대화 기록 → 짧은 음성 답
 // 조비서(JarvisSheet)의 예전 처리 단계(문장 덮어쓰기, 메아리 필터, 다른 명령 판단)는 거치지 않음.
 // 말하는 동안에는 마이크를 듣지 않음(반이중) → 조비서 자기 목소리를 받아쓰는 일이 없어 메아리 필터가 필요 없음.
-var TALK_VERSION = "v278";
+var TALK_VERSION = "v279";
 function talkSpoken(msg) {
   var t = String(msg || "");
   t = t.replace(/주문 내용을 확인해 주세요\.[\s\S]*?이대로 주문할까요\?/, "화면의 주문 내용을 확인하시고, 맞으면 '응', 고칠 게 있으면 말씀해 주세요.");
@@ -11609,6 +11728,7 @@ function TalkDictPanel({ db, ver, onClose, onSave, onDelete }) {
   const [bulk, setBulk] = React.useState("");
   const [msg, setMsg] = React.useState("");
   const [showSeed, setShowSeed] = React.useState(false);
+  const [seedQ, setSeedQ] = React.useState("");
   let vm = {};
   try { vm = aiVoiceMemGet(aiUserId()) || {}; } catch (e) {}
   const approved = vm.approved || {};
@@ -11660,8 +11780,24 @@ function TalkDictPanel({ db, ver, onClose, onSave, onDelete }) {
       keys.length ? keys.map((k) => row(k, k, approved[k], h("button", { onClick: () => onDelete(k), style: { border: "none", background: "transparent", color: "#ff8a80", fontSize: 13, cursor: "pointer" } }, "삭제"))) : h("div", { style: { color: C.sub, fontSize: 13, padding: "6px 0" } }, "아직 없어요."),
       candKeys.length ? h("div", { style: { marginTop: 14, fontWeight: 800, fontSize: 14 } }, "배우는 중 (한 번 더 확인하면 등록)") : null,
       candKeys.map((k) => { const [a, b] = k.split("→"); return row("c" + k, a, b, h("span", { style: { color: C.sub, fontSize: 12 } }, cand[k] + "/2")); }),
-      h("div", { onClick: () => setShowSeed(!showSeed), style: { marginTop: 14, fontWeight: 800, fontSize: 14, cursor: "pointer" } }, "기본 사전 (" + VO2.seedList().length + "개, 앱에 들어 있음) " + (showSeed ? "▲" : "▼")),
-      showSeed ? VO2.seedList().map((x, i) => row("s" + i, x.from, x.to + " (" + x.kind + ")")) : null,
+      (() => {
+        const all = VO2.seedList();
+        const kinds = {};
+        all.forEach((x) => { kinds[x.kind] = (kinds[x.kind] || 0) + 1; });
+        let idx = null;
+        try { idx = db.__vo2idx || VO2.buildIndex(db); } catch (e) {}
+        const nP = idx ? Object.keys(idx.groups).length : 0, nV = idx ? idx.vendors.length : 0, nC = idx ? Object.keys(idx.custByName).length : 0;
+        const q = seedQ.trim().replace(/\s+/g, "");
+        const shown = q ? all.filter((x) => (x.from + x.to).replace(/\s+/g, "").includes(q)) : all;
+        return h("div", null,
+          h("div", { onClick: () => setShowSeed(!showSeed), style: { marginTop: 14, fontWeight: 800, fontSize: 14, cursor: "pointer" } }, "기본 사전 (" + all.length + "개, 앱에 들어 있음) " + (showSeed ? "▲" : "▼")),
+          h("div", { style: { fontSize: 12.5, color: C.sub, lineHeight: 1.55, marginTop: 4 } },
+            Object.keys(kinds).map((k) => k + " " + kinds[k]).join(" · "),
+            h("br"),
+            "＋ 목록 이름 자동 대응: 상품 " + nP + "종 · 업체 " + nV + "곳 · 고객 " + nC + "명 — 받침·된소리·ㅐ/ㅔ가 조금 틀리거나 띄어 써도 목록에서 가장 가까운 이름으로 찾아요."),
+          showSeed ? h("input", { value: seedQ, onChange: (e) => setSeedQ(e.target.value), placeholder: "기본 사전에서 찾기 (예: 로메인, 박스, 등록)", style: Object.assign({}, inpS, { width: "100%", boxSizing: "border-box", marginTop: 8 }) }) : null,
+          showSeed ? shown.slice(0, 400).map((x, i) => row("s" + i, x.from, x.to + " (" + x.kind + ")")) : null);
+      })(),
       h("div", { style: { marginTop: 10, fontSize: 12, color: C.sub, lineHeight: 1.5 } }, "※ 등록된 이름이 아닌 말로는 연결하지 않고, 이미 등록된 이름·자주 쓰는 말·다른 상품 이름에 들어 있는 말은 사전에 넣지 않아요(맞게 들은 말을 망가뜨리지 않게).")));
 }
 
@@ -25026,6 +25162,7 @@ function GuideTab({ onBack }) {
     {
       title: "5. \uACE0\uAC1D \uAD00\uB9AC",
       items: [
+        { h: "음성 사전 (기본 사전)", b: "대화 주문 화면의 📖 사전 → '기본 사전'에서 앱에 들어 있는 오인식 사전을 볼 수 있어요. 상품·업체 이름이 잘못 들린 말, '2기로·3박쓰·세게·내 개' 같은 수량·단위, '주문 등녹·치소' 같은 명령어, '2지영·5송점'처럼 이름을 숫자로 받아쓴 것까지 고쳐서 알아들어요. '정상추'처럼 적상추·청상추 둘 다 될 수 있는 말은 물어봐요. 자주 틀리는 말은 사전에 직접 추가하거나, 대화 중에 \"'크탈'은 크리스탈 벨로 기억해\"라고 말하면 돼요." },
         { h: "대화 주문 이름 찾기 (목록 기준)", b: "'○○ 주문'이라고 하면 업체·고객 목록 전체에서 가장 가까운 이름을 찾아요. 확실하면 바로 연결하고(잘못 골랐으면 '아니'), 비슷한 곳이 여러 곳이거나 목록에 똑같은 이름이 없으면 목록에서 비슷한 이름을 '1번, 2번…'으로 보여 줘요. 번호나 이름으로 고르시면 돼요. 목록에 없는 이름은 지어내지 않아요." },
         { h: "묶음 발송 기준", b: "한 박스에 담는 양: 500g·800g·1kg(작은 박스)은 3개까지, 2kg(큰 박스)은 2개까지, 3kg 이상은 1개씩. 작은 상품과 2kg는 같은 박스에 넣지 않아요. '자동으로 나눔', 대화 주문의 '전부 한 박스'·직접 묶기, 묶음 화면 모두 이 기준을 따르고, 기준을 넘으면 알아서 나누고 몇 박스로 나눴는지 알려줘요." },
         { h: "고객·업체 정보 점검", b: "고객 탭(또는 업체 탭)의 '🔍 고객·업체 정보 점검'을 누르면 이상하게 저장된 것을 자동으로 찾아 보여줘요: 쓸모없음(이름이 없거나 전화·주소가 모두 없음), 중복(같은 번호 또는 같은 이름·주소), 고객·업체 둘 다 등록, 이름 없음·이름 이상(숫자·기호 섞임), 전화 없음·전화 이상, 주소 없음·주소 짧음, 이름 띄어쓰기, 전화 형식. 위 칸을 누르면 그 문제만 보이고, 각 줄에서 이름·전화·주소를 고쳐 '저장', 필요 없으면 '삭제'해요. '보이는 것 모두 선택' 후 '선택 삭제'로 한꺼번에 지울 수도 있어요(지우기 전에 확인창이 나오고, 주문 기록이 있는 곳은 따로 알려줘요). 지우기 전에 ☰ 메뉴에서 백업을 받아 두세요." },
