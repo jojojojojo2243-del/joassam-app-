@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 276;
+const APP_VERSION = 277;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2421,7 +2421,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v276 (묶음 기준: 500g·800g·1kg 작은 박스 3개까지, 2kg 큰 박스 2개까지 — 자동 나눔·대화 주문·묶음 화면 모두)";
+const APP_BUILD = "v277 (대화 주문 묶음: 예전처럼 묶음 선택 창으로 고르고, 박스마다 주문을 나눠 등록)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -10658,7 +10658,7 @@ function VoiceDiagModal({ db, onClose }) {
 // 녹음 → 말 끝 판단 → 받아쓰기(정밀 Gemini, 안 되면 폰 기본 인식) → 등록 이름과 맞춰 고르기 → 주문 엔진(VO2) → 카드·대화 기록 → 짧은 음성 답
 // 조비서(JarvisSheet)의 예전 처리 단계(문장 덮어쓰기, 메아리 필터, 다른 명령 판단)는 거치지 않음.
 // 말하는 동안에는 마이크를 듣지 않음(반이중) → 조비서 자기 목소리를 받아쓰는 일이 없어 메아리 필터가 필요 없음.
-var TALK_VERSION = "v274";
+var TALK_VERSION = "v277";
 function talkSpoken(msg) {
   var t = String(msg || "");
   t = t.replace(/주문 내용을 확인해 주세요\.[\s\S]*?이대로 주문할까요\?/, "화면의 주문 내용을 확인하시고, 맞으면 '응', 고칠 게 있으면 말씀해 주세요.");
@@ -10709,7 +10709,7 @@ function talkPickBest(primary, alts, db, st, opt) {
   });
   return { text: best, picked: picked };
 }
-function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, createVoiceOrder, firstText, onClose, onCommitted }) {
+function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, createVoiceOrder, firstText, onClose, onCommitted, openBundlePlanner }) {
   const h = React.createElement;
   const [st, setSt] = React.useState(() => VO2.newState());
   const [log, setLog] = React.useState([]);
@@ -11150,7 +11150,28 @@ function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, crea
     // v269: "앞으로 '대솔 본점'은 대솔수곡점으로 알아들을까요?" → '응' 하면 사전에 저장
     try { dictAfterTurn(r.state); } catch (e) {}
     if (r.cancelled) { doneRef.current = true; await reply(r.reply || "주문을 취소했어요.", { noListen: true }); return; }
-    if (r.confirmed) { await reply(commit(r), { noListen: true }); return; }
+    if (r.confirmed) { await reply(await finishOrder(r), { noListen: true }); return; }
+    // v277: 묶음을 말로 묻지 않고 '묶음 선택 창'을 띄움 (고를 필요가 없으면 자동으로 나눠 넘어감)
+    if (r.state.ctx && r.state.ctx.pending && r.state.ctx.pending.type === "bundle") {
+      if (openBundlePlanner && needChoice(r.state)) {
+        addLog({ k: "bot", text: "📦 묶음 방법을 화면에서 골라 주세요." });
+        speak("묶음 방법을 화면에서 골라 주세요.");
+        const bl = await pickBundle(r.state);
+        if (!bl) { await reply("묶음을 고르지 않았어요. 고르시려면 '주문 등록'이라고 말씀해 주세요."); return; }
+        chosenBoxRef.current = { list: bl, sig: itemsSig(r.state) };
+        let r2 = VO2.step(stRef.current, "자동으로 나눠", getDb(), stepOpt());
+        if (r2.state.status === "confirming" && !r2.state.ctx.pending) r2 = VO2.step(r2.state, "응", getDb(), stepOpt());
+        setState(r2.state);
+        if (r2.confirmed) { await reply(await finishOrder(r2), { noListen: true }); return; }
+        await reply(r2.reply || "네.");
+        return;
+      }
+      const r3 = VO2.step(stRef.current, "자동으로 나눠", getDb(), stepOpt());
+      setState(r3.state);
+      if (r3.confirmed) { await reply(await finishOrder(r3), { noListen: true }); return; }
+      await reply(r3.reply || "네.");
+      return;
+    }
     if (!r.understood) {
       let hint = "";
       try {
@@ -11203,9 +11224,41 @@ function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, crea
       setDictVer((v) => v + 1);
     }
   }
-  function commit(r) {
+  // ---------- v277: 묶음 — 예전처럼 '묶음 선택 창'에서 고르고, 박스마다 주문을 나눠 등록 ----------
+  const chosenBoxRef = React.useRef(null);
+  function pmap() { const pm = {}; (products || []).forEach((p) => { if (p && p.id) pm[p.id] = p; }); return pm; }
+  function itemsOf(st) { return (st.items || []).map((it) => ({ productId: it.productId || null, name: it.productName, qty: Number(it.quantity) || 1 })); }
+  function itemsSig(st) { return (st.items || []).map((it) => (it.productId || it.productName) + "x" + it.quantity).join("|"); }
+  function needChoice(st) { try { return typeof needsBundleChoice === "function" && needsBundleChoice(itemsOf(st), pmap()); } catch (e) { return false; } }
+  function explicitBoxes(st) {
+    const bp = st.shipping && st.shipping.boxPlan;
+    if (!bp || bp.mode === "auto") return null;
+    const pb = VO2.planBoxes(st);
+    return pb ? pb.boxes.map((b) => ({ items: b.map((e) => ({ productId: e.it.productId || null, name: e.it.productName, qty: e.qty })) })) : null;
+  }
+  function pickBundle(st) {
+    return new Promise((resolve) => {
+      try { stopListening(); } catch (e) {}
+      try { openBundlePlanner(itemsOf(st), (st.vendor && st.vendor.name) || (st.orderer && st.orderer.name) || "", (bl) => resolve(bl && bl.length ? bl : null)); } catch (e) { resolve(null); }
+    });
+  }
+  async function finishOrder(r) {
+    let boxList = explicitBoxes(r.state);
+    if (!boxList && chosenBoxRef.current && chosenBoxRef.current.sig === itemsSig(r.state)) boxList = chosenBoxRef.current.list;
+    if (!boxList && openBundlePlanner && needChoice(r.state)) {
+      addLog({ k: "bot", text: "📦 묶음 방법을 화면에서 골라 주세요." });
+      speak("묶음 방법을 화면에서 골라 주세요.");
+      const bl = await pickBundle(r.state);
+      if (!bl) { setState(Object.assign({}, r.state, { status: "collecting" })); return "묶음을 고르지 않아 아직 등록하지 않았어요. '주문 등록'이라고 하시면 묶음 창을 다시 열어요."; }
+      boxList = bl;
+    }
+    return commit(r, boxList);
+  }
+  function commit(r, boxList) {
     let created = null;
-    try { created = createVoiceOrder ? createVoiceOrder(r.order) : null; } catch (e) { created = null; }
+    const ord = Object.assign({}, r.order);
+    if (boxList && boxList.length) { ord.boxList = boxList; ord._boxPlan = null; }
+    try { created = createVoiceOrder ? createVoiceOrder(ord) : null; } catch (e) { created = null; }
     if (!created || (Array.isArray(created) && !created.length)) {
       setState(Object.assign({}, r.state, { status: "collecting" }));
       return "주문 등록에 실패했어요. 받는 분과 상품을 확인해 주세요.";
@@ -11217,7 +11270,8 @@ function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, crea
       localStorage.setItem("joassam_vo2_log", JSON.stringify(arr.slice(-30)));
     } catch (e) {}
     try { onCommitted && onCommitted(created); } catch (e) {}
-    return r.reply + " 주문 목록에 등록했어요.";
+    chosenBoxRef.current = null;
+    return r.reply + (boxList && boxList.length > 1 ? " " + boxList.length + "박스로 나눠" : "") + " 주문 목록에 등록했어요.";
   }
   async function reply(msg, o) {
     o = o || {};
@@ -11240,7 +11294,7 @@ function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, crea
     const r = VO2.step(Object.assign({}, stRef.current, { status: "confirming" }), "응 그대로 해", getDb(), stepOpt());
     setState(r.state);
     addLog({ k: "user", text: "(화면) 주문 확정" });
-    if (r.confirmed) await reply(commit(r), { noListen: true });
+    if (r.confirmed) await reply(await finishOrder(r), { noListen: true });
     else await reply(r.reply);
   }
   async function screenCancel() {
@@ -11253,6 +11307,7 @@ function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, crea
   }
   function newOrder(silent) {
     doneRef.current = false;
+    chosenBoxRef.current = null;
     setState(VO2.newState());
     if (!silent) { addLog({ k: "note", text: "── 새 주문 ──" }); reply("새 주문을 시작할게요. 어느 업체나 누구 주문인지 말씀해 주세요."); }
   }
@@ -15632,7 +15687,7 @@ function JarvisButton({ orders, customers, products, tab, setTab, geminiKey, set
     title: "대화 주문",
     style: { position: "absolute", bottom: 60, left: 0, height: 34, padding: "0 12px", borderRadius: 17, border: "none", background: "linear-gradient(135deg,#1565c0 0%,#42a5f5 100%)", color: "#fff", fontSize: 13, fontWeight: 800, whiteSpace: "nowrap", boxShadow: "0 3px 12px rgba(21,101,192,0.45)", cursor: "pointer" }
   }, "\u{1F4DD} 대화 주문")), talkOpen && /* @__PURE__ */ React.createElement(TalkOrderScreen, {
-    products, customers, vendors, orders, geminiKey, createVoiceOrder,
+    products, customers, vendors, orders, geminiKey, createVoiceOrder, openBundlePlanner,
     firstText: talkFirst,
     onCommitted: () => { try { setSearchQuery && setSearchQuery(""); setStatusFilter && setStatusFilter("all"); setDateFilter && setDateFilter("all"); setTab && setTab("orders"); } catch (e) {} },
     onClose: () => { setTalkOpen(false); setTalkFirst(""); setTimeout(() => { wakeActiveRef.current = true; setWakeActive(true); startWakeListen(); }, 1e3); }
