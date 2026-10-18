@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 281;
+const APP_VERSION = 282;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2119,7 +2119,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v281 (정리: 아래 메뉴 6개·더보기로 묶음, 음성 주문은 대화 주문 화면 하나로, 안 쓰는 옛 코드 약 2,200줄 정리)";
+const APP_BUILD = "v282 (배송 알림: 다음 날 12시·16시 배송중/완료, 그다음 날 9시 미도착 경고 + 플로팅 앱용 송장 목록)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -14151,6 +14151,48 @@ function readWorkbookFile(file, onRows, onError) {
   };
   reader.readAsArrayBuffer(file);
 }
+// v282: 배송 알림 시간표 — 발송일 D → 다음 배달일(일요일 건너뜀) 12시·16시(배송중/배송완료), 그 다음날 9시(도착 안 된 것만, 일요일이어도 알림)
+function dlvNextDeliveryDay(d) {
+  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  x.setDate(x.getDate() + 1);
+  if (x.getDay() === 0) x.setDate(x.getDate() + 1);
+  return x;
+}
+function dlvShipDate(o) {
+  const m = String((o && (o.shippedAt || o.orderDate)) || "").match(/(\d{4})-(\d{2})-(\d{2})/);
+  return m ? m[1] + "-" + m[2] + "-" + m[3] : "";
+}
+function dlvCheckpoints(shipDateStr) {
+  const m = String(shipDateStr || "").match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return [];
+  const d = new Date(+m[1], +m[2] - 1, +m[3]);
+  const a = dlvNextDeliveryDay(d);
+  const n = new Date(a.getFullYear(), a.getMonth(), a.getDate() + 1);
+  const at = (day, h) => { const t = new Date(day.getFullYear(), day.getMonth(), day.getDate(), h, 0, 0, 0); return t; };
+  return [{ kind: "status", hour: 12, t: at(a, 12) }, { kind: "status", hour: 16, t: at(a, 16) }, { kind: "late", hour: 9, t: at(n, 9) }];
+}
+function dlvTrackable(o) {
+  if (!o || o.status !== "shipped" || !o.invoiceNo) return false;
+  const cr = String(o.courier || "");
+  if (cr && !/우체국/.test(cr)) return false;
+  const dg = String(o.invoiceNo).replace(/\D/g, "");
+  return dg.length >= 10 && dg.length <= 14 && !!dlvShipDate(o);
+}
+// 지금 알려야 할 시간표 (이미 알린 것·20시간 지난 것은 빼고). 같은 발송일에 12시·16시가 둘 다 지났으면 최근 것 하나로
+function dlvDueGroups(orders, now, done) {
+  const byShip = {};
+  (orders || []).forEach((o) => { if (!dlvTrackable(o)) return; const sd = dlvShipDate(o); (byShip[sd] = byShip[sd] || []).push(o); });
+  const out = [];
+  Object.keys(byShip).sort().forEach((sd) => {
+    // 배송 현황(12·16시)은 그날 안에만, 도착 안 됨(9시)은 20시간 안에만 늦게라도 알림
+    const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+    const due = dlvCheckpoints(sd).filter((c) => c.t.getTime() <= now.getTime() && (c.kind === "status" ? sameDay(c.t, now) : now.getTime() - c.t.getTime() < 20 * 3600e3) && !(done && done[sd + "|" + c.kind + "|" + c.hour]));
+    if (!due.length) return;
+    const last = due[due.length - 1];
+    out.push({ ship: sd, kind: last.kind, hour: last.hour, ids: due.map((c) => sd + "|" + c.kind + "|" + c.hour), orders: byShip[sd] });
+  });
+  return out;
+}
 function App() {
   const [dataLoaded, setDataLoaded] = useState(false);
   const [busyMessage, setBusyMessage] = useState(null);
@@ -16820,6 +16862,8 @@ function App() {
   const epostLastRunRef = useRef(0);
   const epostOrdersRef = useRef(orders);
   epostOrdersRef.current = orders;
+  const epostInfoRef = useRef({});
+  epostInfoRef.current = epostInfo;
   async function runEpostCheck(force) {
     if (epostRunRef.current) return;
     if (typeof location === "undefined" || !/^https?:/.test(location.protocol)) { setEpostChecked(true); return; }
@@ -16860,7 +16904,7 @@ function App() {
           clearTimeout(timer);
         }
       }
-      if (Object.keys(info).length) setEpostInfo((prev) => Object.assign({}, prev, info));
+      if (Object.keys(info).length) { setEpostInfo((prev) => Object.assign({}, prev, info)); epostInfoRef.current = Object.assign({}, epostInfoRef.current, info); }
       if (doneIds.length) {
         const _now = /* @__PURE__ */ new Date();
         const _p = (n) => String(n).padStart(2, "0");
@@ -16868,12 +16912,88 @@ function App() {
         const idSet = new Set(doneIds);
         setOrders((prev) => prev.map((o) => idSet.has(o.id) && !o.deliveryConfirmed ? __spreadProps(__spreadValues({}, o), { deliveryConfirmed: true, deliveryConfirmedAt: stampIso, deliveryAuto: true }) : o));
       }
+      return info;
     } catch (e) {
+      return null;
     } finally {
       epostRunRef.current = false;
       setEpostChecked(true);
     }
   }
+  // v282: 정해진 시간 배송 알림 (다음날 12시·16시 = 배송중/배송완료, 그다음 날 9시 = 도착 안 된 것만)
+  const DLV_DONE_KEY = "joassam_dlv_done_" + DATA_DOC;
+  const [dlvNotice, setDlvNotice] = useState(null);
+  const dlvBusyRef = useRef(false);
+  async function runDeliveryCheckpoints() {
+    if (dlvBusyRef.current) return;
+    let done = {};
+    try { done = JSON.parse(localStorage.getItem(DLV_DONE_KEY) || "{}") || {}; } catch (e) { done = {}; }
+    const due = dlvDueGroups(epostOrdersRef.current, new Date(), done);
+    if (!due.length) return;
+    dlvBusyRef.current = true;
+    try {
+      let info = await runEpostCheck(true);
+      if (!info) { for (let i = 0; i < 30 && epostRunRef.current; i++) await new Promise((r) => setTimeout(r, 1000)); info = {}; }
+      const all = Object.assign({}, epostInfoRef.current, info || {});
+      const stOf = (o) => { const s = all[String(o.invoiceNo).replace(/\D/g, "")]; if (o.deliveryConfirmed || (s && s.state === "delivered")) return { st: "delivered", last: s ? s.last : "" }; return { st: s ? s.state : "unknown", last: s ? s.last || "" : "" }; };
+      const sections = [];
+      due.forEach((g) => {
+        const rows = g.orders.map((o) => Object.assign({ id: o.id, name: orderRecipientName(o) || "", no: String(o.invoiceNo) }, stOf(o)));
+        const notYet = rows.filter((r) => r.st !== "delivered");
+        if (g.kind === "late" && !notYet.length) return;
+        sections.push({ ship: g.ship, kind: g.kind, hour: g.hour, total: rows.length, delivered: rows.length - notYet.length, notYet, doneRows: rows.filter((r) => r.st === "delivered") });
+      });
+      const nd = Object.assign({}, done);
+      due.forEach((g) => g.ids.forEach((k) => { nd[k] = Date.now(); }));
+      Object.keys(nd).forEach((k) => { if (Date.now() - nd[k] > 12 * 864e5) delete nd[k]; });
+      try { localStorage.setItem(DLV_DONE_KEY, JSON.stringify(nd)); } catch (e) {}
+      if (!sections.length) return;
+      const late = sections.some((x) => x.kind === "late");
+      const md = (sd) => { const m = sd.match(/\d{4}-(\d{2})-(\d{2})/); return m ? +m[1] + "/" + +m[2] : sd; };
+      const title = late ? "🚨 아직 도착 안 된 택배가 있어요" : "🚚 배송 현황 (" + sections[0].hour + "시)";
+      const body = sections.map((x) => x.kind === "late" ? md(x.ship) + " 발송 중 도착 안 됨 " + x.notYet.length + "건: " + x.notYet.slice(0, 4).map((r) => r.name).join(", ") + (x.notYet.length > 4 ? " 외" : "") : md(x.ship) + " 발송 " + x.total + "건 — 배송완료 " + x.delivered + " · 배송중 " + x.notYet.length + (x.notYet.length ? " (" + x.notYet.slice(0, 3).map((r) => r.name).join(", ") + (x.notYet.length > 3 ? " 외" : "") + ")" : "")).join("\n");
+      setDlvNotice({ title, body, sections, late, at: Date.now() });
+      if (late) { try { playOverdueAlertSound(); } catch (e) {} }
+      try {
+        if (typeof Notification !== "undefined" && Notification.permission === "granted" && navigator.serviceWorker) {
+          navigator.serviceWorker.ready.then((reg) => reg.showNotification(title, { body, tag: "joassam-dlv", renotify: true, requireInteraction: late })).catch(() => {});
+        }
+      } catch (e) {}
+      try { logDiag("dlv_notice", { late, sections: sections.map((x) => ({ ship: x.ship, kind: x.kind, total: x.total, notYet: x.notYet.length })) }); } catch (e) {}
+    } finally {
+      dlvBusyRef.current = false;
+    }
+  }
+  useEffect(() => {
+    if (!dataLoaded) return;
+    const first = setTimeout(() => runDeliveryCheckpoints(), 4000);
+    const iv = setInterval(() => runDeliveryCheckpoints(), 60 * 1e3);
+    const onVis = () => { if (document.visibilityState === "visible") runDeliveryCheckpoints(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { clearTimeout(first); clearInterval(iv); document.removeEventListener("visibilitychange", onVis); };
+  }, [dataLoaded]);
+  // v282: 플로팅 앱(안드로이드)이 앱을 닫아 둬도 정해진 시간에 알릴 수 있게, 최근 발송한 우체국 송장 목록을 작은 문서로 따로 저장
+  const TRACK_DOC = IS_TEST ? "test_track" : "_track";
+  const trackSigRef = useRef("");
+  useEffect(() => {
+    if (!dataLoaded || !fbDb) return;
+    const t = setTimeout(() => {
+      try {
+        const cut = Date.now() - 6 * 864e5;
+        const items = (orders || []).filter((o) => dlvTrackable(o) && new Date(dlvShipDate(o) + "T00:00:00").getTime() >= cut)
+          .map((o) => ({ no: String(o.invoiceNo).replace(/\D/g, ""), n: orderRecipientName(o) || "", d: dlvShipDate(o), ok: o.deliveryConfirmed ? 1 : 0 }))
+          .sort((a, b) => (a.d + a.no).localeCompare(b.d + b.no)).slice(-400);
+        const sig = JSON.stringify(items);
+        if (sig === trackSigRef.current) return;
+        let stored = "";
+        try { stored = localStorage.getItem("joassam_track_sig_" + DATA_DOC) || ""; } catch (e) {}
+        trackSigRef.current = sig;
+        if (stored === sig) return;
+        fbDb.collection("stores").doc(TRACK_DOC).set({ json: sig, at: Date.now(), wv: APP_VERSION }).then(() => { try { localStorage.setItem("joassam_track_sig_" + DATA_DOC, sig); } catch (e) {} }).catch(() => { trackSigRef.current = ""; });
+      } catch (e) {}
+    }, 4000);
+    return () => clearTimeout(t);
+  }, [orders, dataLoaded]);
   useEffect(() => {
     if (!dataLoaded) return;
     const first = setTimeout(() => runEpostCheck(true), 1500);
@@ -20599,6 +20719,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
       },
       "\uC0C8\uB85C\uACE0\uCE68 \uD558\uAE30"
     )),
+    dlvNotice && React.createElement(DeliveryNoticeModal, { notice: dlvNotice, onClose: () => setDlvNotice(null), onOpenTrack: () => { setDlvNotice(null); setTab("deliverytrack"); } }),
     showOverdueAlert && /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(27,36,48,0.65)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1e5, padding: 24 } }, /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", borderRadius: 16, padding: "28px 24px", display: "flex", flexDirection: "column", alignItems: "center", gap: 12, maxWidth: 340, width: "100%", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 48 } }, "\u{1F69A}\u26A0\uFE0F"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 17, fontWeight: 700, color: "#A32D2D", textAlign: "center" } }, "\uB3C4\uCC29 \uD655\uC778\uC774 \uD544\uC694\uD55C \uBC30\uC1A1\uC774", /* @__PURE__ */ React.createElement("br", null), overdueDeliveries.length, "\uAC74 \uC788\uC5B4\uC694!"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, color: "#5F5E5A", textAlign: "center", lineHeight: 1.6, marginBottom: 8 } }, "\uC815\uC0C1 \uB3C4\uCC29\uC77C\uC774 \uC9C0\uB0AC\uB294\uB370 \uC544\uC9C1 \uD655\uC778\uB418\uC9C0 \uC54A\uC558\uC5B4\uC694. \uC2E0\uC120\uC2DD\uD488\uC740 \uB2A6\uC5B4\uC9C0\uBA74 \uBB38\uC81C\uAC00 \uB420 \uC218 \uC788\uC73C\uB2C8 \uBC14\uB85C \uD655\uC778\uD574\uC8FC\uC138\uC694."), /* @__PURE__ */ React.createElement(
       "button",
       {
@@ -21001,6 +21122,26 @@ function PartySwitch({ tab, setTab }) {
   const isV = tab === "vendorhub" || tab === "vendors";
   const b = (on, label, t) => React.createElement("button", { onClick: () => setTab(t), style: { flex: 1, padding: "9px 0", border: "none", borderRadius: 9, background: on ? "#2F6F4E" : "transparent", color: on ? "#fff" : "#2F6F4E", fontWeight: 800, fontSize: 14, cursor: "pointer" } }, label);
   return React.createElement("div", { style: { display: "flex", gap: 4, padding: 4, margin: "0 0 12px", background: "#EAF3EC", borderRadius: 12 } }, b(!isV, "\u{1F464} \uACE0\uAC1D", "customers"), b(isV, "\u{1F3EA} \uC5C5\uCCB4", "vendorhub"));
+}
+// v282: 정해진 시간 배송 알림 창
+function DeliveryNoticeModal({ notice, onClose, onOpenTrack }) {
+  const [perm, setPerm] = React.useState(() => { try { return typeof Notification !== "undefined" ? Notification.permission : "unsupported"; } catch (e) { return "unsupported"; } });
+  const md = (sd) => { const m = String(sd).match(/\d{4}-(\d{2})-(\d{2})/); return m ? +m[1] + "/" + +m[2] : sd; };
+  const tail = (no) => String(no || "").replace(/\D/g, "").slice(-4);
+  const row = (r, i) => React.createElement("div", { key: i, style: { display: "flex", gap: 8, fontSize: 13, padding: "5px 0", borderBottom: "1px solid #F1F2EC" } },
+    React.createElement("span", { style: { fontWeight: 700, flex: 1, minWidth: 0 } }, r.name || "(이름 없음)", React.createElement("span", { style: { color: "#888780", fontWeight: 400 } }, " …" + tail(r.no))),
+    React.createElement("span", { style: { color: r.st === "delivered" ? "#2F6F4E" : "#A32D2D", fontSize: 12, whiteSpace: "nowrap" } }, r.st === "delivered" ? "✅ 배송완료" : (r.last ? "🚚 " + r.last : r.st === "unknown" ? "❔ 조회 안 됨" : "🚚 배송중")));
+  return React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", zIndex: 100001, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 }, onClick: onClose },
+    React.createElement("div", { onClick: (e) => e.stopPropagation(), style: { background: "#fff", borderRadius: 16, padding: "20px 18px", width: "100%", maxWidth: 400, maxHeight: "86vh", overflowY: "auto", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" } },
+      React.createElement("div", { style: { fontSize: 18, fontWeight: 800, color: notice.late ? "#A32D2D" : "#1B2430", marginBottom: 10 } }, notice.title),
+      notice.sections.map((x, i) => React.createElement("div", { key: i, style: { marginBottom: 14, padding: 12, borderRadius: 12, background: x.kind === "late" ? "#FCEEEE" : "#F4F8F5", border: "1px solid " + (x.kind === "late" ? "#E9B9B9" : "#D7E6DC") } },
+        React.createElement("div", { style: { fontWeight: 800, fontSize: 14, marginBottom: 6 } }, x.kind === "late" ? `🚨 ${md(x.ship)} 발송 · 아직 도착 안 됨 ${x.notYet.length}건` : `${md(x.ship)} 발송 ${x.total}건 · ✅ 배송완료 ${x.delivered} · 🚚 배송중 ${x.notYet.length}`),
+        x.notYet.map(row),
+        x.kind !== "late" && x.doneRows.length ? React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A", marginTop: 6 } }, "배송완료: " + x.doneRows.map((r) => r.name).join(", ")) : null)),
+      perm === "default" ? React.createElement("button", { onClick: () => { try { Notification.requestPermission().then((p) => setPerm(p)); } catch (e) {} }, style: { width: "100%", padding: "10px 0", marginBottom: 8, borderRadius: 10, border: "1px solid #185FA5", background: "#E6F1FB", color: "#185FA5", fontWeight: 700, fontSize: 13, cursor: "pointer" } }, "🔔 앱이 뒤에 있을 때도 폰 알림으로 받기") : null,
+      React.createElement("div", { style: { display: "flex", gap: 8 } },
+        React.createElement("button", { onClick: onOpenTrack, style: { flex: 2, padding: "12px 0", borderRadius: 10, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 800, fontSize: 14, cursor: "pointer" } }, "배송 현황 보기"),
+        React.createElement("button", { onClick: onClose, style: { flex: 1, padding: "12px 0", borderRadius: 10, border: "1px solid #D3D1C7", background: "#fff", color: "#5F5E5A", fontWeight: 700, fontSize: 14, cursor: "pointer" } }, "닫기"))));
 }
 function TabButton({ label, icon, active, onClick, badge }) {
   return /* @__PURE__ */ React.createElement(
@@ -23136,6 +23277,7 @@ function GuideTab({ onBack }) {
         { h: "\uBE48 \uC591\uC2DD \uB2E4\uC6B4\uB85C\uB4DC", b: '"\uC5D1\uC140 \uD30C\uC77C \uC8FC\uBB38 \uB4F1\uB85D" \uD654\uBA74\uC5D0\uC11C "\u2B07 \uBE48 \uC591\uC2DD \uB2E4\uC6B4\uB85C\uB4DC"\uB97C \uB204\uB974\uBA74 \uCEEC\uB7FC\uB9CC \uC788\uB294 \uBE48 \uD30C\uC77C\uC744 \uBC1B\uC744 \uC218 \uC788\uC5B4\uC694. \uB2E4\uB978 \uC1FC\uD551\uBAB0(\uC2A4\uB9C8\uD2B8\uC2A4\uD1A0\uC5B4, \uCFE0\uD321 \uB4F1) \uC8FC\uBB38 \uB0B4\uC6A9\uC744 \uC774 \uC591\uC2DD\uC5D0 \uC62E\uACA8 \uC801\uC740 \uB4A4, \uAC19\uC740 \uD654\uBA74\uC5D0\uC11C \uB2E4\uC2DC \uC5C5\uB85C\uB4DC\uD558\uBA74 \uB4F1\uB85D\uB3FC\uC694.' },
         { h: "\uD655\uC778\uC774 \uD544\uC694\uD574\uC694 \uC54C\uB9BC", b: '\uC0C8\uB85C \uB4F1\uB85D\uB418\uB294 \uACE0\uAC1D\xB7\uC5C5\uCCB4\uAC00 \uAE30\uC874 \uC815\uBCF4\uC640 \uC560\uB9E4\uD558\uAC8C \uACB9\uCE58\uBA74(\uC804\uD654\uBC88\uD638\uB294 \uAC19\uC740\uB370 \uC774\uB984\uC774 \uB2E4\uB974\uAC70\uB098, \uC774\uB984\uC740 \uAC19\uC740\uB370 \uC8FC\uC18C\uAC00 \uB2E4\uB978 \uACBD\uC6B0) "\u26A0 \uD655\uC778\uC774 \uD544\uC694\uD574\uC694" \uCC3D\uC774 \uB5A0\uC694. \uAC19\uC740 \uC0AC\uB78C\uC774\uBA74 "\uC0AD\uC81C\uD558\uAE30", \uB2E4\uB978 \uC0AC\uB78C\uC774\uBA74 "\uADF8\uB300\uB85C \uB450\uAE30"\uB97C \uB204\uB974\uBA74 \uB3FC\uC694.' },
         { h: "\uC0C1\uD488\uBA85\uC774 \uD655\uC2E4\uD558\uC9C0 \uC54A\uC73C\uBA74", b: '\uC5D1\uC140 \uC0C1\uD488\uBA85\uC774 \uB4F1\uB85D\uB41C \uC0C1\uD488\uACFC \uD655\uC2E4\uD558\uAC8C \uC548 \uB9DE\uC73C\uBA74, \uCD94\uCE21\uD574\uC11C \uC5C9\uB6B1\uD55C \uC0C1\uD488\uC73C\uB85C \uB4F1\uB85D\uD558\uC9C0 \uC54A\uACE0 \uC6D0\uBCF8 \uC774\uB984 \uADF8\uB300\uB85C \uB0A8\uACA8\uB450\uACE0 "\uD655\uC778 \uD544\uC694" \uD45C\uC2DC\uB97C \uD574\uC918\uC694. \uBBF8\uB9AC\uBCF4\uAE30 \uD654\uBA74\uC5D0\uC11C \uC9C1\uC811 \uD655\uC778\uD558\uACE0 \uC62C\uBC14\uB978 \uC0C1\uD488\uC744 \uACE8\uB77C\uC8FC\uC138\uC694.' },
+        { h: "배송 알림 (정해진 시간)", b: "우체국 택배를 보낸 다음 날(일요일이면 월요일) 12시·16시에 배송중/배송완료를 나눠서 알려 주고, 그다음 날 9시(일요일이어도)에 아직 도착 안 된 것만 다시 경고해요. 예) 16일 발송 → 17일 12시·16시 현황 → 18일 9시 미도착 경고. 주문관리 앱이 열려 있으면 화면에 바로 뜨고, 닫혀 있었으면 다음에 열 때 알려요(현황은 그날 안, 경고는 20시간 안). 앱을 닫아 둬도 정확한 시간에 폰 알림을 받으려면 '조아저씨쌈 플로팅' 앱을 최신으로 업데이트하고 '정확한 시간 알림 허용'을 켜 주세요. 송장번호가 들어간 '발송완료' 주문만 대상이고, 우체국이 아닌 택배는 빠져요." },
         { h: "화면 구성 (아래 메뉴)", b: "홈 · 주문 · 🎙️ 대화 주문 · 고객·업체 · 상품 · 더보기. '고객·업체'에서는 위쪽 단추로 고객과 업체를 바꿔요. 배송 추적·도착 확인·택배접수 양식·쇼핑몰 연동·정기배송·백업은 '더보기'에 있고, 점검·AI 학습 도구는 '더보기 → 고급'에 모아 두었어요." },
         { h: "⑥ 대화 주문 화면 (음성으로 주문)", b: "아래 메뉴의 '🎙️ 대화 주문'을 누르거나, 조비서(🎤)에게 '매일소풍 주문할게'처럼 말하면 대화 주문 전용 화면이 열려요. '띵' 소리 뒤에 '적상추 4박스', '로메인 2키로 하나', '아니 5박스야', '로메인은 빼', '받는 사람 배수련 씨'처럼 말하면 위쪽 주문 카드에 바로 반영돼요. 등록된 이름이 확실하지 않으면 지어내지 않고 '크리스탈 벨 말씀이세요?'나 번호로 물어봐요('응', '1번'으로 대답). 등록에 없는 이름(예: '대솔 본점')은 지점을 고른 뒤 '앞으로 이렇게 알아들을까요?'에 '응' 하면 다음부터 바로 알아들어요. 박스가 여러 개로 나뉠 수 있으면 등록할 때 '📦 묶음 배송 확인' 창이 떠요. 고른 대로 박스마다 주문이 따로 등록돼요(말로 '전부 한 박스', '적상추랑 로메인 한 박스, 케일 따로'라고 먼저 정해도 돼요). 음성 주문은 이 화면 한 곳에서만 받아요. 카드에서 직접 수량·받는 분·묶음을 고칠 수도 있어요. 마지막에 '응'(또는 '주문 확정' 버튼)이면 주문 목록에 등록돼요." },
         { h: "대화 주문이 잘 안 들릴 때", b: "조비서가 말하는 동안에는 듣지 않아요. '띵' 소리가 난 뒤에 말씀하세요(🎤 버튼을 누르면 말을 끊고 바로 들어요). 듣는 중에는 마이크 옆 막대가 움직이는데, 가운데 선을 넘어야 '말'로 들어요. 주변이 아주 시끄러워 말이 안 끝나거나 잘리면 위쪽 '⏱ 말 끝: 자동'을 눌러 '✋ 말 끝: 버튼'으로 바꾸세요. 말을 다 한 뒤 🎤 버튼을 한 번 누르면 그때 받아써요. 내 말풍선 아래 '🎧 들은 말'은 받아쓰기가 실제로 들은 문장이고, 작은 글씨로 '말 2.1초 · 목소리가 주변 소음의 15배'처럼 얼마나 잘 들렸는지 나와요(5배보다 작으면 폰을 입 가까이). 주황색 '🔇' 줄은 들렸지만 버린 말과 그 이유예요. 정밀 인식(Gemini 키)이 있으면 더 정확하고, 들은 말이 등록 이름과 안 맞으면 더 정확한 모델로 한 번 더 받아써서 맞는 쪽을 골라요." },
