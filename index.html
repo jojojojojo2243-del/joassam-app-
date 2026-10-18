@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 279;
+const APP_VERSION = 280;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -2421,7 +2421,7 @@ function AiConfirmModal({ result, products, onApply, onClose }) {
     allOk ? "\u2705 \uC8FC\uBB38\uC11C\uC5D0 \uC801\uC6A9" : `\u23F3 ${pendingCount}\uAC1C \uD655\uC778 \uD544\uC694`
   ))));
 }
-const APP_BUILD = "v279 (음성 사전 확장: 상품·업체 오인식 341개, 수량·단위·명령어 말 고치기, 숫자로 받아쓴 이름 되돌리기)";
+const APP_BUILD = "v280 (주문·데이터 정밀 점검: 중복 등록·주소 없는 주문 막기, 거래명세서 업체 단가·수정/삭제 반영, 합치기·정리 중 데이터 보호, 송장 박스별 연결, 되돌리기)";
 const JARVIS_TAB_MAP = {
   goHome: "home",
   goOrders: "orders",
@@ -9414,6 +9414,22 @@ var VO2 = (function () {
       res.state = st; res.summary = summaryLines(st, idx);
       return res;
     }
+    // v280: 받는 주소·전화가 비어 있으면 등록하지 않고 먼저 물어봄 (주소 없는 주문이 송장에 나가는 것 방지)
+    var erc = effRecipient(st);
+    if (erc && !String(erc.address || "").trim()) {
+      var qa = erc.name + "님 받는 주소가 없어요. 받는 주소를 말씀해 주세요. (화면의 배송지 칸에 적으셔도 돼요)";
+      st.ctx.pending = { type: "address", q: qa };
+      if (st.status === "confirming") st.status = "collecting";
+      res.understood = true; res.state = st; res.summary = summaryLines(st, idx); res.reply = qa;
+      return res;
+    }
+    if (erc && !String(erc.phone || "").replace(/\D/g, "") && !st.shipping.phoneSkip) {
+      var qp = erc.name + "님 전화번호가 없어요. 받는 분 전화번호를 말씀해 주세요. 없으면 '없어'라고 해 주세요.";
+      st.ctx.pending = { type: "phone", q: qp };
+      if (st.status === "confirming") st.status = "collecting";
+      res.understood = true; res.state = st; res.summary = summaryLines(st, idx); res.reply = qp;
+      return res;
+    }
     if (unresolved.length) {
       res.understood = true;
       res.reply = unresolved.map(function (u) { return u.productName; }).join(", ") + "은 등록된 상품이 아니에요. 상품을 다시 말씀해 주세요.";
@@ -9607,7 +9623,7 @@ var VO2 = (function () {
         R.changes.push("전화번호를 " + ph + "로 변경했습니다");
         return "handled";
       }
-      if (no) { st.ctx.pending = null; return "handled"; }
+      if (no || /^(없어|없어요|없음|몰라|모름|없습니다)/.test(t)) { st.ctx.pending = null; st.shipping.phoneSkip = true; R.notes.push("전화번호 없이 진행할게요."); return "handled"; }
       return "pass";
     }
     if (p.type === "bundle") {
@@ -10967,7 +10983,7 @@ function VoiceDiagModal({ db, onClose }) {
 // 녹음 → 말 끝 판단 → 받아쓰기(정밀 Gemini, 안 되면 폰 기본 인식) → 등록 이름과 맞춰 고르기 → 주문 엔진(VO2) → 카드·대화 기록 → 짧은 음성 답
 // 조비서(JarvisSheet)의 예전 처리 단계(문장 덮어쓰기, 메아리 필터, 다른 명령 판단)는 거치지 않음.
 // 말하는 동안에는 마이크를 듣지 않음(반이중) → 조비서 자기 목소리를 받아쓰는 일이 없어 메아리 필터가 필요 없음.
-var TALK_VERSION = "v279";
+var TALK_VERSION = "v280";
 function talkSpoken(msg) {
   var t = String(msg || "");
   t = t.replace(/주문 내용을 확인해 주세요\.[\s\S]*?이대로 주문할까요\?/, "화면의 주문 내용을 확인하시고, 맞으면 '응', 고칠 게 있으면 말씀해 주세요.");
@@ -11048,6 +11064,9 @@ function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, crea
   const queueRef = React.useRef([]);
   const silentRef = React.useRef(0);
   const doneRef = React.useRef(false);
+  const committingRef = React.useRef(false);
+  const pickingRef = React.useRef(false);
+  const confirmTapRef = React.useRef(false);
   const webRecRef = React.useRef(null);
   const speakRef = React.useRef(null);
   const geminiOffUntilRef = React.useRef(0);
@@ -11551,12 +11570,18 @@ function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, crea
     return pb ? pb.boxes.map((b) => ({ items: b.map((e) => ({ productId: e.it.productId || null, name: e.it.productName, qty: e.qty })) })) : null;
   }
   function pickBundle(st) {
+    // v280: 묶음 창은 한 번에 하나만 (두 번 열리면 앞의 것이 영영 안 끝나 화면이 멈춤)
+    if (pickingRef.current) return Promise.resolve(null);
+    pickingRef.current = true;
     return new Promise((resolve) => {
+      const done = (v) => { pickingRef.current = false; resolve(v); };
       try { stopListening(); } catch (e) {}
-      try { openBundlePlanner(itemsOf(st), (st.vendor && st.vendor.name) || (st.orderer && st.orderer.name) || "", (bl) => resolve(bl && bl.length ? bl : null)); } catch (e) { resolve(null); }
+      try { openBundlePlanner(itemsOf(st), (st.vendor && st.vendor.name) || (st.orderer && st.orderer.name) || "", (bl) => done(bl && bl.length ? bl : null)); } catch (e) { done(null); }
     });
   }
   async function finishOrder(r) {
+    if (doneRef.current) return "이미 주문 목록에 등록했어요.";
+    if (pickingRef.current) return "묶음 창에서 골라 주세요.";
     let boxList = explicitBoxes(r.state);
     if (!boxList && chosenBoxRef.current && chosenBoxRef.current.sig === itemsSig(r.state)) boxList = chosenBoxRef.current.list;
     if (!boxList && openBundlePlanner && needChoice(r.state)) {
@@ -11569,10 +11594,14 @@ function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, crea
     return commit(r, boxList);
   }
   function commit(r, boxList) {
+    // v280: 같은 주문이 두 번 등록되지 않게 (확정 버튼 두 번·말과 버튼 동시)
+    if (doneRef.current || committingRef.current) return "이미 주문 목록에 등록했어요.";
+    committingRef.current = true;
     let created = null;
     const ord = Object.assign({}, r.order);
     if (boxList && boxList.length) { ord.boxList = boxList; ord._boxPlan = null; }
     try { created = createVoiceOrder ? createVoiceOrder(ord) : null; } catch (e) { created = null; }
+    committingRef.current = false;
     if (!created || (Array.isArray(created) && !created.length)) {
       setState(Object.assign({}, r.state, { status: "collecting" }));
       return "주문 등록에 실패했어요. 받는 분과 상품을 확인해 주세요.";
@@ -11603,6 +11632,9 @@ function TalkOrderScreen({ products, customers, vendors, orders, geminiKey, crea
     setState(r.state);
   }
   async function screenConfirm() {
+    if (doneRef.current || committingRef.current || pickingRef.current || confirmTapRef.current) return;
+    confirmTapRef.current = true;
+    setTimeout(() => { confirmTapRef.current = false; }, 800);
     stopListening();
     try { speakRef.current && speakRef.current.stop(); } catch (e) {}
     const r = VO2.step(Object.assign({}, stRef.current, { status: "confirming" }), "응 그대로 해", getDb(), stepOpt());
@@ -18127,8 +18159,8 @@ function App() {
     setSearchQuery(name || "");
     fireToast(`\u{1F4E6} ${partial ? "\uBD80\uBD84 " : ""}\uBB36\uC74C\uBC30\uC1A1: '${name}' \uC8FC\uBB38 ${targets.length}\uAC74\uC744 \uD55C \uBB36\uC74C\uC73C\uB85C \uCC98\uB9AC\uD588\uC5B4\uC694`);
   }
-  function recordUndo(label) {
-    lastUndoRef.current = { label: label || "\uBC29\uAE08 \uC791\uC5C5", orders, invoices };
+  function recordUndo(label, extra) {
+    lastUndoRef.current = Object.assign({ label: label || "\uBC29\uAE08 \uC791\uC5C5", orders, invoices }, extra || {});
   }
   function undoLast() {
     const u = lastUndoRef.current;
@@ -18145,7 +18177,9 @@ function App() {
       const curIds = new Set(curArr.map((o) => o && o.id));
       const missing = snapO.filter((o) => o && o.id && !curIds.has(o.id));
       missing.forEach((o) => resurrectRef.current.add(o.id));
-      const onlyNew = curArr.filter((o) => o && o.id && !snapMap[o.id]);
+      // v280: 되돌리는 작업이 '새로 만든 주문'이면 그 주문은 지움 (그 사이 다른 사람이 넣은 주문은 그대로)
+      const createdSet = new Set(Array.isArray(u.createdIds) ? u.createdIds : []);
+      const onlyNew = curArr.filter((o) => o && o.id && !snapMap[o.id] && !createdSet.has(o.id));
       const reverted = snapO.filter((o) => o && o.id);
       return [...onlyNew, ...reverted];
     });
@@ -19087,6 +19121,12 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     setOrders((prev) => prev.map((o) => {
       if (o.id !== orderId) return o;
       const next = __spreadValues(__spreadValues({}, o), updates);
+      // v280: 상품·수량을 고치면 입금금액도 맞춤 (따로 적어 넣은 금액이면 그대로)
+      if (updates.items && !("paymentAmount" in updates)) {
+        const sumOf = (its) => (its || []).reduce((s2, it) => s2 + effectiveItemPrice(it, productMap[it.productId], o.isBusiness, o.vendorId) * (Number(it.qty) || 0), 0);
+        const oldT = sumOf(o.items);
+        if (o.paymentAmount == null || o.paymentAmount === "" || Number(o.paymentAmount) === oldT) next.paymentAmount = sumOf(next.items);
+      }
       if (updates.reserveDate !== void 0 && isDateFriday(next.reserveDate)) {
         next.memo = withFridayNote(next.memo);
       }
@@ -19205,8 +19245,11 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
   function duplicateOrder(orderId) {
     const o = orders.find((x) => x.id === orderId);
     if (!o) return;
-    const copy = __spreadProps(__spreadValues({}, o), { id: uid("o"), status: "pending", invoiceNo: "", courier: "", createdAt: nowStamp(), orderDate: todayStr() });
+    // v280: 재주문은 새 주문 — 예전 묶음·박스 번호·발송/도착 기록·예약일은 가져오지 않음
+    const copy = __spreadProps(__spreadValues({}, o), { id: uid("o"), status: "pending", invoiceNo: "", courier: "", createdAt: nowStamp(), orderDate: todayStr(), batchId: "", boxInfo: "", isBundle: false, bundleId: "", reserveDate: "", shippedAt: "", deliveryConfirmed: false, deliveryConfirmedAt: "", deliveryAuto: false, manualBoxes: o.manualBoxes || null });
+    ["trackingNo", "epostInfo", "epostReqNo", "epostRegiNo", "epostStatus", "epostTrace", "trackStatus", "trackCheckedAt", "deliveredAt", "printedAt", "labelPrinted", "_epost"].forEach((k) => { if (k in copy) delete copy[k]; });
     setOrders((prev) => [copy, ...prev]);
+    try { if (copy.vendorId) regenGroupInvoices([copy]); } catch (e) {}
     fireToast("\uC7AC\uC8FC\uBB38\uC774 \uACB0\uC81C\uC644\uB8CC \uC0C1\uD0DC\uB85C \uC0C8\uB85C \uB4F1\uB85D\uB418\uC5C8\uC2B5\uB2C8\uB2E4");
   }
   function addSubscription(sub) {
@@ -19358,6 +19401,8 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     setProducts((prev) => prev.filter((p) => p.id !== id));
   }
   function removeProducts(ids) {
+    // v280: 여러 개 지울 때 '데이터 소실 위험'으로 저장이 막히지 않게 (직접 지운 것은 허용)
+    try { allowBulkDrop("products", products.length - (ids ? ids.length || ids.size || 0 : 0) - 2); } catch (e) {}
     const idSet = new Set(ids);
     setProducts((prev) => prev.filter((p) => !idSet.has(p.id)));
     fireToast(`\uC0C1\uD488 ${ids.length}\uAC1C\uB97C \uC0AD\uC81C\uD588\uC2B5\uB2C8\uB2E4`);
@@ -19476,7 +19521,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
         unit: p ? p.unit || "kg" : it.unit || "kg",
         // ★ v76: 규격 보존
         qty: it.qty,
-        price: effectiveItemPrice(it, p, true)
+        price: effectiveItemPrice(it, p, true, order.vendorId)
         // ★ v76: 업체 명세서는 도매가 기준(저장 단가 우선)
       };
     });
@@ -19558,6 +19603,88 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     }).filter((o) => keys.has(invGroupKey(o)));
     return saveInvoicesGrouped(union);
   }
+  // v280: 업체 주문을 고치거나 지우면 그 날짜의 자동 거래명세서도 같이 맞춤 (손으로 고친 명세서는 그대로 둠)
+  const invSyncPrevRef = useRef(null);
+  useEffect(() => {
+    if (!dataLoaded) { invSyncPrevRef.current = null; return; }
+    const prev = invSyncPrevRef.current;
+    invSyncPrevRef.current = orders;
+    if (!prev || prev === orders) return;
+    try {
+      const sig = (list) => {
+        const m = {};
+        (list || []).forEach((o) => {
+          if (!o || !o.vendorId) return;
+          const k = invGroupKey(o);
+          m[k] = (m[k] || "") + o.id + ":" + JSON.stringify((o.items || []).map((it) => [it.productId || it.name, Number(it.qty) || 0, it.price == null ? null : Number(it.price)])) + ";";
+        });
+        return m;
+      };
+      const a = sig(prev), b = sig(orders);
+      const changed = new Set();
+      Object.keys(a).forEach((k) => { if (a[k] !== b[k]) changed.add(k); });
+      Object.keys(b).forEach((k) => { if (a[k] !== b[k]) changed.add(k); });
+      const prevById = {};
+      (prev || []).forEach((o) => { if (o && o.id) prevById[o.id] = o; });
+      const curById = {};
+      (orders || []).forEach((o) => { if (o && o.id) curById[o.id] = o; });
+      const idChanged = new Set();
+      Object.keys(prevById).forEach((id) => { const x = prevById[id], y = curById[id]; if (x.vendorId && (!y || y.vendorId !== x.vendorId || JSON.stringify(y.items) !== JSON.stringify(x.items))) idChanged.add(id); });
+      if (!changed.size && !idChanged.size) return;
+      const bigDrop = prev.length - (orders || []).length > 20 || changed.size > 40;
+      if (bigDrop) return;
+      const groupOf = (gk) => (orders || []).filter((o) => o && o.vendorId && invGroupKey(o) === gk);
+      const mergedOf = (grp) => {
+        const base = __spreadProps(__spreadValues({}, grp[0]), { items: [] });
+        grp.forEach((o) => (o.items || []).forEach((it) => {
+          const ex = base.items.find((x) => (x.productId || x.name) === (it.productId || it.name));
+          if (ex) ex.qty = (Number(ex.qty) || 0) + (Number(it.qty) || 0); else base.items.push(__spreadValues({}, it));
+        }));
+        return base;
+      };
+      // 다른 업체·날짜로 옮겨진 주문 → 옮겨 간 쪽 명세서가 없으면 새로 만듦
+      const movedTo = new Set();
+      Object.keys(curById).forEach((id) => { const x = prevById[id], y = curById[id]; if (x && y && y.vendorId && invGroupKey(x) !== invGroupKey(y)) movedTo.add(invGroupKey(y)); });
+      setInvoices((cur) => {
+        let touched = false;
+        const out = [];
+        const haveGK = new Set();
+        (cur || []).forEach((inv) => {
+          if (!inv || inv.manualEdited) { out.push(inv); return; }
+          if (inv.groupKey && changed.has(inv.groupKey)) {
+            haveGK.add(inv.groupKey);
+            const grp = groupOf(inv.groupKey);
+            if (!grp.length) { touched = true; return; }
+            const re = makeInvoiceFromOrder(mergedOf(grp));
+            const nextInv = __spreadProps(__spreadValues({}, inv), { items: re.items, vendorName: re.vendorName });
+            if (JSON.stringify(nextInv.items) !== JSON.stringify(inv.items) || nextInv.vendorName !== inv.vendorName) touched = true;
+            out.push(nextInv);
+            return;
+          }
+          if (!inv.groupKey && inv.orderId && idChanged.has(inv.orderId)) {
+            const o = curById[inv.orderId];
+            if (!o || !o.vendorId) { touched = true; return; }
+            const re = makeInvoiceFromOrder(o);
+            if (JSON.stringify(re.items) !== JSON.stringify(inv.items)) touched = true;
+            out.push(__spreadProps(__spreadValues({}, inv), { items: re.items, vendorName: re.vendorName, vendorId: o.vendorId }));
+            return;
+          }
+          if (inv.groupKey) haveGK.add(inv.groupKey);
+          out.push(inv);
+        });
+        movedTo.forEach((gk) => {
+          if (haveGK.has(gk)) return;
+          const grp = groupOf(gk);
+          if (!grp.length) return;
+          const inv = makeInvoiceFromOrder(mergedOf(grp));
+          inv.groupKey = gk;
+          out.unshift(inv);
+          touched = true;
+        });
+        return touched ? out : cur;
+      });
+    } catch (e) {}
+  }, [orders, dataLoaded]);
   function backfillVendorInvoices() {
     const biz = (orders || []).filter((o) => o && o.vendorId);
     if (!biz.length) {
@@ -19731,7 +19858,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     fireToast("\uAC70\uB798\uBA85\uC138\uC11C\uB97C \uC800\uC7A5\uD588\uC2B5\uB2C8\uB2E4");
   }
   function updateInvoice(id, updates) {
-    setInvoices((prev) => prev.map((x) => x.id === id ? __spreadValues(__spreadValues({}, x), updates) : x));
+    setInvoices((prev) => prev.map((x) => x.id === id ? __spreadProps(__spreadValues(__spreadValues({}, x), updates), { manualEdited: true }) : x));
     fireToast("\uAC70\uB798\uBA85\uC138\uC11C\uB97C \uC218\uC815\uD588\uC2B5\uB2C8\uB2E4");
   }
   function removeInvoice(id) {
@@ -20232,102 +20359,80 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       fireToast("\uBE60\uC9C4 \uACE0\uAC1D\uC774\uB098 \uCD94\uAC00 \uC8FC\uC18C\uAC00 \uC5C6\uC5B4\uC694, \uC774\uBBF8 \uB2E4 \uC815\uB9AC\uB418\uC5B4 \uC788\uC5B4\uC694");
       return;
     }
-    setCustomers(merged.map((c) => patches[c.id] !== void 0 ? __spreadProps(__spreadValues({}, c), { memo: patches[c.id] }) : c));
+    setCustomers((prev) => {
+      const have = new Set(prev.map((c) => c && c.id));
+      const all = [...prev, ...toAdd.filter((c) => !have.has(c.id))];
+      return all.map((c) => c && patches[c.id] !== void 0 ? __spreadProps(__spreadValues({}, c), { memo: patches[c.id] }) : c);
+    });
     const parts = [];
     if (toAdd.length > 0) parts.push(`\uC2E0\uADDC \uACE0\uAC1D ${toAdd.length}\uBA85`);
     if (patchCount > 0) parts.push(`\uCD94\uAC00 \uC8FC\uC18C ${patchCount}\uAC74`);
     fireToast(`\uACFC\uAC70 \uC8FC\uBB38\uC5D0\uC11C ${parts.join(", ")}\uC744 \uCC3E\uC544\uC11C \uBC18\uC601\uD588\uC5B4\uC694`);
   }
   // ===== 1년 미주문 고객 정리 =====
+  // v280: 1년 미주문 정리 — 주문을 이름·전화·번호 어느 쪽으로 이어도 찾고, 주문 기록이 아예 없는(새로 넣은) 곳은 지우지 않음
+  function partyOrderStats(list, kind) {
+    const np = (p) => String(p || "").replace(/[^0-9]/g, "");
+    const nn = (x) => String(x || "").replace(/\s/g, "");
+    const byId = {}, byPhone = {}, byName = {};
+    const put = (m, k, t) => { if (!k) return; if (!m[k] || m[k] < t) m[k] = t; };
+    (orders || []).forEach((o) => {
+      if (!o) return;
+      const d = parseOrderDate(o);
+      const t = d ? d.getTime() : 1;
+      if (kind === "vendor") put(byId, o.vendorId, t); else put(byId, o.customerId, t);
+      [o.recipient, o.sender].forEach((pp) => { if (!pp) return; const ph = np(pp.phone); if (ph.length >= 8) put(byPhone, ph, t); put(byName, nn(pp.name), t); });
+    });
+    (invoices || []).forEach((inv) => { if (kind !== "vendor" || !inv) return; const t = inv.date ? new Date(inv.date).getTime() || 1 : 1; put(byId, inv.vendorId, t); put(byName, nn(inv.vendorName), t); });
+    return (list || []).map((x) => {
+      const ph = np(x.phone);
+      const last = Math.max(byId[x.id] || 0, ph.length >= 8 ? byPhone[ph] || 0 : 0, kind === "vendor" || nn(x.name).length >= 2 ? byName[nn(x.name)] || 0 : 0);
+      return { x, last };
+    });
+  }
   function removeInactiveCustomers() {
-    const now = Date.now();
-    const cutoff = now - 365 * 864e5; // 1년 전
-    const idx = getOrderCountIndex(orders);
-
-    // 1년간 주문이 없는 고객 찾기
-    const inactive = customers.filter((c) => {
-      const cp = ((c.phone) || "").replace(/[^0-9]/g, "");
-      const idE = c.id ? idx.byId[c.id] : null;
-      const phE = cp && cp.length >= 8 ? idx.byPhone[cp] : null;
-      const d365 = Math.max(idE ? idE.d365 : 0, phE ? phE.d365 : 0);
-      return d365 === 0; // 1년간 주문 0건
-    });
-
-    const active = customers.filter((c) => {
-      const cp = ((c.phone) || "").replace(/[^0-9]/g, "");
-      const idE = c.id ? idx.byId[c.id] : null;
-      const phE = cp && cp.length >= 8 ? idx.byPhone[cp] : null;
-      const d365 = Math.max(idE ? idE.d365 : 0, phE ? phE.d365 : 0);
-      return d365 > 0;
-    });
-
+    const c365 = Date.now() - 365 * 864e5;
+    const stats = partyOrderStats(customers, "customer");
+    const inactive = stats.filter((s) => s.last > 0 && s.last < c365).map((s) => s.x);
+    const never = stats.filter((s) => s.last === 0).length;
+    const keepN = customers.length - inactive.length;
     if (inactive.length === 0) {
-      fireToast("\u2705 1\uB144 \uBBF8\uC8FC\uBB38 \uACE0\uAC1D\uC774 \uC5C6\uC5B4\uC694");
+      fireToast("✅ 1년 미주문 고객이 없어요" + (never ? ` (주문 기록이 없는 ${never}명은 새로 넣은 고객일 수 있어 남겨 둡니다)` : ""));
       return;
     }
-
     askConfirm(
-      `1\uB144\uAC04 \uC8FC\uBB38\uC774 \uC5C6\uB294 \uACE0\uAC1D ${inactive.length}\uBA85\uC744 \uC0AD\uC81C\uD560\uAE4C\uC694?\n\n` +
-      `\uC0AD\uC81C: ${inactive.length}\uBA85\n` +
-      `\uC720\uC9C0: ${active.length}\uBA85\n\n` +
-      `(\uC0AD\uC81C\uD574\uB3C4 \uC8FC\uBB38 \uB370\uC774\uD130\uB294 \uBCF4\uC874\uB429\uB2C8\uB2E4)`,
+      `마지막 주문이 1년도 더 된 고객 ${inactive.length}명을 삭제할까요?\n\n삭제: ${inactive.length}명\n유지: ${keepN}명` + (never ? `\n(주문 기록이 없는 ${never}명은 지우지 않아요)` : "") + `\n\n` + inactive.slice(0, 10).map((c) => `• ${c.name || "이름없음"} ${c.phone || ""}`).join("\n") + `\n\n(삭제해도 주문 데이터는 보존됩니다)`,
       () => {
+        const rm = new Set(inactive.map((c) => c.id));
         justSubmittedRef.current = true;
-        allowBulkDrop("customers", active.length - 5);
-        setCustomers(active);
-        fireToast(`\u2705 ${inactive.length}\uBA85 \uC0AD\uC81C \u2192 ${active.length}\uBA85 \uB0A8\uC74C`);
-        pushSaveAlert("info",
-          `1\uB144 \uBBF8\uC8FC\uBB38 \uACE0\uAC1D ${inactive.length}\uBA85 \uC0AD\uC81C \uC644\uB8CC`,
-          inactive.slice(0, 10).map((c) => `${c.name || "\uC774\uB984\uC5C6\uC74C"} ${c.phone || ""}`).join("\n") + (inactive.length > 10 ? `\n... \uC678 ${inactive.length - 10}\uBA85` : "")
-        );
+        allowBulkDrop("customers", keepN - 5);
+        setCustomers((prev) => prev.filter((c) => !rm.has(c.id)));
+        fireToast(`✅ ${inactive.length}명 삭제 → ${keepN}명 남음`);
+        pushSaveAlert("info", `1년 미주문 고객 ${inactive.length}명 삭제 완료`, inactive.slice(0, 10).map((c) => `${c.name || "이름없음"} ${c.phone || ""}`).join("\n") + (inactive.length > 10 ? `\n... 외 ${inactive.length - 10}명` : ""));
       },
-      "\uC0AD\uC81C"
+      "삭제"
     );
   }
-
-  // ===== 1년 미주문 업체 정리 =====
   function removeInactiveVendors() {
-    const now = Date.now();
-    const c365 = now - 365 * 864e5;
-
-    // 업체별 최근 주문 날짜 계산
-    const vendorLastOrder = {};
-    orders.forEach((o) => {
-      if (!o || !o.vendorId) return;
-      const d = parseOrderDate(o);
-      if (!d) return;
-      const t = d.getTime();
-      if (!vendorLastOrder[o.vendorId] || vendorLastOrder[o.vendorId] < t) {
-        vendorLastOrder[o.vendorId] = t;
-      }
-    });
-
-    const inactive = vendors.filter((v) => {
-      const last = vendorLastOrder[v.id] || 0;
-      return last < c365; // 1년간 주문 없음
-    });
-
-    const active = vendors.filter((v) => {
-      const last = vendorLastOrder[v.id] || 0;
-      return last >= c365;
-    });
-
+    const c365 = Date.now() - 365 * 864e5;
+    const stats = partyOrderStats(vendors, "vendor");
+    const inactive = stats.filter((s) => s.last > 0 && s.last < c365).map((s) => s.x);
+    const never = stats.filter((s) => s.last === 0).length;
+    const keepN = vendors.length - inactive.length;
     if (inactive.length === 0) {
-      fireToast("\u2705 1\uB144 \uBBF8\uAC70\uB798 \uC5C5\uCCB4\uAC00 \uC5C6\uC5B4\uC694");
+      fireToast("✅ 1년 미거래 업체가 없어요" + (never ? ` (거래 기록이 없는 ${never}곳은 새로 넣은 업체일 수 있어 남겨 둡니다)` : ""));
       return;
     }
-
     askConfirm(
-      `1\uB144\uAC04 \uAC70\uB798\uAC00 \uC5C6\uB294 \uC5C5\uCCB4 ${inactive.length}\uACF3\uC744 \uC0AD\uC81C\uD560\uAE4C\uC694?\n\n` +
-      `\uC0AD\uC81C: ${inactive.length}\uACF3\n` +
-      `\uC720\uC9C0: ${active.length}\uACF3\n\n` +
-      inactive.slice(0, 10).map((v) => `\u2022 ${v.name || ""}`).join("\n"),
+      `마지막 거래가 1년도 더 된 업체 ${inactive.length}곳을 삭제할까요?\n\n삭제: ${inactive.length}곳\n유지: ${keepN}곳` + (never ? `\n(거래 기록이 없는 ${never}곳은 지우지 않아요)` : "") + `\n\n` + inactive.slice(0, 10).map((v) => `• ${v.name || ""}`).join("\n"),
       () => {
+        const rm = new Set(inactive.map((v) => v.id));
         justSubmittedRef.current = true;
-        setVendors(active);
-        fireToast(`\u2705 ${inactive.length}\uACF3 \uC0AD\uC81C \u2192 ${active.length}\uACF3 \uB0A8\uC74C`);
+        allowBulkDrop("vendors", keepN - 5);
+        setVendors((prev) => prev.filter((v) => !rm.has(v.id)));
+        fireToast(`✅ ${inactive.length}곳 삭제 → ${keepN}곳 남음`);
       },
-      "\uC0AD\uC81C"
+      "삭제"
     );
   }
 
@@ -20392,7 +20497,8 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       "고객 이름·전화번호 형식 정리\n\n· 이름 띄어쓰기: " + nameN + "명\n· 전화번호 하이픈: " + phN + "명\n\n예)\n" + ex + "\n\n고객을 지우지 않고 글자 형식만 고쳐요.",
       () => {
         const m = new Map(changes.map((x) => [x.id, x]));
-        setCustomers((prev) => prev.map((c) => { const x = m.get(c.id); return x ? __spreadProps(__spreadValues({}, c), { name: x.nn, phone: x.np }) : c; }));
+        // v280: 확인 창이 떠 있는 동안 다른 폰에서 고친 내용을 덮어쓰지 않게 '지금 값'에 형식만 다시 적용
+        setCustomers((prev) => prev.map((c) => m.has(c.id) ? __spreadProps(__spreadValues({}, c), { name: fixName(c.name), phone: c.phone ? fmtPhoneKo(c.phone) : c.phone }) : c));
         fireToast("✅ 고객 " + changes.length + "명의 이름·전화번호 형식을 정리했어요");
       },
       "정리하기"
@@ -20499,11 +20605,15 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
         skipGroups.forEach((g) => g.forEach((c) => keepList.push(c)));
         noPhoneList.forEach((c) => keepList.push(c));
 
-        const newOrders = orders.map((o) => o && o.customerId && idRemap[o.customerId] ? __spreadProps(__spreadValues({}, o), { customerId: idRemap[o.customerId] }) : o);
+        // v280: 확인 창이 떠 있는 동안 들어온 주문·고객이 사라지지 않게 '지금 목록'에 바뀐 것만 적용
+        const keepById = {};
+        keepList.forEach((c) => { if (c && c.id) keepById[c.id] = c; });
+        const removedIds = new Set(customers.filter((c) => c && c.id && !keepById[c.id]).map((c) => c.id));
         justSubmittedRef.current = true;
         allowBulkDrop("customers", keepList.length - 5);
-        setCustomers(keepList);
-        setOrders(newOrders);
+        setCustomers((prev) => prev.filter((c) => !(c && removedIds.has(c.id))).map((c) => (c && keepById[c.id]) || c));
+        setOrders((prev) => prev.map((o) => o && o.customerId && idRemap[o.customerId] ? __spreadProps(__spreadValues({}, o), { customerId: idRemap[o.customerId] }) : o));
+        try { setSubscriptions((prev) => (prev || []).map((x) => x && x.customerId && idRemap[x.customerId] ? __spreadProps(__spreadValues({}, x), { customerId: idRemap[x.customerId] }) : x)); } catch (e) {}
         fireToast(`\u2705 \uC911\uBCF5 \uC815\uB9AC \uC644\uB8CC \u2014 ${totalRemove}\uBA85 \uC81C\uAC70 (${afterCount}\uBA85 \uB0A8\uC74C). \uACF5\uC720\uD3F0 \uC758\uC2EC ${skipGroups.length}\uADF8\uB8F9\uC740 \uBCF4\uC874\uB418\uC5C8\uC5B4\uC694.`);
         if (skipGroups.length > 0) {
           pushSaveAlert("info", `\uACF5\uC720\uD3F0/\uAC00\uC871 ${skipGroups.length}\uADF8\uB8F9\uC740 \uC790\uB3D9 \uD569\uCE58\uB97C \uAC74\uB108\uB700\uC5B4\uC694`,
@@ -20611,10 +20721,15 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
         noPhoneList.filter((v) => !Object.values(bizGroups).flat().includes(v)).forEach((v) => keepList.push(v));
 
         // 주문의 vendorId 업데이트
-        const newOrders = orders.map((o) => o && o.vendorId && idRemap[o.vendorId] ? __spreadProps(__spreadValues({}, o), { vendorId: idRemap[o.vendorId] }) : o);
+        const keepById = {};
+        keepList.forEach((v) => { if (v && v.id) keepById[v.id] = v; });
+        const removedIds = new Set(vendors.filter((v) => v && v.id && !keepById[v.id]).map((v) => v.id));
         justSubmittedRef.current = true;
-        setVendors(keepList);
-        setOrders(newOrders);
+        allowBulkDrop("vendors", keepList.length - 5);
+        setVendors((prev) => prev.filter((v) => !(v && removedIds.has(v.id))).map((v) => (v && keepById[v.id]) || v));
+        setOrders((prev) => prev.map((o) => o && o.vendorId && idRemap[o.vendorId] ? __spreadProps(__spreadValues({}, o), { vendorId: idRemap[o.vendorId] }) : o));
+        // 거래명세서도 합친 업체로 (기간 명세서에서 빠지지 않게)
+        setInvoices((prev) => (prev || []).map((inv) => inv && inv.vendorId && idRemap[inv.vendorId] ? __spreadProps(__spreadValues({}, inv), { vendorId: idRemap[inv.vendorId], groupKey: inv.groupKey ? idRemap[inv.vendorId] + inv.groupKey.slice(inv.groupKey.indexOf("|")) : inv.groupKey }) : inv));
         fireToast(`\u2705 \uC5C5\uCCB4 \uC911\uBCF5 \uC815\uB9AC \uC644\uB8CC \u2014 ${totalRemove}\uAC1C \uC81C\uAC70 (${afterCount}\uAC1C \uB0A8\uC74C)`);
         if (skipGroups.length > 0) {
           pushSaveAlert("info", `\uB2E4\uB978 \uC9C0\uC810 \uAC00\uB2A5\uC131 ${skipGroups.length}\uADF8\uB8F9\uC740 \uC790\uB3D9 \uD569\uCE58\uB97C \uAC74\uB108\uB700\uC5B4\uC694`,
@@ -20652,27 +20767,33 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     }
     const total = boxList.length;
     const batchId = total > 1 ? uid("batch") : "";
-    const newOrders = boxList.map((box, i) => ({
+    const voVendorId = vo.vendorId || ((vendors && vendors.find((v) => v.name && recipient && recipient.name && v.name === recipient.name)) || {}).id || "";
+    const voBiz = !!(vo.vendorId || (vendors && vendors.some((v) => v.name && recipient.name && v.name === recipient.name)));
+    // v280: 손 주문과 똑같이 주문할 때의 단가를 저장 (업체 개별 단가 → 도매가 → 소비자가 순)
+    const priceOf = (it) => { const p = productMap[it.productId]; return p ? effectiveItemPrice({}, p, voBiz, voVendorId) : 0; };
+    const newOrders = boxList.map((box, i) => applyFridayNoteIfNeeded({
       id: uid("o"),
       batchId,
       customerId: vo.customerId || null,
       sender,
       recipient,
-      items: (box.items || []).map((it) => ({ productId: it.productId || null, name: it.name || "", qty: Number(it.qty) || 1 })),
+      items: (box.items || []).map((it) => ({ productId: it.productId || null, name: it.name || "", qty: Number(it.qty) || 1, price: priceOf(it) })),
       status: "pending",
       invoiceNo: "",
       courier: "",
       createdAt: nowStamp(),
       orderDate: todayStr(),
       reserveDate: vo.reserveDate || "",
-      boxVolume: "",
+      boxVolume: (() => { try { return String(volumeForBoxItems(box.items || [], productMap) || ""); } catch (e) { return ""; } })(),
       deliveryMessage: vo.deliveryMessage || "",
       memo: autoMemo,
       boxInfo: total > 1 ? `${i + 1}/${total}\uBC15\uC2A4` : "",
       message: "",
-      isBusiness: !!(vo.vendorId || (vendors && vendors.some((v) => v.name && recipient.name && v.name === recipient.name))),
-      vendorId: vo.vendorId || ((vendors && vendors.find((v) => v.name && recipient && recipient.name && v.name === recipient.name)) || {}).id || ""
+      isBusiness: voBiz,
+      vendorId: voVendorId
     }));
+    newOrders.forEach((o) => { o.paymentAmount = (o.items || []).reduce((s2, it) => s2 + (Number(it.price) || 0) * (Number(it.qty) || 0), 0); });
+    if (lastUndoRef.current) lastUndoRef.current.createdIds = newOrders.map((o) => o.id);
     // v267: 대화 주문에서 정한 묶음(전부 한 박스 / 따로 / 직접 묶기)을 주문의 박스 구성으로 저장 — 주문 상세 '발송 박스'에 그대로 나옴
     if (Array.isArray(vo._boxPlan) && vo._boxPlan.length && newOrders.length === 1) {
       try {
@@ -20689,6 +20810,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       const sameDay = prev.filter((o) => o && o.status !== "shipped" && orderRecipientName(o).replace(/\s/g, "") === nmNS && nmNS && o.orderDate === today && (o.vendorId || "") === (vo.vendorId || "") && (!addrNS || !(o.recipient && o.recipient.address) || String(o.recipient.address).replace(/\s/g, "") === addrNS));
       if (!vo.forceNew && sameDay.length && total === 1 && !plan && !(vo.boxList && vo.boxList.length)) {
         const targetId = sameDay[0].id;
+        if (lastUndoRef.current) lastUndoRef.current.createdIds = [];
         lastCreatedRef.current = { ids: [targetId], name: recipient.name };
         return prev.map((o) => {
           if (o.id !== targetId) return o;
@@ -20783,7 +20905,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       const sender = vendor ? { name: draft.sender.name || vendor.name, phone: draft.sender.phone || vendor.phone } : c ? { name: c.name, phone: c.phone } : draft.sender;
       const allItems = Object.entries(d.cart || {}).map(([productId, qty]) => {
         const p = productMap[productId];
-        const price = p ? biz || p.channel === "business" ? p.wholesalePrice || p.price : p.price : 0;
+        const price = p ? effectiveItemPrice({}, p, biz, vendor ? vendor.id : draft.vendorId || "") : 0;
         return { productId, name: p ? p.name : "", qty, price };
       });
       const manual = manualBoxesByIdx && manualBoxesByIdx[idx];
@@ -20793,7 +20915,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       return boxList.map((box, bIdx) => {
         const items = box.items.map((it) => {
           const p = productMap[it.productId];
-          const price = it.price != null ? it.price : p ? biz || p.channel === "business" ? p.wholesalePrice || p.price : p.price : 0;
+          const price = it.price != null ? it.price : p ? effectiveItemPrice({}, p, biz, vendor ? vendor.id : draft.vendorId || "") : 0;
           return { productId: it.productId, name: it.name || (p ? p.name : ""), qty: it.qty, price };
         });
         const total = items.reduce((s, it) => s + (it.price || 0) * it.qty, 0);
@@ -20890,16 +21012,18 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     const total = boxes.length;
     return boxes.map((box, i) => __spreadProps(__spreadValues({}, o), {
       id: `${o.id}-b${i + 1}`,
+      invoiceNo: i === 0 || !(Array.isArray(o.extraInvoiceNos) && o.extraInvoiceNos.length) ? o.invoiceNo || "" : o.extraInvoiceNos[i - 1] || "",
       items: (box.items || []).map((it) => {
         const p = productMap[it.productId];
-        const price = it.price != null ? it.price : p ? p.wholesalePrice || p.price : 0;
+        const price = it.price != null ? it.price : (() => { const src = (o.items || []).find((x) => (x.productId || x.name) === (it.productId || it.name)); return effectiveItemPrice(src || {}, p, o.isBusiness, o.vendorId); })();
         return { productId: it.productId, name: it.name || (p ? p.name : ""), qty: it.qty, price };
       }),
       boxVolume: String(box.volume || ""),
       boxInfo: `${i + 1}/${total}\uBC15\uC2A4`,
       paymentAmount: (box.items || []).reduce((s, it) => {
         const p = productMap[it.productId];
-        const price = it.price != null ? it.price : p ? p.wholesalePrice || p.price : 0;
+        const src = (o.items || []).find((x) => (x.productId || x.name) === (it.productId || it.name));
+        const price = it.price != null ? it.price : effectiveItemPrice(src || {}, p, o.isBusiness, o.vendorId);
         return s + price * it.qty;
       }, 0)
     }));
@@ -21316,10 +21440,10 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       const ambiguousVendors = scanAmbiguousNewEntries(newVendors, vendors).map((x) => __spreadProps(__spreadValues({}, x), { type: "vendor" }));
       const newOrders = toAdd.map((r, idx) => {
         const matched = customers.find((c) => r.recipPhone && (c.phone || "").replace(/-/g, "") === r.recipPhone.replace(/-/g, ""));
-        const total = r.items.reduce((s, it) => {
-          var _a, _b, _c;
-          return s + ((_c = (_b = (_a = productMap[it.productId]) == null ? void 0 : _a.price) != null ? _b : it.price) != null ? _c : 0) * (it.qty || 0);
-        }, 0);
+        // v280: 상품과 정확히 맞은 줄은 단가가 비어 0원으로 저장되던 문제 → 상품 단가(업체면 업체 단가·도매가)로
+        const rowVid = r.isBusiness ? vendorIdByRow[r.tempId] || "" : "";
+        const unitPrice = (it) => { const p = productMap[it.productId]; if (Number(it.price) > 0) return Number(it.price); return p ? effectiveItemPrice({}, p, !!r.isBusiness, rowVid) : 0; };
+        const total = r.items.reduce((s, it) => s + unitPrice(it) * (it.qty || 0), 0);
         return applyFridayNoteIfNeeded({
           id: uid("o"),
           batchId,
@@ -21330,7 +21454,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
           vendorId: r.isBusiness ? vendorIdByRow[r.tempId] || "" : "",
           sender: { name: r.senderName || r.recipName || "", phone: r.senderPhone || r.recipPhone || "" },
           recipient: { name: r.recipName || "", phone: r.recipPhone || "", address: r.address || "", postalCode: r.postalCode || "" },
-          items: (r.items || []).map((it) => ({ productId: it.productId || null, name: it.name || "\uC0C1\uD488", qty: it.qty || 1, price: it.price || 0 })),
+          items: (r.items || []).map((it) => ({ productId: it.productId || null, name: it.name || "\uC0C1\uD488", qty: it.qty || 1, price: unitPrice(it) })),
           status: r.invoiceNo ? "shipped" : "pending",
           invoiceNo: r.invoiceNo || "",
           courier: r.courier || "",
@@ -21478,21 +21602,36 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     setBusyMessage("\uC1A1\uC7A5\uBC88\uD638 \uD30C\uC77C\uC744 \uC77D\uACE0 \uC788\uC5B4\uC694...");
     readWorkbookFile(file, (rows) => {
       const matches = [];
+      const byOrder = {};
       rows.forEach((row) => {
         var _a2, _b;
-        const orderId = String(row["\uC8FC\uBB38\uBC88\uD638"] || "").trim();
+        let orderId = String(row["\uC8FC\uBB38\uBC88\uD638"] || "").trim();
         const invoiceNo = String(row["\uC1A1\uC7A5\uBC88\uD638"] || row["\uC6B4\uC1A1\uC7A5\uBC88\uD638"] || "").trim();
         if (!orderId || !invoiceNo) return;
-        const order = orders.find((o) => o.id === orderId);
+        // v280: 박스마다 나눠 내려받은 줄("주문번호-b1", "-b2")도 원래 주문에 연결 — 예전엔 일치하는 주문이 없다고 버려짐
+        let boxNo = 0;
+        let order = orders.find((o) => o.id === orderId);
+        if (!order) { const bm = orderId.match(/^(.*)-b(\d+)$/); if (bm) { order = orders.find((o) => o.id === bm[1]); if (order) { orderId = bm[1]; boxNo = Number(bm[2]) || 0; } } }
         if (!order) return;
+        if (byOrder[orderId]) { const ex = byOrder[orderId]; if (!ex.all.some((x) => x.no === invoiceNo)) ex.all.push({ no: invoiceNo, box: boxNo }); return; }
         const c = customerMap[order.customerId];
-        matches.push({
+        const m = {
           orderId,
           invoiceNo,
+          all: [{ no: invoiceNo, box: boxNo }],
           checked: true,
           name: ((_a2 = order.recipient) == null ? void 0 : _a2.name) || (c ? c.name : "") || "\uACE0\uAC1D",
           phone: ((_b = order.recipient) == null ? void 0 : _b.phone) || (c ? c.phone : "") || ""
-        });
+        };
+        byOrder[orderId] = m;
+        matches.push(m);
+      });
+      matches.forEach((m) => {
+        m.all.sort((a, b) => a.box - b.box);
+        m.invoiceNo = m.all[0].no;
+        m.extraInvoiceNos = m.all.slice(1).map((x) => x.no);
+        if (m.extraInvoiceNos.length) m.invoiceLabel = m.invoiceNo + " \uC678 " + m.extraInvoiceNos.length + "\uAC1C";
+        delete m.all;
       });
       if (matches.length === 0) {
         fireToast("\uC77C\uCE58\uD558\uB294 \uC8FC\uBB38\uBC88\uD638\uB97C \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4");
@@ -21538,6 +21677,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
         }
         return __spreadProps(__spreadValues({}, o), {
           invoiceNo: match.invoiceNo,
+          extraInvoiceNos: match.extraInvoiceNos && match.extraInvoiceNos.length ? match.extraInvoiceNos : o.extraInvoiceNos || [],
           courier,
           status: "shipped",
           memo: o.status !== "shipped" && isFridayToday() ? withFridayNote(o.memo) : o.memo,
@@ -26685,7 +26825,7 @@ function BulkOrderModal({ modal, productMap, products, onPickMode, toggleRow, on
 }
 function InvoicePreview({ preview, toggleRow, onApply, onCancel }) {
   const checkedCount = preview.rows.filter((r) => r.checked).length;
-  return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", { style: { fontSize: 19, fontWeight: 700, margin: "2px 0 8px", letterSpacing: "-0.02em" } }, "\uC1A1\uC7A5\uBC88\uD638 \uC801\uC6A9 \uD655\uC778"), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12, color: "#5F5E5A", margin: "0 0 14px" } }, "\uD30C\uC77C\uC5D0\uC11C \uC778\uC2DD\uD55C ", preview.rows.length, "\uAC74\uC785\uB2C8\uB2E4. \uC801\uC6A9\uD560 \uD56D\uBAA9\uC744 \uC120\uD0DD\uD558\uC138\uC694. \uC801\uC6A9\uD558\uBA74 \uBC1C\uC1A1\uC644\uB8CC\uB85C \uBC14\uB00C\uACE0 \uBC1C\uC1A1 \uC548\uB0B4 \uBB38\uC790\uAC00 \uB098\uAC11\uB2C8\uB2E4."), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 } }, preview.rows.map((r) => /* @__PURE__ */ React.createElement("label", { key: r.orderId, style: { display: "flex", alignItems: "center", gap: 10, background: "#fff", border: "1px solid #E2E4DD", borderRadius: 10, padding: "10px 12px", cursor: "pointer" } }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: r.checked, onChange: () => toggleRow(r.orderId) }), /* @__PURE__ */ React.createElement("div", { style: { flex: 1 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700 } }, r.name, " ", /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 400, color: "#888780", fontSize: 11 } }, "\xB7 ", r.orderId)), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A" } }, "\uC1A1\uC7A5\uBC88\uD638 ", r.invoiceNo))))), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: onCancel, style: { flex: 1, padding: "12px 0", borderRadius: 10, border: "1px solid #D3D1C7", background: "#fff", color: "#5F5E5A", fontWeight: 700, fontSize: 13, cursor: "pointer" } }, "\uCDE8\uC18C"), /* @__PURE__ */ React.createElement("button", { onClick: onApply, style: { flex: 2, padding: "12px 0", borderRadius: 10, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" } }, "\uC120\uD0DD ", checkedCount, "\uAC74 \uBC1C\uC1A1\uC644\uB8CC \uCC98\uB9AC")));
+  return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", { style: { fontSize: 19, fontWeight: 700, margin: "2px 0 8px", letterSpacing: "-0.02em" } }, "\uC1A1\uC7A5\uBC88\uD638 \uC801\uC6A9 \uD655\uC778"), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 12, color: "#5F5E5A", margin: "0 0 14px" } }, "\uD30C\uC77C\uC5D0\uC11C \uC778\uC2DD\uD55C ", preview.rows.length, "\uAC74\uC785\uB2C8\uB2E4. \uC801\uC6A9\uD560 \uD56D\uBAA9\uC744 \uC120\uD0DD\uD558\uC138\uC694. \uC801\uC6A9\uD558\uBA74 \uBC1C\uC1A1\uC644\uB8CC\uB85C \uBC14\uB00C\uACE0 \uBC1C\uC1A1 \uC548\uB0B4 \uBB38\uC790\uAC00 \uB098\uAC11\uB2C8\uB2E4."), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 } }, preview.rows.map((r) => /* @__PURE__ */ React.createElement("label", { key: r.orderId, style: { display: "flex", alignItems: "center", gap: 10, background: "#fff", border: "1px solid #E2E4DD", borderRadius: 10, padding: "10px 12px", cursor: "pointer" } }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: r.checked, onChange: () => toggleRow(r.orderId) }), /* @__PURE__ */ React.createElement("div", { style: { flex: 1 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700 } }, r.name, " ", /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 400, color: "#888780", fontSize: 11 } }, "\xB7 ", r.orderId)), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A" } }, "\uC1A1\uC7A5\uBC88\uD638 ", r.invoiceLabel || r.invoiceNo))))), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: onCancel, style: { flex: 1, padding: "12px 0", borderRadius: 10, border: "1px solid #D3D1C7", background: "#fff", color: "#5F5E5A", fontWeight: 700, fontSize: 13, cursor: "pointer" } }, "\uCDE8\uC18C"), /* @__PURE__ */ React.createElement("button", { onClick: onApply, style: { flex: 2, padding: "12px 0", borderRadius: 10, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" } }, "\uC120\uD0DD ", checkedCount, "\uAC74 \uBC1C\uC1A1\uC644\uB8CC \uCC98\uB9AC")));
 }
 function OrderDetail({ order, customer, productMap, products, total, onBack, setOrderStatus, updateOrder, deleteOrder, askConfirm, couriers }) {
   var _a, _b;
@@ -26701,7 +26841,7 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
     (order.items || []).forEach((it) => {
       const p = productMap[it.productId];
       const name = p ? p.name : it.name || "\uC0C1\uD488";
-      const price = it.price != null ? it.price : p ? p.wholesalePrice || p.price : 0;
+      const price = it.price != null ? it.price : p ? effectiveItemPrice({}, p, order.isBusiness, order.vendorId) : 0;
       const unit = p ? p.unit || "kg" : it.unit || "kg";
       const qty = Number(it.qty) || 0;
       for (let i = 0; i < qty; i++) unitItems.push({ productId: it.productId, name, price, unit });
@@ -26759,11 +26899,13 @@ function OrderDetail({ order, customer, productMap, products, total, onBack, set
     });
   }
   function saveEdit() {
+    // v280: 원래 있던 상품은 주문할 때 단가를 그대로 두고(주소만 고쳐도 값이 바뀌던 문제), 새로 넣은 상품만 지금 단가로
+    const oldPrice = {};
+    (order.items || []).forEach((it) => { if (it && it.productId && it.price != null && it.price !== "") oldPrice[it.productId] = Number(it.price); });
     const items = (form.items || []).map((it) => {
       if (it.productId) {
         const p = productMap[it.productId];
-        const isBiz = order.isBusiness || p && p.channel === "business";
-        const price = p ? isBiz ? p.wholesalePrice || p.price : p.price : it.price || 0;
+        const price = oldPrice[it.productId] != null ? oldPrice[it.productId] : p ? effectiveItemPrice({}, p, order.isBusiness, order.vendorId) : it.price || 0;
         return { productId: it.productId, name: p ? p.name : it.name || "\uC0C1\uD488", qty: it.qty, price };
       }
       return { productId: null, name: it.name || "\uC0C1\uD488", qty: it.qty, price: it.price || 0 };
