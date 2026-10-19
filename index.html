@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 282;
+const APP_VERSION = 283;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -196,8 +196,51 @@ const KO_ALERT_MAP = [
   [/Firebase에서/g, "서버에서"],
   [/Firebase 연결 오류/g, "서버 연결 오류"],
   [/Firebase 용량/g, "서버 저장공간"],
+  [/Function [A-Za-z.]+\(\) called with invalid data\.?\s*Unsupported field value: undefined/gi, "저장할 수 없는 빈 값이 들어 있어요(자동으로 지우고 다시 저장해요)"],
+  [/Function [A-Za-z.]+\(\) called with invalid data\.?/gi, "저장할 수 없는 값이 들어 있어요"],
+  [/\(found in (?:field [^)]*? in )?document stores\/(?:test_)?ord_(\d+)\)/gi, "(주문 저장 묶음 $1번)"],
+  [/\(found in (?:field [^)]*? in )?document stores\/(?:test_)?cus_(\d+)\)/gi, "(고객 저장 묶음 $1번)"],
+  [/\(found in (?:field [^)]*? in )?document stores\/[^)]*\)/gi, "(기본 저장 문서)"],
+  [/Document too large[^\n]*/gi, "저장 묶음이 너무 커요"],
+  [/exceeds the maximum allowed size[^\n]*/gi, "저장 묶음이 너무 커요"],
+  [/INTERNAL ASSERTION FAILED[^\n]*/gi, "앱 내부 오류"],
+  [/QuotaExceededError[^\n]*|The quota has been exceeded\.?/gi, "폰 저장공간이 가득 찼어요"],
+  [/AbortError[^\n]*|The operation was aborted\.?/gi, "시간이 너무 걸려 중단했어요"],
+  [/Load failed/gi, "불러오기 실패"],
+  [/timed? ?out|timeout/gi, "시간 초과"],
+  [/unauthenticated/gi, "로그인이 풀렸어요"],
+  [/invalid-argument/gi, "잘못된 값"],
+  [/not-found/gi, "찾을 수 없음"],
+  [/already-exists/gi, "이미 있음"],
+  [/internal/gi, "서버 내부 오류"],
+  [/HTTP (\d{3})/g, "서버 응답 $1"],
   [/Firebase/g, "서버"]
 ];
+// v283: 서버(Firestore)는 '빈 값(undefined)'을 저장하지 못함 → 저장 직전에 빈 값 칸을 지움 (서버 전용 특수값은 그대로 둠)
+function fsClean(v) {
+  if (v === undefined) return null;
+  if (Array.isArray(v)) {
+    let out = null;
+    for (let i = 0; i < v.length; i++) {
+      const x = v[i];
+      const y = x === undefined ? null : fsClean(x);
+      if (y !== x) { if (!out) out = v.slice(); out[i] = y; }
+    }
+    return out || v;
+  }
+  if (v && typeof v === "object" && Object.getPrototypeOf(v) === Object.prototype) {
+    let out = null;
+    for (const k in v) {
+      if (!Object.prototype.hasOwnProperty.call(v, k)) continue;
+      const x = v[k];
+      if (x === undefined) { if (!out) out = Object.assign({}, v); delete out[k]; continue; }
+      const y = fsClean(x);
+      if (y !== x) { if (!out) out = Object.assign({}, v); out[k] = y; }
+    }
+    return out || v;
+  }
+  return v;
+}
 function koAlertText(t) {
   let out = String(t == null ? "" : t);
   KO_ALERT_MAP.forEach(([re, ko]) => { out = out.replace(re, ko); });
@@ -626,6 +669,27 @@ if (firebaseReady) {
     fbAuth = firebase.auth();
     fbDb = firebase.firestore();
   }
+  // v283: 모든 서버 저장(set/update)에서 빈 값(undefined) 자동 제거 → "저장할 수 없는 빈 값" 오류 방지
+  try {
+    const FS = firebase.firestore;
+    [FS && FS.DocumentReference, FS && FS.Transaction, FS && FS.WriteBatch].forEach((C) => {
+      const P = C && C.prototype;
+      if (!P || P.__fsCleanPatched) return;
+      P.__fsCleanPatched = true;
+      if (typeof P.set === "function") {
+        const o1 = P.set;
+        P.set = function(a, b, c) { return C === FS.DocumentReference ? o1.call(this, fsClean(a), b) : o1.call(this, a, fsClean(b), c); };
+      }
+      if (typeof P.update === "function") {
+        const o2 = P.update;
+        P.update = function(...args) {
+          if (C === FS.DocumentReference) { if (args[0] && typeof args[0] === "object") args[0] = fsClean(args[0]); }
+          else if (args[1] && typeof args[1] === "object" && !(FS.FieldPath && args[1] instanceof FS.FieldPath)) args[1] = fsClean(args[1]);
+          return o2.apply(this, args);
+        };
+      }
+    });
+  } catch (e) {}
   try {
     fbAuth.signInAnonymously().catch(() => {
     });
@@ -15484,7 +15548,7 @@ function App() {
         const CH = 2000;
         const cChunks = [];
         for (let i = 0; i < custB.length; i += CH) cChunks.push(custB.slice(i, i + CH));
-        const jobs = cChunks.map((c, i) => fbDb.collection("stores").doc(bid + "_c" + i).set({ customers: c, part: i }));
+        const jobs = cChunks.map((c, i) => fbDb.collection("stores").doc(bid + "_c" + i).set({ customers: fsClean(c), part: i }));
         Promise.all(jobs).then(() => fbDb.collection("stores").doc(bid).set({
           orders: ordB.slice(0, 600),
           ordersCount: ordB.length,
@@ -15777,12 +15841,12 @@ function App() {
       // 변경된 청크만 저장
       for (let i = 0; i < ordChunks.length; i++) {
         if (ordSigs[i] !== prevOrdSigs[i]) {
-          jobs.push(fbDb.collection("stores").doc(ordChunkDocId(i)).set({ orders: ordChunks[i], sig: ordSigs[i], part: i, wv: APP_VERSION, wt: firebase.firestore.FieldValue.serverTimestamp() }));
+          jobs.push(fbDb.collection("stores").doc(ordChunkDocId(i)).set({ orders: fsClean(ordChunks[i]), sig: ordSigs[i], part: i, wv: APP_VERSION, wt: firebase.firestore.FieldValue.serverTimestamp() }));
         }
       }
       for (let i = 0; i < cusChunks.length; i++) {
         if (cusSigs[i] !== prevCusSigs[i]) {
-          jobs.push(fbDb.collection("stores").doc(cusChunkDocId(i)).set({ customers: cusChunks[i], sig: cusSigs[i], part: i, wv: APP_VERSION, wt: firebase.firestore.FieldValue.serverTimestamp() }));
+          jobs.push(fbDb.collection("stores").doc(cusChunkDocId(i)).set({ customers: fsClean(cusChunks[i]), sig: cusSigs[i], part: i, wv: APP_VERSION, wt: firebase.firestore.FieldValue.serverTimestamp() }));
         }
       }
       // 버그2 수정: 청크 저장 완료 후 메인 문서 업데이트, 그 다음 구 청크 삭제
@@ -15841,7 +15905,7 @@ function App() {
           [...changedC, ...(d.recentCustomers || [])].forEach((c) => {
             if (c && c.id && !seenC.has(c.id) && curCIds.has(c.id) && recentC.length < 300) { seenC.add(c.id); recentC.push(c); }
           });
-          t.set(mainRef, __spreadProps(__spreadValues({}, mainWrite), { vendors: mainPayload.vendors, products: mainPayload.products, vendSig: myVendSig, prodSig: myProdSig, fullSig: myFullSig, recentOrders: capByBytes(recent, 250000), recentCustomers: capByBytes(recentC, 100000), deletedOrderIds: tombArr, deletedCustomerIds: tombCArr, minClientVersion: Math.max(d.minClientVersion || 0, APP_VERSION), wv: APP_VERSION, wt: firebase.firestore.FieldValue.serverTimestamp() }), { merge: true });
+          t.set(mainRef, fsClean(__spreadProps(__spreadValues({}, mainWrite), { vendors: mainPayload.vendors, products: mainPayload.products, vendSig: myVendSig, prodSig: myProdSig, fullSig: myFullSig, recentOrders: capByBytes(recent, 250000), recentCustomers: capByBytes(recentC, 100000), deletedOrderIds: tombArr, deletedCustomerIds: tombCArr, minClientVersion: Math.max(d.minClientVersion || 0, APP_VERSION), wv: APP_VERSION, wt: firebase.firestore.FieldValue.serverTimestamp() })), { merge: true });
         })).then(() => {
           lastMainHashRef.current = mainHash;
           lastGoodDataRef.current = { customers: custArr, orders: ordersArr, products: mainPayload.products, vendors: mainPayload.vendors };
@@ -19729,9 +19793,9 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
           extraInvoiceNos: match.extraInvoiceNos && match.extraInvoiceNos.length ? match.extraInvoiceNos : o.extraInvoiceNos || [],
           courier,
           status: "shipped",
-          memo: o.status !== "shipped" && isFridayToday() ? withFridayNote(o.memo) : o.memo,
-          shippedAt: o.status !== "shipped" ? todayStr() : o.shippedAt,
-          deliveryConfirmed: o.status !== "shipped" ? false : o.deliveryConfirmed
+          memo: o.status !== "shipped" && isFridayToday() ? withFridayNote(o.memo) : o.memo || "",
+          shippedAt: o.status !== "shipped" ? todayStr() : o.shippedAt || o.orderDate || todayStr(),
+          deliveryConfirmed: o.status !== "shipped" ? false : !!o.deliveryConfirmed
         });
       })
     );
@@ -20194,29 +20258,29 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
   const errorAlerts = saveAlerts.filter(a => a.type === "error" && !a.read).length;
   return /* @__PURE__ */ React.createElement("div", { style: { minHeight: "100vh", background: isDesktop ? "#E2E4DD" : "#EDEEE8", display: "flex", justifyContent: "center", alignItems: isDesktop ? "flex-start" : "stretch", padding: isDesktop ? "32px 0" : "24px 0", boxSizing: "border-box", fontFamily: FONT } },
   /* 저장 알림 패널 */
-  showSaveAlerts && /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, zIndex: 99999, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "flex-end" }, onClick: () => setShowSaveAlerts(false) },
-    /* @__PURE__ */ React.createElement("div", { onClick: e => e.stopPropagation(), style: { width: "100%", maxWidth: 480, margin: "0 auto", background: "#fff", borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: "75vh", display: "flex", flexDirection: "column" } },
+  showSaveAlerts && /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, zIndex: 300001, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "flex-end" }, onClick: () => setShowSaveAlerts(false) },
+    /* @__PURE__ */ React.createElement("div", { onClick: e => e.stopPropagation(), style: { width: "100%", maxWidth: 720, margin: "0 auto", background: "#fff", borderTopLeftRadius: 20, borderTopRightRadius: 20, height: "88vh", maxHeight: "88vh", display: "flex", flexDirection: "column" } },
       /* 헤더 */
-      /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 18px 12px", borderBottom: "1px solid #E2E4DD" } },
-        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 16, fontWeight: 800 } }, "🔔 시스템 알림"),
+      /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "18px 18px 14px", borderBottom: "1px solid #E2E4DD", gap: 8, flexWrap: "wrap" } },
+        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 20, fontWeight: 800 } }, "🔔 시스템 알림"),
         /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8 } },
-          /* @__PURE__ */ React.createElement("button", { onClick: () => setSaveAlerts(prev => prev.map(a => ({...a, read: true}))), style: { fontSize: 12, color: "#5F5E5A", background: "none", border: "1px solid #E2E4DD", borderRadius: 6, padding: "4px 8px", cursor: "pointer" } }, "모두 읽음"),
-          /* @__PURE__ */ React.createElement("button", { onClick: () => { setSaveAlerts([]); setShowSaveAlerts(false); }, style: { fontSize: 12, color: "#A32D2D", background: "none", border: "1px solid #F5C2C2", borderRadius: 6, padding: "4px 8px", cursor: "pointer" } }, "전체 삭제"),
-          /* @__PURE__ */ React.createElement("button", { onClick: () => setShowSaveAlerts(false), style: { fontSize: 18, background: "none", border: "none", cursor: "pointer", color: "#5F5E5A" } }, "×")
+          /* @__PURE__ */ React.createElement("button", { onClick: () => setSaveAlerts(prev => prev.map(a => ({...a, read: true}))), style: { fontSize: 15, fontWeight: 700, color: "#5F5E5A", background: "none", border: "1px solid #D3D1C7", borderRadius: 8, padding: "8px 12px", cursor: "pointer" } }, "모두 읽음"),
+          /* @__PURE__ */ React.createElement("button", { onClick: () => { setSaveAlerts([]); setShowSaveAlerts(false); }, style: { fontSize: 15, fontWeight: 700, color: "#A32D2D", background: "none", border: "1px solid #F5C2C2", borderRadius: 8, padding: "8px 12px", cursor: "pointer" } }, "전체 삭제"),
+          /* @__PURE__ */ React.createElement("button", { onClick: () => setShowSaveAlerts(false), "aria-label": "닫기", style: { fontSize: 26, lineHeight: "26px", background: "none", border: "none", cursor: "pointer", color: "#5F5E5A", padding: "4px 8px" } }, "×")
         )
       ),
       /* 알림 목록 */
       /* @__PURE__ */ React.createElement("div", { style: { overflowY: "auto", flex: 1, padding: "8px 0" } },
         saveAlerts.length === 0
-          ? /* @__PURE__ */ React.createElement("div", { style: { padding: "32px 0", textAlign: "center", color: "#888780", fontSize: 14 } }, "✅ 저장 오류나 이상 없어요")
+          ? /* @__PURE__ */ React.createElement("div", { style: { padding: "48px 0", textAlign: "center", color: "#5F5E5A", fontSize: 18, fontWeight: 700 } }, "✅ 저장 오류나 이상 없어요")
           : saveAlerts.map(alert =>
             /* @__PURE__ */ React.createElement("div", { key: alert.id, onClick: () => setSaveAlerts(prev => prev.map(a => a.id === alert.id ? {...a, read: true} : a)),
-              style: { padding: "12px 18px", borderBottom: "1px solid #F1F2EC", background: alert.read ? "#fff" : alert.type === "error" ? "#FFF5F5" : "#FFFBF0", cursor: "pointer" } },
-              /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 4 } },
-                /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: alert.type === "error" ? "#A32D2D" : alert.type === "warn" ? "#8B6914" : "#2F6F4E" } }, alert.msg),
-                /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#888780", flexShrink: 0, marginLeft: 8 } }, alert.at)
+              style: { padding: "16px 18px", borderBottom: "1px solid #F1F2EC", background: alert.read ? "#fff" : alert.type === "error" ? "#FFF5F5" : "#FFFBF0", cursor: "pointer" } },
+              /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, marginBottom: 6 } },
+                /* @__PURE__ */ React.createElement("div", { style: { fontSize: 17, fontWeight: 800, lineHeight: 1.45, color: alert.type === "error" ? "#A32D2D" : alert.type === "warn" ? "#8B6914" : "#2F6F4E" } }, koAlertText(alert.msg)),
+                /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, color: "#888780", flexShrink: 0, whiteSpace: "nowrap" } }, alert.at)
               ),
-              alert.detail && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A", whiteSpace: "pre-line", lineHeight: 1.6, background: "#F7F8F4", borderRadius: 6, padding: "6px 8px", marginTop: 4 } }, alert.detail)
+              alert.detail && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 15, color: "#3D3D3A", whiteSpace: "pre-line", lineHeight: 1.65, background: "#F7F8F4", borderRadius: 8, padding: "10px 12px", marginTop: 6, wordBreak: "keep-all", overflowWrap: "anywhere" } }, koAlertText(alert.detail))
             )
           )
       )
@@ -20601,7 +20665,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
       }
     ), tab === "supplier" && /* @__PURE__ */ React.createElement(SupplierTab, { supplier, setSupplier, fireToast, onBack: () => setTab("vendorhub") })),
     dataCheckKind && /* @__PURE__ */ React.createElement(DataCheckModal, { customers, vendors, orders, updateCustomer, updateVendor, removeCustomersMulti, removeVendorsMulti, askConfirm, startKind: dataCheckKind, onClose: () => setDataCheckKind(null) }),
-    toast && /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", bottom: "calc(74px + env(safe-area-inset-bottom, 0px))", left: 16, right: 16, maxWidth: 358, margin: "0 auto", background: "#1B2430", color: "#fff", padding: "10px 14px", borderRadius: 12, fontSize: 12, textAlign: "center", zIndex: 3e5 } }, toast),
+    toast && /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", bottom: "calc(74px + env(safe-area-inset-bottom, 0px))", left: 16, right: 16, maxWidth: 460, margin: "0 auto", background: "#1B2430", color: "#fff", padding: "13px 16px", borderRadius: 12, fontSize: 15, fontWeight: 600, lineHeight: 1.5, textAlign: "center", zIndex: 3e5 } }, toast),
     boxPlanModal && /* @__PURE__ */ React.createElement(
       BoxPlanModal,
       {
