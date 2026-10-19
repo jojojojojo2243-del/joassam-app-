@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 283;
+const APP_VERSION = 284;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -17500,7 +17500,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
   function updateCustomer(id, updates) {
     setCustomers(
       (prev) => prev.map(
-        (c) => c.id === id ? __spreadProps(__spreadValues(__spreadValues({}, c), updates), { postalCode: updates.address !== void 0 ? estimatePostalCode(updates.address) : c.postalCode }) : c
+        (c) => c.id === id ? __spreadProps(__spreadValues(__spreadValues({}, c), updates), { postalCode: updates.address !== void 0 ? estimatePostalCode(updates.address || "") : c.postalCode || "" }) : c
       )
     );
     fireToast("\uACE0\uAC1D \uC815\uBCF4\uAC00 \uC218\uC815\uB418\uC5C8\uC2B5\uB2C8\uB2E4");
@@ -18611,7 +18611,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       () => {
         const m = new Map(changes.map((x) => [x.id, x]));
         // v280: 확인 창이 떠 있는 동안 다른 폰에서 고친 내용을 덮어쓰지 않게 '지금 값'에 형식만 다시 적용
-        setCustomers((prev) => prev.map((c) => m.has(c.id) ? __spreadProps(__spreadValues({}, c), { name: fixName(c.name), phone: c.phone ? fmtPhoneKo(c.phone) : c.phone }) : c));
+        setCustomers((prev) => prev.map((c) => m.has(c.id) ? __spreadProps(__spreadValues({}, c), { name: fixName(c.name), phone: c.phone ? fmtPhoneKo(c.phone) : c.phone || "" }) : c));
         fireToast("✅ 고객 " + changes.length + "명의 이름·전화번호 형식을 정리했어요");
       },
       "정리하기"
@@ -20835,30 +20835,48 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
       },
       "\uADF8\uB300\uB85C \uB450\uAE30 (\uB2E4\uB978 \uC0AC\uB78C/\uC5C5\uCCB4\uC784)"
     ))))))),
-    diagLog !== null && /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "flex-end", zIndex: 100001 } }, /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", borderRadius: "16px 16px 0 0", padding: "18px 16px", maxHeight: "80vh", width: "100%", display: "flex", flexDirection: "column" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 } }, /* @__PURE__ */ React.createElement("h2", { style: { fontSize: 15, fontWeight: 700, margin: 0 } }, "\u{1F50D} \uC9C4\uB2E8 \uAE30\uB85D (\uCD5C\uADFC 30\uAC74)"), /* @__PURE__ */ React.createElement("button", { onClick: () => setDiagLog(null), style: { border: "none", background: "none", fontSize: 20, cursor: "pointer", color: "#888780" } }, "\xD7")), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 10.5, color: "#888780", margin: "0 0 10px" } }, "sessionAge(\uBD84)\uAC00 \uD06C\uBA74 \uC624\uB798 \uCF1C\uC838\uC788\uB358 \uD0ED\uC774\uB77C\uB294 \uB73B\uC774\uC5D0\uC694. blocked_*\uB294 \uC548\uC804\uC7A5\uCE58\uAC00 \uC800\uC7A5\uC744 \uB9C9\uC740 \uAE30\uB85D\uC774\uC5D0\uC694."), /* @__PURE__ */ React.createElement("div", { style: { overflowY: "auto", flex: 1 } }, diagLog === "loading" && /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", padding: 30, color: "#888780", fontSize: 13 } }, "\uBD88\uB7EC\uC624\uB294 \uC911..."), Array.isArray(diagLog) && diagLog.length === 0 && /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", padding: 30, color: "#888780", fontSize: 13 } }, "\uC544\uC9C1 \uAE30\uB85D\uC774 \uC5C6\uC5B4\uC694"), Array.isArray(diagLog) && diagLog.map((ev, i) => {
+    diagLog !== null && /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", display: "flex", alignItems: "flex-end", zIndex: 100001 } }, /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", borderRadius: "16px 16px 0 0", padding: "18px 16px", maxHeight: "92vh", height: "92vh", width: "100%", maxWidth: 760, margin: "0 auto", display: "flex", flexDirection: "column" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 } }, /* @__PURE__ */ React.createElement("h2", { style: { fontSize: 20, fontWeight: 800, margin: 0 } }, "\u{1F50D} \uC9C4\uB2E8 \uAE30\uB85D (\uCD5C\uADFC 30\uAC74)"), /* @__PURE__ */ React.createElement("button", { onClick: () => setDiagLog(null), style: { border: "none", background: "none", fontSize: 28, cursor: "pointer", color: "#5F5E5A", padding: "0 6px" } }, "\xD7")), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 14, color: "#5F5E5A", margin: "4px 0 12px", lineHeight: 1.6 } }, "저장·불러오기 중 생긴 일을 기록해요. 빨간 글씨 '원인'이 실제 오류 내용이에요. '화면 연 지 N분'은 그 화면을 켜 둔 시간이에요."), /* @__PURE__ */ React.createElement("div", { style: { overflowY: "auto", flex: 1 } }, diagLog === "loading" && /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", padding: 30, color: "#888780", fontSize: 13 } }, "\uBD88\uB7EC\uC624\uB294 \uC911..."), Array.isArray(diagLog) && diagLog.length === 0 && /* @__PURE__ */ React.createElement("div", { style: { textAlign: "center", padding: 30, color: "#888780", fontSize: 13 } }, "\uC544\uC9C1 \uAE30\uB85D\uC774 \uC5C6\uC5B4\uC694"), Array.isArray(diagLog) && diagLog.map((ev, i) => {
       var _a, _b, _c, _d, _e;
       const isBlocked = (ev.event || "").startsWith("blocked");
       const isStale = (ev.event || "").startsWith("stale");
+      const isFail = /^(save_failed|save_alert_error|load_failed|preflight_failed|empty_load_rejected|chunks_mismatch_gave_up)$/.test(ev.event || "");
       const diagLabel = (evt) => {
-        const m = {"blocked_customers_dropped_to_empty":"🚨 고객 데이터 소실 차단","blocked_orders_dropped_to_empty":"🚨 주문 데이터 소실 차단","blocked_products_dropped_to_empty":"🚨 상품 데이터 소실 차단","blocked_vendors_dropped_to_empty":"🚨 업체 데이터 소실 차단","stale_version_detected":"⚠️ 구버전 탭 감지 (저장 차단)","save_failed":"❌ 저장 실패"};
+        const m = {
+          blocked_customers_dropped_to_empty: "🚨 고객 데이터 소실 차단", blocked_orders_dropped_to_empty: "🚨 주문 데이터 소실 차단", blocked_products_dropped_to_empty: "🚨 상품 데이터 소실 차단", blocked_vendors_dropped_to_empty: "🚨 업체 데이터 소실 차단",
+          blocked_customers_dropped_by_half: "🚨 고객 절반 이상 감소 차단", blocked_orders_dropped_by_half: "🚨 주문 절반 이상 감소 차단", blocked_products_dropped_by_half: "🚨 상품 절반 이상 감소 차단", blocked_vendors_dropped_by_half: "🚨 업체 절반 이상 감소 차단",
+          stale_version_detected: "⚠️ 옛 버전 화면 감지 (저장 차단)", outdated_client_blocked: "⚠️ 옛 버전이라 저장 막음",
+          save_failed: "❌ 저장 실패", save_alert_error: "❌ 저장 최종 실패 알림", stale_save_dropped: "↩️ 오래된 저장 취소 (더 새 저장으로 대체)",
+          load_failed: "⚠️ 불러오기 실패 (자동 재시도)", empty_load_rejected: "⚠️ 비어 보이는 데이터 거부 (다시 불러옴)", preflight_failed: "⚠️ 저장 전 서버 확인 실패",
+          quota_exceeded_wait: "⏳ 서버 하루 한도 초과 (대기)", save_conflict_retry: "🔁 다른 기기와 동시 저장 → 다시 맞춤",
+          chunks_settled_after_retry: "✅ 묶음 맞춰짐 (다시 읽은 뒤)", chunks_mismatch_gave_up: "⚠️ 묶음이 계속 안 맞음",
+          restored_unsynced_orders: "♻️ 저장 못 한 주문 복원", restored_recent_orders: "♻️ 빠진 최근 주문 복원", dropped_tombstoned_orders: "🗑️ 지운 주문 다시 안 나오게 거름",
+          removed_remote_deleted: "🗑️ 다른 기기에서 지운 주문 반영", removed_remote_deleted_customers: "🗑️ 다른 기기에서 지운 고객 반영",
+          merged_remote_before_save: "🔀 저장 전 다른 기기 내용 합침", merged_remote_edits: "🔀 다른 기기 수정 합침", merged_remote_orders: "🔀 다른 기기 주문 합침", merged_remote_customers: "🔀 다른 기기 고객 합침", merged_remote_vendors: "🔀 다른 기기 업체 합침", merged_remote_products: "🔀 다른 기기 상품 합침",
+          kept_local_customers: "📌 이 기기 고객 수정 유지", kept_local_deletes: "📌 이 기기 삭제 유지", list_fix_applied: "🛠️ 목록 자동 정리", biz_flag_fixed: "🛠️ 업체 표시 자동 수정", dlv_notice: "📦 배송 알림 표시"
+        };
         return m[evt] || evt;
       };
       const diagDesc = (evt) => {
-        if (evt === "blocked_customers_dropped_to_empty") return "고객 목록이 0건으로 사라지려 해서 안전장치가 저장을 막았어요. 앱 시작 직후 Firebase 로딩 전에 빈 상태로 저장 시도한 것이며 실제 데이터 손실은 없습니다.";
-        if (evt === "blocked_orders_dropped_to_empty") return "주문 목록이 0건으로 사라지려 해서 안전장치가 저장을 막았어요. 실제 주문 데이터는 안전합니다.";
-        if (evt === "blocked_products_dropped_to_empty") return "상품 목록이 0건으로 사라지려 해서 저장을 막았어요.";
-        if (evt === "blocked_vendors_dropped_to_empty") return "업체 목록이 0건으로 사라지려 해서 저장을 막았어요.";
-        if (evt === "stale_version_detected") return "구버전 캐시가 남아있는 탭이 새 버전과 충돌해서 저장을 차단했어요. 앱을 껐다 켜면 해결됩니다.";
-        if (evt === "save_failed") return "Firebase 저장에 실패했어요. 인터넷 연결을 확인해주세요.";
+        if (/^blocked_.*_to_empty$/.test(evt)) return "목록이 0건으로 사라지려 해서 안전장치가 저장을 막았어요. 실제 데이터는 안전합니다.";
+        if (/^blocked_.*_by_half$/.test(evt)) return "목록이 한 번에 절반 넘게 줄어들려 해서 안전장치가 저장을 막았어요. 실제 데이터는 안전합니다.";
+        if (evt === "stale_version_detected" || evt === "outdated_client_blocked") return "옛 버전 화면이 새 데이터를 덮지 않게 저장을 막았어요. 앱을 껐다 켜면 해결됩니다.";
+        if (evt === "save_failed") return "서버 저장에 실패해서 자동으로 다시 시도했어요. 아래 '원인'을 확인하세요.";
+        if (evt === "save_alert_error") return "여러 번 다시 시도해도 저장이 안 됐어요. 데이터는 이 기기에 보관되고 계속 자동으로 다시 저장해요.";
+        if (evt === "stale_save_dropped") return "실패한 저장보다 더 새 저장이 이미 시작돼서 옛 저장은 버렸어요. 정상 동작이에요.";
+        if (evt === "load_failed") return "서버에서 데이터를 다 불러오지 못해서 5초 뒤 자동으로 다시 불러왔어요. 불러오기 전에는 저장하지 않아 데이터는 안전해요.";
+        if (evt === "empty_load_rejected") return "서버에서 받은 목록이 비어 보여서 적용하지 않고 다시 불러왔어요.";
+        if (evt === "preflight_failed") return "저장 직전에 서버 최신 내용을 확인하지 못해서 저장을 미루고 다시 시도했어요.";
+        if (evt === "quota_exceeded_wait") return "서버 하루 사용 한도를 넘었어요. 오후 4시쯤 풀리면 자동 저장돼요.";
         return "";
       };
-      const borderColor = isBlocked ? "#A32D2D" : isStale ? "#B86800" : "#2F6F4E";
-      const textColor = isBlocked ? "#A32D2D" : isStale ? "#B86800" : "#2F6F4E";
+      const borderColor = isBlocked || isFail ? "#A32D2D" : isStale ? "#B86800" : "#2F6F4E";
+      const textColor = isBlocked || isFail ? "#A32D2D" : isStale ? "#B86800" : "#2F6F4E";
       return /* @__PURE__ */ React.createElement("div", { key: i, style: { border: "1px solid #E2E4DD", borderLeft: `4px solid ${borderColor}`, borderRadius: 8, padding: "8px 10px", marginBottom: 6 } },
-        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12, fontWeight: 700, color: textColor } }, diagLabel(ev.event || "")),
-        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#333", marginTop: 3, lineHeight: 1.6 } }, diagDesc(ev.event || "")),
-        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#5F5E5A", marginTop: 4 } }, ev.at, " · v", (_a = ev.appVersion) != null ? _a : "?", " · 세션 ", Math.round((ev.sessionAgeSec || 0) / 60), "분째 · 화면상태 ", ev.visibility),
-        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#5F5E5A" } }, "저장하려던 값 — 고객", (_b = ev.counts) == null ? void 0 : _b.customers, " 주문", (_c = ev.counts) == null ? void 0 : _c.orders, " 상품", (_d = ev.counts) == null ? void 0 : _d.products, " 업체", (_e = ev.counts) == null ? void 0 : _e.vendors),
+        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 16, fontWeight: 800, color: textColor } }, diagLabel(ev.event || "")),
+        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 14, color: "#333", marginTop: 4, lineHeight: 1.6 } }, diagDesc(ev.event || "")),
+        (ev.detail || ev.msg) && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 14, color: "#7A1F1F", background: "#FFF5F5", borderRadius: 6, padding: "6px 8px", marginTop: 6, lineHeight: 1.55, whiteSpace: "pre-line", wordBreak: "keep-all", overflowWrap: "anywhere" } }, "원인: ", koAlertText(String(ev.detail || ev.msg).slice(0, 300)), ev.retry != null ? " (재시도 " + ev.retry + "회째)" : ""),
+        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, color: "#5F5E5A", marginTop: 6 } }, (() => { try { return new Date(ev.at).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }); } catch (e) { return ev.at; } })(), " · v", (_a = ev.appVersion) != null ? _a : "?", " · 화면 연 지 ", Math.round((ev.sessionAgeSec || 0) / 60), "분 · ", ev.visibility === "visible" ? "보는 중" : ev.visibility === "hidden" ? "뒤에 있음(백그라운드)" : (ev.visibility || "")),
+        /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, color: "#5F5E5A" } }, "저장하려던 값 — 고객", (_b = ev.counts) == null ? void 0 : _b.customers, " 주문", (_c = ev.counts) == null ? void 0 : _c.orders, " 상품", (_d = ev.counts) == null ? void 0 : _d.products, " 업체", (_e = ev.counts) == null ? void 0 : _e.vendors),
         ev.prevCounts && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#888780" } }, "직전 정상값 — 고객", ev.prevCounts.customers, " 주문", ev.prevCounts.orders, " 상품", ev.prevCounts.products, " 업체", ev.prevCounts.vendors),
         ev.storedCounts && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#888780" } }, "폰에 기억된 값 — 고객", ev.storedCounts.customers, " 주문", ev.storedCounts.orders, " 상품", ev.storedCounts.products, " 업체", ev.storedCounts.vendors),
         /* @__PURE__ */ React.createElement("div", { style: { fontSize: 9.5, color: "#B9BBB2", marginTop: 2, wordBreak: "break-all" } }, ev.sessionId, " · ", ev.href));
@@ -23067,7 +23085,7 @@ function InvoiceEditor({ mode, initial, vendors, products, onCancel, onSave }) {
   }
   function pickProduct(i, pid) {
     const p = products.find((x) => x.id === pid);
-    if (p) setItems((prev) => prev.map((it, idx) => idx === i ? __spreadProps(__spreadValues({}, it), { name: p.name, unit: p.unit || "kg", price: p.wholesalePrice || p.price }) : it));
+    if (p) setItems((prev) => prev.map((it, idx) => idx === i ? __spreadProps(__spreadValues({}, it), { name: p.name, unit: p.unit || "kg", price: p.wholesalePrice || p.price || 0 }) : it));
   }
   const total = items.reduce((s, it) => s + (Number(it.price) || 0) * (Number(it.qty) || 0), 0);
   function save() {
