@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 285;
+const APP_VERSION = 286;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1629,7 +1629,7 @@ function smartParseBlock(rawLines) {
 function smartSplitRecipients(text) {
   const PHONE_G = /01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/g;
   const raw = String(text || "").replace(/\r\n?/g, "\n");
-  if (/(보내는\s*분|주문자|발송인|발신인|보내는\s*사람)/.test(raw) && (raw.match(PHONE_G) || []).length >= 2) return null;
+  if (new RegExp(SENDER_LABEL_SRC).test(raw) && (raw.match(PHONE_G) || []).length >= 2) return null;
   const chunks = raw.split(/\n\s*\n/).map((c) => c.split("\n").map((l) => l.trim()).filter(Boolean)).filter((c) => c.length);
   const phoneCount = (c) => new Set((c.join("\n").match(PHONE_G) || []).map((p) => p.replace(/[^0-9]/g, ""))).size;
   if (chunks.some((c) => phoneCount(c) > 1)) return null;
@@ -1651,6 +1651,7 @@ function smartSplitRecipients(text) {
 }
 
 function parseMultipleRecipients(text, products) {
+  try { const sp0 = splitLabeledSender(text); if (sp0) text = sp0.rest; } catch (e) {}
   // v242: 먼저 새 인식기(이름·전화·주소 순서가 제각각인 문자 대응), 못 읽는 항목만 옛 방식으로 보충
   try {
     const sp = smartSplitRecipients(text);
@@ -1718,7 +1719,57 @@ function parseMultipleRecipientsOld(text, products) {
   }
   return results;
 }
+// v286: '보내는분' 줄(오타 포함: 보내느분·보내눈분·보낸분·보내는이·주문자·발송인…)을 먼저 떼어내고 나머지를 받는분으로 읽기
+const SENDER_LABEL_SRC = "(?:보\\s*내\\s*[는느눈늘]\\s*(?:분|븐|뷴|사람|이)|보내시는\\s*분|보\\s*낸\\s*(?:분|사람|이)|주문\\s*하신\\s*분|주문자|발송\\s*(?:인|자)|발신\\s*인)";
+function splitLabeledSender(text) {
+  const raw = String(text || "").replace(/\r\n?/g, "\n");
+  const PHONE_G = /01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/g;
+  const PHONE = /01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/;
+  const LBL = new RegExp(SENDER_LABEL_SRC + "\\s*(?:정보|성함|이름|명|연락처)?\\s*[:：)\\]\\-]?\\s*");
+  const RECV = /(받\s*[는느]\s*(분|사람|이)|수령인|수취인|배송지|받으시는\s*분)/;
+  const lines = raw.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(LBL);
+    if (!m) continue;
+    const before = lines[i].slice(0, m.index);
+    let rest = lines[i].slice(m.index + m[0].length);
+    const used = [i];
+    let j = i + 1;
+    while ((!/[가-힣]{2}/.test(rest.replace(PHONE, "").replace(LBL, "")) || !PHONE.test(rest)) && j < lines.length && j <= i + 2) {
+      if (!lines[j].trim()) { j++; continue; }
+      if (RECV.test(lines[j]) || (!LBL.test(lines[j]) && /(시|도|구|군|로|길|동|읍|면)\s*\d/.test(lines[j]))) break;
+      rest += " " + lines[j].replace(LBL, " "); used.push(j); j++;
+    }
+    const ph = rest.match(PHONE);
+    const nameSrc = rest.replace(PHONE_G, " ").replace(/(연락처|전화번호|전화|핸드폰|휴대폰|번호|성함|이름|입니다|이에요|예요|요)\s*[:：]?/g, " ");
+    const nm = (nameSrc.match(/[가-힣]{2,5}/) || [""])[0];
+    if (!nm && !ph) continue;
+    const restLines = lines.filter((_, k) => !used.includes(k));
+    if (before.trim()) restLines.splice(i, 0, before);
+    const restText = restLines.join("\n").trim();
+    const sp = ph ? ph[0].replace(/[^0-9]/g, "") : "";
+    const restPhones = new Set((restText.match(PHONE_G) || []).map((x) => x.replace(/[^0-9]/g, "")));
+    // 받는 쪽에 전화번호가 남아 있을 때만 떼어냄 (주문자=받는분 한 사람인 문자는 그대로)
+    if (![...restPhones].some((x) => x !== sp)) return null;
+    return { sender: { name: nm, phone: sp }, rest: restText };
+  }
+  return null;
+}
 function parseOrderMessage(text, products) {
+  try {
+    const sp = splitLabeledSender(text);
+    if (sp) {
+      const r = parseOrderMessageCore(sp.rest, products);
+      const recipPhone = r.recipPhone && r.recipPhone !== sp.sender.phone ? r.recipPhone : (r.senderPhone !== sp.sender.phone ? r.senderPhone : r.recipPhone);
+      let rn = r.recipName || (r.senderName !== sp.sender.name ? r.senderName : "") || "";
+      let addr = r.address || "";
+      if (!rn || !addr) { try { const sb = smartParseBlock(sp.rest.split("\n").map((l) => l.trim()).filter(Boolean)); if (!rn && sb.name && sb.name !== sp.sender.name) rn = sb.name; if (!addr && sb.address) addr = sb.address; } catch (e) {} }
+      return Object.assign({}, r, { senderName: sp.sender.name || "", senderPhone: sp.sender.phone || "", recipName: rn, recipPhone: recipPhone || "", address: addr });
+    }
+  } catch (e) {}
+  return parseOrderMessageCore(text, products);
+}
+function parseOrderMessageCore(text, products) {
   const result = { senderName: "", senderPhone: "", recipName: "", recipPhone: "", address: "", reserveDate: "", deliveryMessage: "", items: [] };
   if (!text) return result;
   const normText = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
@@ -22063,7 +22114,7 @@ function SenderPredictModal({ sharedText, guessed, customers, onConfirm, onClose
 // v237: 문자 안에 "보내는분/주문자: 이름 전화번호"가 적혀 있으면 찾아내기
 function extractLabeledSender(text) {
   const lines = String(text || "").split(/\n/).map((l) => l.trim());
-  const LABEL = /(보내는\s*분|보내는\s*사람|보내시는\s*분|주문자|주문하신\s*분|발송인|발신인|발송자|보낸\s*사람)\s*(?:정보|성함|이름|명)?\s*[:：)\]-]?\s*/;
+  const LABEL = new RegExp(SENDER_LABEL_SRC + "\\s*(?:정보|성함|이름|명)?\\s*[:：)\\]\\-]?\\s*");
   const PHONE = /01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/;
   for (let i = 0; i < lines.length; i++) {
     const m = lines[i].match(LABEL);
