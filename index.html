@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 287;
+const APP_VERSION = 288;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -17030,24 +17030,36 @@ function App() {
       const nos = Object.keys(byNo);
       const doneIds = [];
       const info = {};
-      for (let i = 0; i < nos.length; i += 20) {
-        const part = nos.slice(i, i + 20);
+      // v288: 한 번에 20개씩 보내면 서버(우체국 조회)가 시간 초과로 통째로 실패할 수 있어 → 4개씩 나눠 4개 동시에, 실패한 번호는 한 번 더
+      const fetchPart = async (part) => {
         const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 25e3);
+        const timer = setTimeout(() => ctrl.abort(), 20e3);
         try {
           const r = await fetch("/api/epost?no=" + part.join(","), { signal: ctrl.signal, cache: "no-store" });
-          if (!r.ok) continue;
+          if (!r.ok) return null;
           const j = await r.json();
-          (j.results || []).forEach((x) => {
-            if (!x || !byNo[x.no]) return;
-            info[x.no] = { state: x.state, last: x.last || "" };
-            if (x.state === "delivered") byNo[x.no].forEach((id) => doneIds.push(id));
-          });
-        } catch (e) {
-        } finally {
-          clearTimeout(timer);
-        }
-      }
+          return j.results || [];
+        } catch (e) { return null; } finally { clearTimeout(timer); }
+      };
+      const runPool = async (parts, conc) => {
+        let k = 0;
+        const worker = async () => {
+          while (k < parts.length) {
+            const res = await fetchPart(parts[k++]);
+            (res || []).forEach((x) => {
+              if (!x || !byNo[x.no]) return;
+              if (x.state === "error" && info[x.no] && info[x.no].state !== "error") return;
+              info[x.no] = { state: x.state, last: x.last || "" };
+            });
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(conc, parts.length) }, worker));
+      };
+      const chunk = (arr, n) => { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; };
+      await runPool(chunk(nos, 4), 4);
+      const miss = nos.filter((n) => !info[n] || info[n].state === "error");
+      if (miss.length) { await new Promise((r) => setTimeout(r, 1500)); await runPool(chunk(miss, 2), 4); }
+      Object.keys(info).forEach((n) => { if (info[n].state === "delivered") byNo[n].forEach((id) => doneIds.push(id)); });
       if (Object.keys(info).length) { setEpostInfo((prev) => Object.assign({}, prev, info)); epostInfoRef.current = Object.assign({}, epostInfoRef.current, info); }
       if (doneIds.length) {
         const _now = /* @__PURE__ */ new Date();
@@ -17068,42 +17080,84 @@ function App() {
   const DLV_DONE_KEY = "joassam_dlv_done_" + DATA_DOC;
   const [dlvNotice, setDlvNotice] = useState(null);
   const dlvBusyRef = useRef(false);
+  const dlvRetryRef = useRef({ key: "", n: 0, next: 0 });
+  // v288: 조회 결과로 묶음 만들기 — 도착 안 됨(확인됨)과 조회 안 됨(우체국 조회 실패)을 나눔
+  function buildDlvSections(due, all) {
+    const stOf = (o) => { const s = all[String(o.invoiceNo).replace(/\D/g, "")]; if (o.deliveryConfirmed || (s && s.state === "delivered")) return { st: "delivered", last: s ? s.last : "" }; if (!s || s.state === "error") return { st: "unknown", last: "" }; return { st: s.state, last: s.last || "" }; };
+    const sections = [];
+    due.forEach((g) => {
+      const rows = g.orders.map((o) => Object.assign({ id: o.id, name: orderRecipientName(o) || "", no: String(o.invoiceNo) }, stOf(o)));
+      const notYet = rows.filter((r) => r.st !== "delivered" && r.st !== "unknown");
+      const unknown = rows.filter((r) => r.st === "unknown");
+      if (g.kind === "late" && !notYet.length && !unknown.length) return;
+      sections.push({ ship: g.ship, kind: g.kind, hour: g.hour, total: rows.length, delivered: rows.filter((r) => r.st === "delivered").length, notYet, unknown, doneRows: rows.filter((r) => r.st === "delivered") });
+    });
+    return sections;
+  }
+  function dlvNoticeOf(sections, due) {
+    const md = (sd) => { const m = sd.match(/\d{4}-(\d{2})-(\d{2})/); return m ? +m[1] + "/" + +m[2] : sd; };
+    const late = sections.some((x) => x.kind === "late" && x.notYet.length);
+    const unk = sections.reduce((n, x) => n + x.unknown.length, 0);
+    const title = late ? "🚨 아직 도착 안 된 택배가 있어요" : sections.some((x) => x.kind !== "late") ? "🚚 배송 현황 (" + sections[0].hour + "시)" : "❔ 우체국 배송 조회가 안 됐어요";
+    const body = sections.map((x) => (x.kind === "late"
+      ? md(x.ship) + " 발송" + (x.notYet.length ? " 중 도착 안 됨 " + x.notYet.length + "건: " + x.notYet.slice(0, 4).map((r) => r.name).join(", ") + (x.notYet.length > 4 ? " 외" : "") : "")
+      : md(x.ship) + " 발송 " + x.total + "건 — 배송완료 " + x.delivered + " · 배송중 " + x.notYet.length + (x.notYet.length ? " (" + x.notYet.slice(0, 3).map((r) => r.name).join(", ") + (x.notYet.length > 3 ? " 외" : "") + ")" : ""))
+      + (x.unknown.length ? " · 조회 안 됨 " + x.unknown.length + "건" : "")).join("\n");
+    return { title, body, sections, late, unknownCount: unk, due, at: Date.now() };
+  }
+  async function recheckDlvNotice() {
+    const cur = dlvNotice;
+    if (!cur || !cur.due) return;
+    setDlvNotice(Object.assign({}, cur, { checking: true }));
+    let info = await runEpostCheck(true);
+    if (!info) { for (let i = 0; i < 40 && epostRunRef.current; i++) await new Promise((r) => setTimeout(r, 1000)); info = {}; }
+    const all = Object.assign({}, epostInfoRef.current, info || {});
+    const byId = {}; (epostOrdersRef.current || []).forEach((o) => { if (o) byId[o.id] = o; });
+    const due2 = cur.due.map((g) => Object.assign({}, g, { orders: g.orders.map((o) => byId[o.id] || o) }));
+    const secs = buildDlvSections(due2, all);
+    if (!secs.length) { setDlvNotice(Object.assign({}, cur, { checking: false, sections: [], title: "✅ 모두 도착했어요", body: "", late: false, unknownCount: 0 })); return; }
+    setDlvNotice(Object.assign(dlvNoticeOf(secs, due2), { rechecked: true }));
+  }
   async function runDeliveryCheckpoints() {
     if (dlvBusyRef.current) return;
     let done = {};
     try { done = JSON.parse(localStorage.getItem(DLV_DONE_KEY) || "{}") || {}; } catch (e) { done = {}; }
     const due = dlvDueGroups(epostOrdersRef.current, new Date(), done);
     if (!due.length) return;
+    const dueKey = due.map((g) => g.ids.join(",")).join("|");
+    const rt = dlvRetryRef.current;
+    if (rt.key === dueKey && Date.now() < rt.next) return; // 조회 실패 → 5분 뒤 다시
     dlvBusyRef.current = true;
     try {
       let info = await runEpostCheck(true);
-      if (!info) { for (let i = 0; i < 30 && epostRunRef.current; i++) await new Promise((r) => setTimeout(r, 1000)); info = {}; }
+      if (!info) { for (let i = 0; i < 40 && epostRunRef.current; i++) await new Promise((r) => setTimeout(r, 1000)); info = {}; }
       const all = Object.assign({}, epostInfoRef.current, info || {});
-      const stOf = (o) => { const s = all[String(o.invoiceNo).replace(/\D/g, "")]; if (o.deliveryConfirmed || (s && s.state === "delivered")) return { st: "delivered", last: s ? s.last : "" }; return { st: s ? s.state : "unknown", last: s ? s.last || "" : "" }; };
-      const sections = [];
-      due.forEach((g) => {
-        const rows = g.orders.map((o) => Object.assign({ id: o.id, name: orderRecipientName(o) || "", no: String(o.invoiceNo) }, stOf(o)));
-        const notYet = rows.filter((r) => r.st !== "delivered");
-        if (g.kind === "late" && !notYet.length) return;
-        sections.push({ ship: g.ship, kind: g.kind, hour: g.hour, total: rows.length, delivered: rows.length - notYet.length, notYet, doneRows: rows.filter((r) => r.st === "delivered") });
-      });
+      const sections = buildDlvSections(due, all);
+      const tracked = sections.reduce((n, x) => n + x.total - x.delivered, 0);
+      const unk = sections.reduce((n, x) => n + x.unknown.length, 0);
+      const realLate = sections.some((x) => x.kind === "late" && x.notYet.length);
+      // 조회가 대부분 안 됐으면 바로 알리지 않고 5분 뒤 다시 (최대 3번) — '조회 안 됨'을 '도착 안 됨'으로 잘못 알리지 않게
+      const n0 = rt.key === dueKey ? rt.n : 0;
+      if (unk > 0 && n0 < 3 && (!realLate || unk * 2 >= tracked)) {
+        dlvRetryRef.current = { key: dueKey, n: n0 + 1, next: Date.now() + 5 * 60 * 1e3 };
+        try { logDiag("dlv_lookup_retry", { unknown: unk, tracked, n: n0 + 1 }); } catch (e) {}
+        return;
+      }
+      dlvRetryRef.current = { key: "", n: 0, next: 0 };
       const nd = Object.assign({}, done);
       due.forEach((g) => g.ids.forEach((k) => { nd[k] = Date.now(); }));
       Object.keys(nd).forEach((k) => { if (Date.now() - nd[k] > 12 * 864e5) delete nd[k]; });
       try { localStorage.setItem(DLV_DONE_KEY, JSON.stringify(nd)); } catch (e) {}
       if (!sections.length) return;
-      const late = sections.some((x) => x.kind === "late");
-      const md = (sd) => { const m = sd.match(/\d{4}-(\d{2})-(\d{2})/); return m ? +m[1] + "/" + +m[2] : sd; };
-      const title = late ? "🚨 아직 도착 안 된 택배가 있어요" : "🚚 배송 현황 (" + sections[0].hour + "시)";
-      const body = sections.map((x) => x.kind === "late" ? md(x.ship) + " 발송 중 도착 안 됨 " + x.notYet.length + "건: " + x.notYet.slice(0, 4).map((r) => r.name).join(", ") + (x.notYet.length > 4 ? " 외" : "") : md(x.ship) + " 발송 " + x.total + "건 — 배송완료 " + x.delivered + " · 배송중 " + x.notYet.length + (x.notYet.length ? " (" + x.notYet.slice(0, 3).map((r) => r.name).join(", ") + (x.notYet.length > 3 ? " 외" : "") + ")" : "")).join("\n");
-      setDlvNotice({ title, body, sections, late, at: Date.now() });
-      if (late) { try { playOverdueAlertSound(); } catch (e) {} }
+      const nt = dlvNoticeOf(sections, due);
+      setDlvNotice(nt);
+      if (nt.late) { try { playOverdueAlertSound(); } catch (e) {} }
       try {
         if (typeof Notification !== "undefined" && Notification.permission === "granted" && navigator.serviceWorker) {
-          navigator.serviceWorker.ready.then((reg) => reg.showNotification(title, { body, tag: "joassam-dlv", renotify: true, requireInteraction: late })).catch(() => {});
+          navigator.serviceWorker.ready.then((reg) => reg.showNotification(nt.title, { body: nt.body, tag: "joassam-dlv", renotify: true, requireInteraction: nt.late })).catch(() => {});
         }
       } catch (e) {}
-      try { logDiag("dlv_notice", { late, sections: sections.map((x) => ({ ship: x.ship, kind: x.kind, total: x.total, notYet: x.notYet.length })) }); } catch (e) {}
+      try { logDiag("dlv_notice", { late: nt.late, unknown: unk, sections: sections.map((x) => ({ ship: x.ship, kind: x.kind, total: x.total, notYet: x.notYet.length, unknown: x.unknown.length })) }); } catch (e) {}
     } finally {
       dlvBusyRef.current = false;
     }
@@ -20867,7 +20921,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
       },
       "\uC0C8\uB85C\uACE0\uCE68 \uD558\uAE30"
     )),
-    dlvNotice && React.createElement(DeliveryNoticeModal, { notice: dlvNotice, onClose: () => setDlvNotice(null), onOpenTrack: () => { setDlvNotice(null); setTab("deliverytrack"); } }),
+    dlvNotice && React.createElement(DeliveryNoticeModal, { notice: dlvNotice, onRecheck: recheckDlvNotice, onClose: () => setDlvNotice(null), onOpenTrack: () => { setDlvNotice(null); setTab("deliverytrack"); } }),
     showOverdueAlert && /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(27,36,48,0.65)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1e5, padding: 24 } }, /* @__PURE__ */ React.createElement("div", { style: { background: "#fff", borderRadius: 16, padding: "28px 24px", display: "flex", flexDirection: "column", alignItems: "center", gap: 12, maxWidth: 340, width: "100%", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 48 } }, "\u{1F69A}\u26A0\uFE0F"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 17, fontWeight: 700, color: "#A32D2D", textAlign: "center" } }, "\uB3C4\uCC29 \uD655\uC778\uC774 \uD544\uC694\uD55C \uBC30\uC1A1\uC774", /* @__PURE__ */ React.createElement("br", null), overdueDeliveries.length, "\uAC74 \uC788\uC5B4\uC694!"), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, color: "#5F5E5A", textAlign: "center", lineHeight: 1.6, marginBottom: 8 } }, "\uC815\uC0C1 \uB3C4\uCC29\uC77C\uC774 \uC9C0\uB0AC\uB294\uB370 \uC544\uC9C1 \uD655\uC778\uB418\uC9C0 \uC54A\uC558\uC5B4\uC694. \uC2E0\uC120\uC2DD\uD488\uC740 \uB2A6\uC5B4\uC9C0\uBA74 \uBB38\uC81C\uAC00 \uB420 \uC218 \uC788\uC73C\uB2C8 \uBC14\uB85C \uD655\uC778\uD574\uC8FC\uC138\uC694."), /* @__PURE__ */ React.createElement(
       "button",
       {
@@ -20936,7 +20990,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
           restored_unsynced_orders: "♻️ 저장 못 한 주문 복원", restored_recent_orders: "♻️ 빠진 최근 주문 복원", dropped_tombstoned_orders: "🗑️ 지운 주문 다시 안 나오게 거름",
           removed_remote_deleted: "🗑️ 다른 기기에서 지운 주문 반영", removed_remote_deleted_customers: "🗑️ 다른 기기에서 지운 고객 반영",
           merged_remote_before_save: "🔀 저장 전 다른 기기 내용 합침", merged_remote_edits: "🔀 다른 기기 수정 합침", merged_remote_orders: "🔀 다른 기기 주문 합침", merged_remote_customers: "🔀 다른 기기 고객 합침", merged_remote_vendors: "🔀 다른 기기 업체 합침", merged_remote_products: "🔀 다른 기기 상품 합침",
-          kept_local_customers: "📌 이 기기 고객 수정 유지", kept_local_deletes: "📌 이 기기 삭제 유지", list_fix_applied: "🛠️ 목록 자동 정리", biz_flag_fixed: "🛠️ 업체 표시 자동 수정", dlv_notice: "📦 배송 알림 표시"
+          kept_local_customers: "📌 이 기기 고객 수정 유지", kept_local_deletes: "📌 이 기기 삭제 유지", list_fix_applied: "🛠️ 목록 자동 정리", biz_flag_fixed: "🛠️ 업체 표시 자동 수정", dlv_notice: "📦 배송 알림 표시", dlv_lookup_retry: "🔁 우체국 조회 실패 → 5분 뒤 다시"
         };
         return m[evt] || evt;
       };
@@ -21290,21 +21344,27 @@ function PartySwitch({ tab, setTab }) {
   return React.createElement("div", { style: { display: "flex", gap: 4, padding: 4, margin: "0 0 12px", background: "#EAF3EC", borderRadius: 12 } }, b(!isV, "\u{1F464} \uACE0\uAC1D", "customers"), b(isV, "\u{1F3EA} \uC5C5\uCCB4", "vendorhub"));
 }
 // v282: 정해진 시간 배송 알림 창
-function DeliveryNoticeModal({ notice, onClose, onOpenTrack }) {
+function DeliveryNoticeModal({ notice, onClose, onOpenTrack, onRecheck }) {
   const [perm, setPerm] = React.useState(() => { try { return typeof Notification !== "undefined" ? Notification.permission : "unsupported"; } catch (e) { return "unsupported"; } });
   const md = (sd) => { const m = String(sd).match(/\d{4}-(\d{2})-(\d{2})/); return m ? +m[1] + "/" + +m[2] : sd; };
   const tail = (no) => String(no || "").replace(/\D/g, "").slice(-4);
   const row = (r, i) => React.createElement("div", { key: i, style: { display: "flex", gap: 8, fontSize: 13, padding: "5px 0", borderBottom: "1px solid #F1F2EC" } },
     React.createElement("span", { style: { fontWeight: 700, flex: 1, minWidth: 0 } }, r.name || "(이름 없음)", React.createElement("span", { style: { color: "#888780", fontWeight: 400 } }, " …" + tail(r.no))),
-    React.createElement("span", { style: { color: r.st === "delivered" ? "#2F6F4E" : "#A32D2D", fontSize: 12, whiteSpace: "nowrap" } }, r.st === "delivered" ? "✅ 배송완료" : (r.last ? "🚚 " + r.last : r.st === "unknown" ? "❔ 조회 안 됨" : "🚚 배송중")));
+    React.createElement("span", { style: { color: r.st === "delivered" ? "#2F6F4E" : "#A32D2D", fontSize: 12, whiteSpace: "nowrap" } }, r.st === "delivered" ? "✅ 배송완료" : (r.last ? "🚚 " + r.last : r.st === "unknown" ? "❔ 조회 안 됨" : r.st === "none" ? "❔ 조회 결과 없음(접수 전?)" : "🚚 배송중")));
   return React.createElement("div", { style: { position: "fixed", inset: 0, background: "rgba(27,36,48,0.6)", zIndex: 100001, display: "flex", alignItems: "center", justifyContent: "center", padding: 18 }, onClick: onClose },
     React.createElement("div", { onClick: (e) => e.stopPropagation(), style: { background: "#fff", borderRadius: 16, padding: "20px 18px", width: "100%", maxWidth: 400, maxHeight: "86vh", overflowY: "auto", boxShadow: "0 10px 40px rgba(0,0,0,0.3)" } },
       React.createElement("div", { style: { fontSize: 18, fontWeight: 800, color: notice.late ? "#A32D2D" : "#1B2430", marginBottom: 10 } }, notice.title),
+      notice.unknownCount ? React.createElement("div", { style: { fontSize: 12.5, color: "#5F5E5A", lineHeight: 1.6, marginBottom: 10 } }, "우체국 조회 사이트가 응답하지 않은 건은 '조회 안 됨'으로 따로 보여요. 아래 '다시 조회'를 누르거나 배송 현황에서 확인하세요.") : null,
       notice.sections.map((x, i) => React.createElement("div", { key: i, style: { marginBottom: 14, padding: 12, borderRadius: 12, background: x.kind === "late" ? "#FCEEEE" : "#F4F8F5", border: "1px solid " + (x.kind === "late" ? "#E9B9B9" : "#D7E6DC") } },
-        React.createElement("div", { style: { fontWeight: 800, fontSize: 14, marginBottom: 6 } }, x.kind === "late" ? `🚨 ${md(x.ship)} 발송 · 아직 도착 안 됨 ${x.notYet.length}건` : `${md(x.ship)} 발송 ${x.total}건 · ✅ 배송완료 ${x.delivered} · 🚚 배송중 ${x.notYet.length}`),
+        React.createElement("div", { style: { fontWeight: 800, fontSize: 14, marginBottom: 6 } }, x.kind === "late" ? (x.notYet.length ? `🚨 ${md(x.ship)} 발송 · 아직 도착 안 됨 ${x.notYet.length}건` : `${md(x.ship)} 발송 · 도착 확인`) : `${md(x.ship)} 발송 ${x.total}건 · ✅ 배송완료 ${x.delivered} · 🚚 배송중 ${x.notYet.length}` + (x.unknown && x.unknown.length ? ` · ❔ ${x.unknown.length}` : "")),
         x.notYet.map(row),
+        x.kind === "late" && !x.notYet.length ? React.createElement("div", { style: { fontSize: 13, color: "#2F6F4E", fontWeight: 700 } }, "확인된 미도착은 없어요") : null,
+        x.unknown && x.unknown.length ? React.createElement("div", { style: { marginTop: 8, padding: "8px 10px", borderRadius: 10, background: "#F4F4F0", border: "1px dashed #B9B7AE" } },
+          React.createElement("div", { style: { fontSize: 13, fontWeight: 800, color: "#5F5E5A", marginBottom: 4 } }, "❔ 우체국 조회가 안 된 " + x.unknown.length + "건 (도착 여부 모름)"),
+          React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A", lineHeight: 1.6 } }, x.unknown.slice(0, 8).map((r) => (r.name || "(이름 없음)") + " …" + tail(r.no)).join(", ") + (x.unknown.length > 8 ? " 외 " + (x.unknown.length - 8) + "건" : ""))) : null,
         x.kind !== "late" && x.doneRows.length ? React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A", marginTop: 6 } }, "배송완료: " + x.doneRows.map((r) => r.name).join(", ")) : null)),
       perm === "default" ? React.createElement("button", { onClick: () => { try { Notification.requestPermission().then((p) => setPerm(p)); } catch (e) {} }, style: { width: "100%", padding: "10px 0", marginBottom: 8, borderRadius: 10, border: "1px solid #185FA5", background: "#E6F1FB", color: "#185FA5", fontWeight: 700, fontSize: 13, cursor: "pointer" } }, "🔔 앱이 뒤에 있을 때도 폰 알림으로 받기") : null,
+      notice.unknownCount && onRecheck ? React.createElement("button", { disabled: !!notice.checking, onClick: onRecheck, style: { width: "100%", padding: "11px 0", marginBottom: 8, borderRadius: 10, border: "1px solid #2F6F4E", background: "#EAF3DE", color: "#27500A", fontWeight: 800, fontSize: 14, cursor: notice.checking ? "default" : "pointer" } }, notice.checking ? "조회 중… (최대 1분)" : "🔄 조회 안 된 " + notice.unknownCount + "건 다시 조회") : null,
       React.createElement("div", { style: { display: "flex", gap: 8 } },
         React.createElement("button", { onClick: onOpenTrack, style: { flex: 2, padding: "12px 0", borderRadius: 10, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 800, fontSize: 14, cursor: "pointer" } }, "배송 현황 보기"),
         React.createElement("button", { onClick: onClose, style: { flex: 1, padding: "12px 0", borderRadius: 10, border: "1px solid #D3D1C7", background: "#fff", color: "#5F5E5A", fontWeight: 700, fontSize: 14, cursor: "pointer" } }, "닫기"))));
