@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 288;
+const APP_VERSION = 289;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -14217,6 +14217,20 @@ function downloadWorkbook(rows, sheetName, filename, columnOrder, rowFillFn) {
   var _a;
   const sheet = XLSX.utils.json_to_sheet(rows, columnOrder ? { header: columnOrder } : void 0);
   const range = XLSX.utils.decode_range(sheet["!ref"] || "A1");
+  // v289: 수량·박스부피·금액 칸은 엑셀에서 '텍스트로 저장된 숫자' 경고가 나지 않게 숫자로 저장 (우편번호·전화·송장번호는 그대로 글자)
+  try {
+    const NUM_COL = /^(수량|박스부피|박스\s*부피|입금금액|결제금액|금액|단가|합계|공급가액|세액)$/;
+    for (let C = range.s.c; C <= range.e.c; C++) {
+      const h = sheet[XLSX.utils.encode_cell({ r: range.s.r, c: C })];
+      if (!h || !NUM_COL.test(String(h.v || "").trim())) continue;
+      for (let R = range.s.r + 1; R <= range.e.r; R++) {
+        const cell = sheet[XLSX.utils.encode_cell({ r: R, c: C })];
+        if (!cell || cell.t === "n") continue;
+        const t = String(cell.v == null ? "" : cell.v).trim().replace(/,/g, "");
+        if (/^-?\d+(\.\d+)?$/.test(t)) { cell.t = "n"; cell.v = Number(t); delete cell.w; }
+      }
+    }
+  } catch (e) {}
   const headerBorder = { style: "medium", color: { rgb: "000000" } };
   const dataBorder = { style: "thin", color: { rgb: "000000" } };
   for (let R = range.s.r; R <= range.e.r; R++) {
@@ -19326,7 +19340,8 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       deliveryMessage = String(r["\uBA54\uBAA8"] || "").trim();
     }
     const reserveDate = String(r["\uC608\uC57D\uC8FC\uBB38\uC77C"] || r["\uC608\uC57D\uBC1C\uC1A1\uC77C"] || "").trim();
-    const postalCode = postalCodeRaw.replace(/\.0$/, "").replace(/[^0-9]/g, "") || estimatePostalCode(address);
+    let postalCode = postalCodeRaw.replace(/\.0$/, "").replace(/[^0-9]/g, "") || estimatePostalCode(address);
+    if (/^\d{4}$/.test(postalCode)) postalCode = "0" + postalCode; // v289: 엑셀이 앞 0을 지운 우편번호(4712 → 04712)
     const boxVolume = boxVolumeRaw;
     const memo = String(r["\uBA54\uBAA8"] || "").trim();
     const courier = String(r["\uD0DD\uBC30\uC0AC"] || "").trim();
