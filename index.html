@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 289;
+const APP_VERSION = 290;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -690,12 +690,60 @@ if (firebaseReady) {
       }
     });
   } catch (e) {}
+  // v290: 저장된 로그인(아이디·비밀번호)이 있으면 그대로 두고, 아무 로그인도 없을 때만 임시(익명) 로그인
   try {
-    fbAuth.signInAnonymously().catch(() => {
+    let offFirst = null, firstDone = false;
+    offFirst = fbAuth.onAuthStateChanged((u) => {
+      if (firstDone) return;
+      firstDone = true;
+      try { if (offFirst) offFirst(); } catch (e) {}
+      if (!u) fbAuth.signInAnonymously().catch(() => {});
     });
   } catch (e) {
+    try { fbAuth.signInAnonymously().catch(() => {}); } catch (e2) {}
   }
 }
+// v290: 보안 로그인 — 아이디·비밀번호를 서버(Firebase)가 직접 확인. 아이디는 글자 그대로 쓰고 내부 주소로만 바꿔 씀
+function secureEmailOf(id) {
+  const bytes = new TextEncoder().encode(String(id || "").trim());
+  let h = "";
+  bytes.forEach((x) => { h += x.toString(16).padStart(2, "0"); });
+  return "u" + h + "@joassam.app";
+}
+function securePwOf(id, pw) { return "jsm#" + String(pw || "").trim() + "#" + String(id || "").trim(); }
+function isSecureUser(u) {
+  if (!u || u.isAnonymous) return false;
+  return !!(u.email || (u.providerData || []).some((p) => p && p.providerId === "password"));
+}
+const SECURE_RULES_LOCK = [
+  "rules_version = '2';",
+  "service cloud.firestore {",
+  "  match /databases/{database}/documents {",
+  "    function signedIn() { return request.auth != null && request.auth.token.firebase.sign_in_provider == 'password'; }",
+  "    function member() { return signedIn() && exists(/databases/$(database)/documents/allow/$(request.auth.uid)); }",
+  "    function admin() { return member() && get(/databases/$(database)/documents/allow/$(request.auth.uid)).data.role == 'admin'; }",
+  "    match /stores/{doc=**} { allow read, write: if member(); }",
+  "    match /users/{doc=**} { allow read, write: if member(); }",
+  "    match /allow/{uid} {",
+  "      allow read: if signedIn() && (request.auth.uid == uid || admin());",
+  "      allow write: if admin();",
+  "    }",
+  "    match /joinreq/{uid} {",
+  "      allow create, update: if signedIn() && request.auth.uid == uid;",
+  "      allow read: if signedIn() && (request.auth.uid == uid || admin());",
+  "      allow delete: if admin() || (signedIn() && request.auth.uid == uid);",
+  "    }",
+  "  }",
+  "}"
+].join("\n");
+const SECURE_RULES_OPEN = [
+  "rules_version = '2';",
+  "service cloud.firestore {",
+  "  match /databases/{database}/documents {",
+  "    match /{document=**} { allow read, write: if request.auth != null; }",
+  "  }",
+  "}"
+].join("\n");
 
 
 const NICKNAME_KEY = "gagyejangbu_nickname";
@@ -14826,6 +14874,13 @@ function App() {
   const [members, setMembers] = useState([]);
   const [loggedIn, setLoggedIn] = useState(false);
   const [loginError, setLoginError] = useState("");
+  const [loginBusy, setLoginBusy] = useState(false);
+  const [authUser, setAuthUser] = useState(() => (fbAuth && fbAuth.currentUser) || null);
+  const [secureNote, setSecureNote] = useState("");
+  useEffect(() => {
+    if (!fbAuth || typeof fbAuth.onAuthStateChanged !== "function") return;
+    return fbAuth.onAuthStateChanged((u) => setAuthUser(u || null));
+  }, []);
   const [isDesktop, setIsDesktop] = useState(typeof window !== "undefined" ? window.innerWidth >= 760 : false);
   const [confirmOrderId] = useState(() => {
     try {
@@ -14905,6 +14960,22 @@ function App() {
     const entry = { password: password.trim() || "", role: "staff" };
     const trimmedName = (displayName || "").trim();
     if (trimmedName) entry.displayName = trimmedName;
+    // v290: 관리자가 직원 계정을 미리 만들면 서버 계정도 바로 만들고 허용 목록에 넣음 (관리자 로그인은 그대로 유지)
+    if (firebaseReady && fbAuth && isSecureUser(fbAuth.currentUser)) {
+      try {
+        let app2 = null;
+        try { app2 = firebase.app("joassam-admin-add"); } catch (e) { app2 = firebase.initializeApp(FIREBASE_CONFIG, "joassam-admin-add"); }
+        const a2 = app2.auth();
+        a2.createUserWithEmailAndPassword(secureEmailOf(trimmedId), securePwOf(trimmedId, password)).then((cred) => {
+          const uid = cred && cred.user && cred.user.uid;
+          if (uid) {
+            allowSet(uid, { id: trimmedId, role: "staff", at: Date.now() });
+            setAccounts((prev) => { const nx = __spreadProps(__spreadValues({}, prev), { [trimmedId]: __spreadProps(__spreadValues({}, prev[trimmedId] || entry), { uid, password: "", secureAt: new Date().toISOString() }) }); try { fbDb.collection("stores").doc("_accounts").set({ list: nx }).catch(() => {}); } catch (e) {} return nx; });
+          }
+          try { a2.signOut().catch(() => {}); } catch (e) {}
+        }).catch((e) => { if (/email-already-in-use/.test(String(e && e.code))) fireToast("이미 서버에 있는 아이디예요. 그 직원이 기존 비밀번호로 로그인하면 돼요"); });
+      } catch (e) {}
+    }
     saveAccounts(__spreadProps(__spreadValues({}, accounts), { [trimmedId]: entry }));
     addMemberLater(trimmedId);
     fireToast(`"${trimmedName || trimmedId}" \uACC4\uC815\uC744 \uCD94\uAC00\uD588\uC5B4\uC694`);
@@ -14912,6 +14983,16 @@ function App() {
   }
   function changeAccountPassword(id, newPassword) {
     if (!accounts[id]) return;
+    // v290: 서버 로그인 계정은 비밀번호를 서버에만 저장 (본인 기기에서만 바꿀 수 있음)
+    if (accounts[id].uid || (fbAuth && isSecureUser(fbAuth.currentUser))) {
+      const np = String(newPassword || "").trim();
+      if (id === nickname && fbAuth && isSecureUser(fbAuth.currentUser) && typeof fbAuth.currentUser.updatePassword === "function") {
+        fbAuth.currentUser.updatePassword(securePwOf(id, np)).then(() => fireToast("비밀번호를 바꿨어요")).catch((e) => fireToast(/recent-login/.test(String(e && e.code)) ? "보안을 위해 로그아웃 후 다시 로그인한 뒤 바꿔 주세요" : "비밀번호를 바꾸지 못했어요"));
+      } else {
+        fireToast("직원 비밀번호는 그 직원 폰에서 본인이 바꿔요. 잊었으면 Firebase 콘솔 Authentication에서 그 계정을 지우고 다시 가입하게 해 주세요");
+      }
+      return;
+    }
     saveAccounts(__spreadProps(__spreadValues({}, accounts), { [id]: __spreadProps(__spreadValues({}, accounts[id]), { password: newPassword.trim() || "" }) }));
     fireToast(`"${id}" \uACC4\uC815\uC758 \uBE44\uBC00\uBC88\uD638\uB97C \uBCC0\uACBD\uD588\uC5B4\uC694`);
   }
@@ -14922,6 +15003,10 @@ function App() {
       return;
     }
     if (newId === oldId) return;
+    if (accounts[oldId] && accounts[oldId].uid) {
+      fireToast("보안 로그인으로 옮긴 계정은 아이디를 바꿀 수 없어요. '별명 설정'을 써 주세요");
+      return;
+    }
     if (accounts[newId]) {
       fireToast("\uC774\uBBF8 \uC788\uB294 \uC544\uC774\uB514\uC608\uC694");
       return;
@@ -14945,6 +15030,7 @@ function App() {
       return;
     }
     const next = __spreadValues({}, accounts);
+    if (accounts[id] && accounts[id].uid) allowDel(accounts[id].uid);
     delete next[id];
     saveAccounts(next);
     removeMember(id);
@@ -14956,11 +15042,13 @@ function App() {
       return;
     }
     const existing = accounts[id] || { password: "" };
+    if (existing.uid) allowDel(existing.uid);
     saveAccounts(__spreadProps(__spreadValues({}, accounts), { [id]: __spreadProps(__spreadValues({}, existing), { blocked: true }) }));
     fireToast(`"${id}" \uACC4\uC815\uC744 \uCC28\uB2E8\uD588\uC5B4\uC694. \uC774 \uC544\uC774\uB514\uB85C\uB294 \uB354 \uC774\uC0C1 \uB85C\uADF8\uC778(\uC7AC\uAC00\uC785 \uD3EC\uD568)\uD560 \uC218 \uC5C6\uC5B4\uC694`);
   }
   function unblockAccount(id) {
     if (!accounts[id]) return;
+    if (accounts[id].uid && !accounts[id].pending) allowSet(accounts[id].uid, { id, role: isAccountAdmin(accounts[id]) ? "admin" : "staff", at: Date.now() });
     saveAccounts(__spreadProps(__spreadValues({}, accounts), { [id]: __spreadProps(__spreadValues({}, accounts[id]), { blocked: false }) }));
     fireToast(`"${id}" \uACC4\uC815\uC758 \uCC28\uB2E8\uC744 \uD574\uC81C\uD588\uC5B4\uC694`);
   }
@@ -14976,6 +15064,7 @@ function App() {
         return;
       }
     }
+    if (accounts[id].uid && !accounts[id].pending && !accounts[id].blocked) allowSet(accounts[id].uid, { id, role: role === "staff" ? "staff" : "admin", at: Date.now() });
     saveAccounts(__spreadProps(__spreadValues({}, accounts), { [id]: __spreadProps(__spreadValues({}, accounts[id]), { role }) }));
     fireToast(`"${id}" \uACC4\uC815\uC744 ${role === "staff" ? "\uC9C1\uC6D0" : "\uAD00\uB9AC\uC790"}\uB85C \uBCC0\uACBD\uD588\uC5B4\uC694`);
   }
@@ -14986,10 +15075,12 @@ function App() {
   }
   function approveAccount(id) {
     if (!accounts[id]) return;
+    if (accounts[id].uid) { allowSet(accounts[id].uid, { id, role: "staff", at: Date.now() }); joinreqDel(accounts[id].uid); }
     saveAccounts(__spreadProps(__spreadValues({}, accounts), { [id]: __spreadProps(__spreadValues({}, accounts[id]), { pending: false }) }));
     fireToast(`"${id}" \uB2D8\uC758 \uC811\uC18D\uC744 \uC2B9\uC778\uD588\uC5B4\uC694`);
   }
   function rejectAccount(id) {
+    if (accounts[id] && accounts[id].uid) joinreqDel(accounts[id].uid);
     const next = __spreadValues({}, accounts);
     delete next[id];
     saveAccounts(next);
@@ -15023,7 +15114,77 @@ function App() {
     setLoggedIn(true);
     setLoginError("");
   }
-  function handleLogin(id, password) {
+  // v290: 서버가 확인하는 로그인. 예전 계정은 첫 로그인 때 자동으로 옮겨짐(다시 가입할 필요 없음)
+  async function handleLogin(id, password) {
+    const trimmedId = String(id || "").trim();
+    const pw = String(password || "").trim();
+    if (!trimmedId) { setLoginError("이름(아이디)을 입력해주세요"); return; }
+    const existing = accounts[trimmedId];
+    if (existing && existing.blocked) { setLoginError("차단된 계정이에요. 관리자(사장님)에게 문의해주세요"); return; }
+    if (!firebaseReady || !fbAuth || typeof fbAuth.signInWithEmailAndPassword !== "function") return legacyLogin(id, password);
+    if (loginBusy) return;
+    setLoginBusy(true); setLoginError("");
+    const email = secureEmailOf(trimmedId), spw = securePwOf(trimmedId, pw);
+    const prevUid = fbAuth.currentUser ? fbAuth.currentUser.uid : "";
+    let user = null, created = false;
+    try {
+      try {
+        user = (await fbAuth.signInWithEmailAndPassword(email, spw)).user;
+      } catch (e) {
+        const c = String((e && e.code) || "");
+        if (/network|unavailable|operation-not-allowed|admin-restricted|internal/.test(c)) throw e;
+        if (/too-many-requests/.test(c)) { setLoginError("로그인을 너무 많이 시도했어요. 잠시 후 다시 해 주세요"); return; }
+        if (existing && existing.uid) { setLoginError("비밀번호가 일치하지 않습니다"); return; }
+        if (existing && existing.password && existing.password !== pw) { setLoginError("비밀번호가 일치하지 않습니다"); return; }
+        try {
+          user = (await fbAuth.createUserWithEmailAndPassword(email, spw)).user;
+          created = true;
+        } catch (e2) {
+          if (/email-already-in-use/.test(String((e2 && e2.code) || ""))) { setLoginError("비밀번호가 일치하지 않습니다"); return; }
+          throw e2;
+        }
+      }
+    } catch (e) {
+      const c = String((e && (e.code || e.message)) || e || "");
+      if (/operation-not-allowed|admin-restricted/.test(c)) {
+        // Firebase에서 '이메일/비밀번호 로그인'을 아직 안 켬 → 예전 방식으로 들어가고 관리자에게 알림
+        setSecureNote("Firebase 콘솔 → Authentication → 로그인 방법에서 '이메일/비밀번호'를 켜 주세요");
+        try { localStorage.setItem("joassam_secure_off", String(Date.now())); } catch (e2) {}
+        return legacyLogin(id, password);
+      }
+      if (/network|unavailable/.test(c) && existing && !existing.uid && (!existing.password || existing.password === pw)) return legacyLogin(id, password);
+      setLoginError(/network|unavailable/.test(c) ? "인터넷 연결을 확인하고 다시 로그인해 주세요" : "로그인하지 못했어요: " + koAlertText(c).slice(0, 80));
+      return;
+    } finally {
+      setLoginBusy(false);
+    }
+    await afterSecureLogin(trimmedId, user, existing, created, prevUid);
+  }
+  async function afterSecureLogin(id, user, existing, created, prevUid) {
+    const uid = user && user.uid;
+    if (!uid) return;
+    const allowRef = fbDb.collection("allow").doc(uid);
+    let member = null;
+    try { const snap = await allowRef.get(); if (snap.exists) member = snap.data() || {}; } catch (e) {}
+    const isFirst = !existing && Object.keys(accounts).length === 0;
+    const role = existing ? (isAccountAdmin(existing) ? "admin" : "staff") : (isFirst ? "admin" : "staff");
+    if (!member && (isFirst || (existing && !existing.pending && !existing.blocked))) {
+      try { await allowRef.set({ id, role, at: Date.now() }); member = { id, role }; } catch (e) {}
+    }
+    if (!member) { try { await fbDb.collection("joinreq").doc(uid).set({ id, at: Date.now() }); } catch (e) {} }
+    const entry = Object.assign({}, existing || {}, { uid, password: "", secureAt: new Date().toISOString(), lastLoginAt: new Date().toISOString(), pending: !member });
+    if (!existing && !isFirst) entry.role = "staff";
+    if (member && member.role === "admin") { if (entry.role === "staff") delete entry.role; }
+    else if (member) entry.role = "staff";
+    try { localStorage.removeItem("joassam_secure_off"); } catch (e) {}
+    try { saveAccounts(__spreadProps(__spreadValues({}, accounts), { [id]: entry })); } catch (e) {}
+    addMemberLater(id);
+    startSession(id);
+    try { logDiag("secure_login", { created: !!created, member: !!member }); } catch (e) {}
+    // 임시 로그인으로 열려 있던 연결을 새 로그인으로 다시 열기
+    if (prevUid && prevUid !== uid) setTimeout(() => { try { window.location.reload(); } catch (e) {} }, 500);
+  }
+  function legacyLogin(id, password) {
     const trimmedId = id.trim();
     if (!trimmedId) {
       setLoginError("\uC774\uB984(\uC544\uC774\uB514)\uC744 \uC785\uB825\uD574\uC8FC\uC138\uC694");
@@ -15053,13 +15214,78 @@ function App() {
     addMemberLater(trimmedId);
     startSession(trimmedId);
   }
-  function handleLogout() {
+  function handleLogout(msg) {
     try {
       window.localStorage.removeItem(SESSION_KEY);
     } catch (e) {
     }
     setLoggedIn(false);
+    if (typeof msg === "string" && msg) setLoginError(msg);
+    // v290: 이 기기의 서버 로그인도 끝냄 (다음 사람이 로그인 없이 못 보게)
+    try {
+      if (fbAuth && isSecureUser(fbAuth.currentUser)) fbAuth.signOut().then(() => { try { fbAuth.signInAnonymously().catch(() => {}); } catch (e) {} }).catch(() => {});
+    } catch (e) {}
   }
+  // v290: 서버가 '권한 없음'을 돌려주면 — 예전 로그인 기기는 로그인 화면으로, 새 로그인인데 허용 목록에 없으면(차단·승인 전) 승인 대기 화면으로
+  const permHandledRef = useRef(false);
+  function onPermDenied() {
+    if (permHandledRef.current) return true;
+    permHandledRef.current = true;
+    const u = fbAuth && fbAuth.currentUser;
+    if (!isSecureUser(u)) { handleLogout("보안 잠금이 켜져 있어요. 아이디·비밀번호로 다시 로그인해 주세요"); setTimeout(() => { permHandledRef.current = false; }, 5000); return true; }
+    let me = "";
+    try { me = window.localStorage.getItem(SESSION_KEY) || ""; } catch (e) {}
+    if (me) {
+      setAccounts((prev) => __spreadProps(__spreadValues({}, prev), { [me]: __spreadProps(__spreadValues({}, prev[me] || {}), { pending: true }) }));
+      try { fbDb.collection("joinreq").doc(u.uid).set({ id: me, at: Date.now() }).catch(() => {}); } catch (e) {}
+    }
+    return true;
+  }
+  // v290: 서버 '허용 목록'(allow) 관리 — 관리자 기기에서만
+  function allowSet(uid, data) { if (!uid || !firebaseReady) return Promise.resolve(false); return fbDb.collection("allow").doc(uid).set(data, { merge: true }).then(() => true).catch(() => false); }
+  function allowDel(uid) { if (!uid || !firebaseReady) return Promise.resolve(false); return fbDb.collection("allow").doc(uid).delete().then(() => true).catch(() => false); }
+  function joinreqDel(uid) { if (!uid || !firebaseReady) return; try { fbDb.collection("joinreq").doc(uid).delete().catch(() => {}); } catch (e) {} }
+  const amAdminSecure = loggedIn && authUser && isSecureUser(authUser) && accounts[nickname] && isAccountAdmin(accounts[nickname]) && !accounts[nickname].pending;
+  useEffect(() => {
+    if (!amAdminSecure || !firebaseReady) return;
+    let stop = false;
+    const pull = () => {
+      try {
+        fbDb.collection("joinreq").get().then((qs) => {
+          if (stop) return;
+          const reqs = [];
+          (qs.docs || []).forEach((d) => { const x = d.data() || {}; if (x.id) reqs.push({ uid: d.id, id: String(x.id) }); });
+          if (!reqs.length) return;
+          setAccounts((prev) => {
+            let changed = false;
+            const nx = __spreadValues({}, prev);
+            reqs.forEach((r) => {
+              const cur = nx[r.id];
+              if (cur && cur.blocked) return;
+              if (!cur) { nx[r.id] = { uid: r.uid, role: "staff", pending: true, password: "", lastLoginAt: new Date().toISOString() }; changed = true; }
+              else if (cur.uid !== r.uid && cur.pending) { nx[r.id] = __spreadProps(__spreadValues({}, cur), { uid: r.uid }); changed = true; }
+            });
+            if (changed) { try { fbDb.collection("stores").doc("_accounts").set({ list: nx }).catch(() => {}); } catch (e) {} }
+            return changed ? nx : prev;
+          });
+        }).catch(() => {});
+      } catch (e) {}
+    };
+    pull();
+    const iv = setInterval(pull, 30000);
+    return () => { stop = true; clearInterval(iv); };
+  }, [amAdminSecure]);
+  const amPendingSecure = loggedIn && authUser && isSecureUser(authUser) && accounts[nickname] && accounts[nickname].pending;
+  useEffect(() => {
+    if (!amPendingSecure || !firebaseReady) return;
+    const uid = authUser.uid;
+    const check = () => { try { fbDb.collection("allow").doc(uid).get().then((sn) => { if (sn && sn.exists) { setAccounts((prev) => __spreadProps(__spreadValues({}, prev), { [nickname]: __spreadProps(__spreadValues({}, prev[nickname] || {}), { pending: false }) })); setTimeout(() => { try { window.location.reload(); } catch (e) {} }, 300); } }).catch(() => {}); } catch (e) {} };
+    check();
+    const iv = setInterval(check, 15000);
+    return () => clearInterval(iv);
+  }, [amPendingSecure]);
+  const secureOffRecently = (() => { try { const t = Number(localStorage.getItem("joassam_secure_off") || 0); return t && Date.now() - t < 6 * 3600 * 1e3; } catch (e) { return false; } })();
+  const needSecureRelogin = loggedIn && firebaseReady && fbAuth && typeof fbAuth.signInWithEmailAndPassword === "function" && !!authUser && !isSecureUser(authUser) && !secureOffRecently;
   const addMemberRef = useRef(null);
   function addMemberLater(name) {
     if (addMemberRef.current) addMemberRef.current(name);
@@ -15434,6 +15660,7 @@ function App() {
                   loadedDataSigRef.current = null;
                   // v233: 처음 불러오기가 실패했으면 저장을 열지 않음 (빈/일부 데이터로 서버를 덮는 것 방지)
                   try { logDiag("load_failed", { msg: String(err && err.message || err).slice(0, 80) }); } catch (e) {}
+                  try { if (/permission|insufficient/i.test(String((err && (err.code + " " + err.message)) || err)) && onPermDenied()) return; } catch (e) {}
                   try { fireToast("⚠️ 데이터를 다 불러오지 못했어요 — 잠시 후 자동으로 다시 불러옵니다"); } catch(e) {}
                   setTimeout(() => { try { fbDb.collection("stores").doc(DATA_DOC).get().then(() => {}).catch(() => {}); setReloadTick((t) => t + 1); } catch (e) {} }, 5000);
                 });
@@ -15489,6 +15716,7 @@ function App() {
         },
         (err) => {
           setDataLoaded(true);
+          try { if (/permission|insufficient/i.test(String((err && (err.code + " " + err.message)) || err)) && onPermDenied()) return; } catch (e) {}
           pushSaveAlert("error",
             "🚨 Firebase 연결 오류 — 데이터를 불러오지 못했습니다",
             `오류: ${String(err && err.message || err).slice(0, 150)}\n→ 인터넷 연결을 확인해주세요\n→ 저장된 데이터는 기기 내에 안전합니다\n→ 새로고침하면 다시 연결을 시도합니다`
@@ -15873,6 +16101,7 @@ function App() {
     };
     const onErr = (err) => {
       if (err && err.outdated) { pendingSaveDataRef.current = null; clearSaving(); return; }
+      try { if (/permission|insufficient/i.test(String((err && (err.code + " " + err.message)) || err))) { stashUnsynced(); clearSaving(); onPermDenied(); return; } } catch (e) {}
       // v232: 서버 하루 한도 초과 → 반복 재시도 대신 기기에 보관하고 5분마다 조용히 재시도
       const errText = String((err && (err.code || "")) + " " + (err && err.message || err));
       if (/quota|resource-exhausted/i.test(errText)) {
@@ -20398,18 +20627,21 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         appLogo,
         setAppLogo,
         onLogin: handleLogin,
-        loginError,
+        loginError: loginBusy ? "확인 중…" : loginError,
         isDesktop
       }
     );
   }
   if (accounts[nickname] && accounts[nickname].pending) {
-    return /* @__PURE__ */ React.createElement(PendingApprovalScreen, { nickname, onLogout: handleLogout, appName });
+    return /* @__PURE__ */ React.createElement(PendingApprovalScreen, { nickname, onLogout: () => handleLogout(), appName });
   }
   const mobileTabTitle = { home: "HOME", orders: "\uC8FC\uBB38", products: "\uC0C1\uD488", integrations: "\uC1FC\uD551\uBAB0 \uC5F0\uB3D9", new: "\uC8FC\uBB38 \uC785\uB825" }[tab];
   const unreadAlerts = saveAlerts.filter(a => !a.read).length;
   const errorAlerts = saveAlerts.filter(a => a.type === "error" && !a.read).length;
   return /* @__PURE__ */ React.createElement("div", { style: { minHeight: "100vh", background: isDesktop ? "#E2E4DD" : "#EDEEE8", display: "flex", justifyContent: "center", alignItems: isDesktop ? "flex-start" : "stretch", padding: isDesktop ? "32px 0" : "24px 0", boxSizing: "border-box", fontFamily: FONT } },
+  needSecureRelogin && /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", top: 0, left: 0, right: 0, zIndex: 99990, background: "#8B3A00", color: "#fff", padding: "10px 14px calc(10px) 14px", display: "flex", alignItems: "center", gap: 10, boxShadow: "0 2px 8px rgba(0,0,0,0.25)" } },
+    /* @__PURE__ */ React.createElement("div", { style: { flex: 1, fontSize: 14, fontWeight: 700, lineHeight: 1.45 } }, "🔒 보안 업데이트: 이 기기에서 한 번만 다시 로그인해 주세요 (아이디·비밀번호 그대로)"),
+    /* @__PURE__ */ React.createElement("button", { onClick: () => handleLogout("보안 업데이트 — 아이디·비밀번호로 다시 로그인해 주세요"), style: { border: "none", borderRadius: 8, background: "#fff", color: "#8B3A00", fontWeight: 800, fontSize: 14, padding: "8px 12px", cursor: "pointer", flexShrink: 0 } }, "다시 로그인")),
   /* 저장 알림 패널 */
   showSaveAlerts && /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", inset: 0, zIndex: 300001, background: "rgba(0,0,0,0.5)", display: "flex", alignItems: "flex-end" }, onClick: () => setShowSaveAlerts(false) },
     /* @__PURE__ */ React.createElement("div", { onClick: e => e.stopPropagation(), style: { width: "100%", maxWidth: 720, margin: "0 auto", background: "#fff", borderTopLeftRadius: 20, borderTopRightRadius: 20, height: "88vh", maxHeight: "88vh", display: "flex", flexDirection: "column" } },
@@ -20778,7 +21010,8 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         onSetRole: setAccountRole,
         onSetDisplayName: setAccountDisplayName,
         onBack: () => setTab("home"),
-        askConfirm
+        askConfirm,
+        secure: { meSecure: !!(authUser && isSecureUser(authUser)), note: secureNote, onCopy: (t) => { try { navigator.clipboard.writeText(t).then(() => fireToast("규칙을 복사했어요. Firebase 콘솔 → Firestore → 규칙에 붙여넣고 '게시'를 누르세요")).catch(() => fireToast("복사하지 못했어요. 글을 길게 눌러 복사해 주세요")); } catch (e) {} } }
       }
     ), tab === "deliverytrack" && /* @__PURE__ */ React.createElement(
       DeliveryTrackTab,
@@ -21536,7 +21769,35 @@ function toolBtnStyle(bg) {
 function batchBtnStyle(bg, color) {
   return { flex: 1, padding: "8px 0", borderRadius: 7, border: "none", background: bg, color, fontWeight: 700, fontSize: 11.5, cursor: "pointer" };
 }
-function AccountsTab({ accounts, members, currentNickname, onAdd, onChangePassword, onRename, onDelete, onBlock, onUnblock, onApprove, onReject, onSetRole, onSetDisplayName, onBack, askConfirm }) {
+// v290: 보안 잠금 준비 상태 + 규칙 복사
+function SecureLockCard({ accounts, secure }) {
+  const [open, setOpen] = useState(false);
+  const ids = Object.keys(accounts || {}).filter((id) => accounts[id] && !accounts[id].blocked && !accounts[id].pending);
+  const done = ids.filter((id) => accounts[id].uid);
+  const left = ids.filter((id) => !accounts[id].uid);
+  const ready = left.length === 0 && done.length > 0;
+  const box = { background: ready ? "#EAF3DE" : "#FFF8EC", border: "1px solid " + (ready ? "#C0DD97" : "#F0C98A"), borderRadius: 12, padding: "12px 14px", marginBottom: 14 };
+  const pre = { whiteSpace: "pre-wrap", wordBreak: "break-all", fontSize: 11, background: "#1B2430", color: "#E2E4DD", borderRadius: 8, padding: 10, maxHeight: 180, overflowY: "auto", fontFamily: "monospace" };
+  const btn = (bg) => ({ border: "none", borderRadius: 8, padding: "9px 12px", fontSize: 13, fontWeight: 800, background: bg, color: "#fff", cursor: "pointer" });
+  return React.createElement("div", { style: box },
+    React.createElement("div", { style: { fontSize: 15, fontWeight: 800, marginBottom: 6 } }, "🔒 보안 잠금 준비 " + (ready ? "완료" : "중") + " (" + done.length + "/" + ids.length + " 계정)"),
+    secure && secure.note ? React.createElement("div", { style: { fontSize: 13, color: "#A32D2D", fontWeight: 700, marginBottom: 6 } }, "⚠️ " + secure.note) : null,
+    React.createElement("div", { style: { fontSize: 13, color: "#3D3D3A", lineHeight: 1.6 } },
+      secure && !secure.meSecure ? "이 기기는 아직 예전 방식이에요. 로그아웃 후 다시 로그인하면 옮겨져요. " : "",
+      left.length ? "아직 새 로그인을 안 한 계정: " + left.join(", ") + " — 그 사람이 앱(과 플로팅 앱)에서 한 번 다시 로그인하면 돼요." : "모든 계정이 새 로그인으로 옮겨졌어요. 아래 '잠금 규칙'을 Firebase에 붙여넣으면 잠금이 켜져요."),
+    React.createElement("button", { onClick: () => setOpen(!open), style: { marginTop: 8, border: "1px solid #D3D1C7", background: "#fff", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer" } }, open ? "접기 ▲" : "잠금 방법·규칙 보기 ▼"),
+    open ? React.createElement("div", { style: { marginTop: 10, fontSize: 13, lineHeight: 1.65, color: "#3D3D3A" } },
+      React.createElement("div", null, "① Firebase 콘솔 → Authentication → 로그인 방법 → '이메일/비밀번호' 사용 설정 (처음 한 번)"),
+      React.createElement("div", null, "② 모든 기기에서 한 번씩 다시 로그인 (위 숫자가 모두 채워질 때까지)"),
+      React.createElement("div", null, "③ Firestore Database → 규칙 → 아래 '잠금 규칙'으로 바꾸고 '게시'"),
+      React.createElement("div", { style: { margin: "6px 0 4px", fontWeight: 800 } }, "잠금 규칙"),
+      React.createElement("div", { style: pre }, SECURE_RULES_LOCK),
+      React.createElement("div", { style: { display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" } },
+        React.createElement("button", { onClick: () => secure && secure.onCopy && secure.onCopy(SECURE_RULES_LOCK), style: btn("#2F6F4E") }, "잠금 규칙 복사"),
+        React.createElement("button", { onClick: () => secure && secure.onCopy && secure.onCopy(SECURE_RULES_OPEN), style: btn("#5F5E5A") }, "되돌리기 규칙 복사")),
+      React.createElement("div", { style: { marginTop: 6, fontSize: 12, color: "#5F5E5A" } }, "문제가 생기면 '되돌리기 규칙'을 붙여넣고 게시하면 예전처럼 돌아가요.")) : null);
+}
+function AccountsTab({ accounts, members, currentNickname, onAdd, onChangePassword, onRename, onDelete, onBlock, onUnblock, onApprove, onReject, onSetRole, onSetDisplayName, onBack, askConfirm, secure }) {
   const [newId, setNewId] = useState("");
   const [newPw, setNewPw] = useState("");
   const [newNick, setNewNick] = useState("");
@@ -21565,7 +21826,7 @@ function AccountsTab({ accounts, members, currentNickname, onAdd, onChangePasswo
   }
   const inputStyle2 = { flex: 1, border: "1px solid #D3D1C7", borderRadius: 8, padding: "9px 10px", fontSize: 13 };
   const smallBtn = (bg, color) => ({ border: "none", background: bg, color, borderRadius: 6, padding: "6px 10px", fontWeight: 700, fontSize: 11.5, cursor: "pointer" });
-  return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 4 } }, /* @__PURE__ */ React.createElement("button", { onClick: onBack, style: { border: "none", background: "none", fontSize: 18, cursor: "pointer", padding: 0 } }, "\u2039"), /* @__PURE__ */ React.createElement("h1", { style: { fontSize: 19, fontWeight: 700, margin: 0, letterSpacing: "-0.02em" } }, "\uACC4\uC815 \uAD00\uB9AC")), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11.5, color: "#888780", margin: "6px 0 16px", lineHeight: 1.6 } }, '\uC774 \uAC00\uAC8C\uC7A5\uBD80\uB97C \uD568\uAED8 \uC4F0\uB294 \uC9C1\uC6D0 \uACC4\uC815\uC744 \uAD00\uB9AC\uD574\uC694. \uC0C8 \uACC4\uC815\uC744 \uCD94\uAC00\uD558\uAC70\uB098, \uBE44\uBC00\uBC88\uD638\xB7\uC544\uC774\uB514\uB97C \uBC14\uAFB8\uAC70\uB098, \uC9C1\uC6D0\uC774 \uD1F4\uC0AC\uD558\uBA74 "\uCC28\uB2E8"\uC73C\uB85C \uB2E4\uC2DC \uBABB \uB4E4\uC5B4\uC624\uAC8C \uB9C9\uC744 \uC218 \uC788\uC5B4\uC694. \uC5EC\uAE30\uC11C \uBC14\uAFBC \uB0B4\uC6A9\uC740 \uBAA8\uB4E0 \uAE30\uAE30(\uD3F0\xB7PC)\uC5D0 \uBC14\uB85C \uBC18\uC601\uB3FC\uC694.'), /* @__PURE__ */ React.createElement("div", { style: { border: "1px solid #E2E4DD", borderRadius: 10, padding: "12px 14px", marginBottom: 16, background: "#F7F8F4" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, marginBottom: 8 } }, "+ \uC0C8 \uACC4\uC815 \uCD94\uAC00"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("input", { placeholder: "\uC0C8 \uC544\uC774\uB514", value: newId, onChange: (e) => setNewId(e.target.value), style: inputStyle2 }), /* @__PURE__ */ React.createElement("input", { type: "password", placeholder: "\uBE44\uBC00\uBC88\uD638", value: newPw, onChange: (e) => setNewPw(e.target.value), style: inputStyle2 })), /* @__PURE__ */ React.createElement("input", { placeholder: "\uB2C9\uB124\uC784 (\uC608: \uAE40\uCCA0\uC218, \uB9E4\uC7A51) - \uD654\uBA74\uC5D0 \uC774 \uC774\uB984\uC73C\uB85C \uBCF4\uC5EC\uC694", value: newNick, onChange: (e) => setNewNick(e.target.value), style: __spreadProps(__spreadValues({}, inputStyle2), { width: "100%", marginBottom: 8 }) }), /* @__PURE__ */ React.createElement("button", { onClick: submitAdd, style: { width: "100%", padding: "10px 0", borderRadius: 8, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" } }, "\uACC4\uC815 \uCD94\uAC00")), pendingIds.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 20 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, fontWeight: 700, color: "#993C1D", marginBottom: 8 } }, "\u23F3 \uC2B9\uC778 \uB300\uAE30 \uC911 (", pendingIds.length, "\uBA85)"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8 } }, pendingIds.map((id) => /* @__PURE__ */ React.createElement("div", { key: id, style: { border: "1px solid #F0C6A8", background: "#FFF7ED", borderRadius: 10, padding: "10px 12px" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700, marginBottom: 8 } }, id), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => onApprove(id), style: smallBtn("#2F6F4E", "#fff") }, "\u2713 \uC2B9\uC778"), /* @__PURE__ */ React.createElement(
+  return /* @__PURE__ */ React.createElement("div", null, secure ? React.createElement(SecureLockCard, { accounts, secure }) : null, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 4 } }, /* @__PURE__ */ React.createElement("button", { onClick: onBack, style: { border: "none", background: "none", fontSize: 18, cursor: "pointer", padding: 0 } }, "\u2039"), /* @__PURE__ */ React.createElement("h1", { style: { fontSize: 19, fontWeight: 700, margin: 0, letterSpacing: "-0.02em" } }, "\uACC4\uC815 \uAD00\uB9AC")), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11.5, color: "#888780", margin: "6px 0 16px", lineHeight: 1.6 } }, '\uC774 \uAC00\uAC8C\uC7A5\uBD80\uB97C \uD568\uAED8 \uC4F0\uB294 \uC9C1\uC6D0 \uACC4\uC815\uC744 \uAD00\uB9AC\uD574\uC694. \uC0C8 \uACC4\uC815\uC744 \uCD94\uAC00\uD558\uAC70\uB098, \uBE44\uBC00\uBC88\uD638\xB7\uC544\uC774\uB514\uB97C \uBC14\uAFB8\uAC70\uB098, \uC9C1\uC6D0\uC774 \uD1F4\uC0AC\uD558\uBA74 "\uCC28\uB2E8"\uC73C\uB85C \uB2E4\uC2DC \uBABB \uB4E4\uC5B4\uC624\uAC8C \uB9C9\uC744 \uC218 \uC788\uC5B4\uC694. \uC5EC\uAE30\uC11C \uBC14\uAFBC \uB0B4\uC6A9\uC740 \uBAA8\uB4E0 \uAE30\uAE30(\uD3F0\xB7PC)\uC5D0 \uBC14\uB85C \uBC18\uC601\uB3FC\uC694.'), /* @__PURE__ */ React.createElement("div", { style: { border: "1px solid #E2E4DD", borderRadius: 10, padding: "12px 14px", marginBottom: 16, background: "#F7F8F4" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, marginBottom: 8 } }, "+ \uC0C8 \uACC4\uC815 \uCD94\uAC00"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("input", { placeholder: "\uC0C8 \uC544\uC774\uB514", value: newId, onChange: (e) => setNewId(e.target.value), style: inputStyle2 }), /* @__PURE__ */ React.createElement("input", { type: "password", placeholder: "\uBE44\uBC00\uBC88\uD638", value: newPw, onChange: (e) => setNewPw(e.target.value), style: inputStyle2 })), /* @__PURE__ */ React.createElement("input", { placeholder: "\uB2C9\uB124\uC784 (\uC608: \uAE40\uCCA0\uC218, \uB9E4\uC7A51) - \uD654\uBA74\uC5D0 \uC774 \uC774\uB984\uC73C\uB85C \uBCF4\uC5EC\uC694", value: newNick, onChange: (e) => setNewNick(e.target.value), style: __spreadProps(__spreadValues({}, inputStyle2), { width: "100%", marginBottom: 8 }) }), /* @__PURE__ */ React.createElement("button", { onClick: submitAdd, style: { width: "100%", padding: "10px 0", borderRadius: 8, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 13, cursor: "pointer" } }, "\uACC4\uC815 \uCD94\uAC00")), pendingIds.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { marginBottom: 20 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 12.5, fontWeight: 700, color: "#993C1D", marginBottom: 8 } }, "\u23F3 \uC2B9\uC778 \uB300\uAE30 \uC911 (", pendingIds.length, "\uBA85)"), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 8 } }, pendingIds.map((id) => /* @__PURE__ */ React.createElement("div", { key: id, style: { border: "1px solid #F0C6A8", background: "#FFF7ED", borderRadius: 10, padding: "10px 12px" } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13.5, fontWeight: 700, marginBottom: 8 } }, id), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => onApprove(id), style: smallBtn("#2F6F4E", "#fff") }, "\u2713 \uC2B9\uC778"), /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: () => askConfirm(`"${id}" \uB2D8\uC758 \uC811\uC18D \uC694\uCCAD\uC744 \uAC70\uBD80\uD560\uAE4C\uC694?
