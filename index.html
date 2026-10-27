@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 294;
+const APP_VERSION = 295;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -14469,7 +14469,8 @@ function dlvCheckpoints(shipDateStr) {
   const a = dlvNextDeliveryDay(d);
   const n = new Date(a.getFullYear(), a.getMonth(), a.getDate() + 1);
   const at = (day, h) => { const t = new Date(day.getFullYear(), day.getMonth(), day.getDate(), h, 0, 0, 0); return t; };
-  return [{ kind: "status", hour: 12, t: at(a, 12) }, { kind: "status", hour: 16, t: at(a, 16) }, { kind: "late", hour: 9, t: at(n, 9) }];
+  // v295: 발송 다음날 15시 = 아직 배송중인 것만, 그다음 날 9시 = 도착 안 된 것만
+  return [{ kind: "status", hour: 15, t: at(a, 15) }, { kind: "late", hour: 9, t: at(n, 9) }];
 }
 function dlvTrackable(o) {
   if (!o || o.status !== "shipped" || !o.invoiceNo) return false;
@@ -17364,7 +17365,20 @@ function App() {
   }
   // v243: 우체국 배송조회 자동 확인 (키 없이: /api/epost 가 우체국 조회 페이지를 대신 읽음)
   const [epostChecked, setEpostChecked] = useState(false);
+  const [shipChecking, setShipChecking] = useState(false);
   const [epostInfo, setEpostInfo] = useState({});
+  const shipLateCount = useMemo(() => {
+    const now = new Date();
+    return orders.filter((o) => {
+      if (!o || o.status !== "shipped" || !o.invoiceNo || o.deliveryConfirmed) return false;
+      const e = epostInfo && epostInfo[String(o.invoiceNo).replace(/\D/g, "")];
+      if (e && e.state === "delivered") return false;
+      const sd = dlvShipDate(o); if (!sd) return false;
+      if ((Date.now() - new Date(sd + "T00:00:00").getTime()) / 864e5 > 14) return false;
+      const cp = dlvCheckpoints(sd).find((c) => c.kind === "late");
+      return !!(cp && cp.t.getTime() <= now.getTime());
+    }).length;
+  }, [orders, epostInfo]);
   const epostRunRef = useRef(false);
   const epostLastRunRef = useRef(0);
   const epostOrdersRef = useRef(orders);
@@ -17439,7 +17453,7 @@ function App() {
       setEpostChecked(true);
     }
   }
-  // v282: 정해진 시간 배송 알림 (다음날 12시·16시 = 배송중/배송완료, 그다음 날 9시 = 도착 안 된 것만)
+  // v295: 정해진 시간 배송 알림 (다음날 15시 = 아직 배송중인 것만, 그다음 날 9시 = 도착 안 된 것만)
   const DLV_DONE_KEY = "joassam_dlv_done_" + DATA_DOC;
   const [dlvNotice, setDlvNotice] = useState(null);
   const dlvBusyRef = useRef(false);
@@ -17452,7 +17466,7 @@ function App() {
       const rows = g.orders.map((o) => Object.assign({ id: o.id, name: orderRecipientName(o) || "", no: String(o.invoiceNo) }, stOf(o)));
       const notYet = rows.filter((r) => r.st !== "delivered" && r.st !== "unknown");
       const unknown = rows.filter((r) => r.st === "unknown");
-      if (g.kind === "late" && !notYet.length && !unknown.length) return;
+      if (!notYet.length && !unknown.length) return; // v295: 다 배송완료면 알릴 것 없음
       sections.push({ ship: g.ship, kind: g.kind, hour: g.hour, total: rows.length, delivered: rows.filter((r) => r.st === "delivered").length, notYet, unknown, doneRows: rows.filter((r) => r.st === "delivered") });
     });
     return sections;
@@ -17461,10 +17475,10 @@ function App() {
     const md = (sd) => { const m = sd.match(/\d{4}-(\d{2})-(\d{2})/); return m ? +m[1] + "/" + +m[2] : sd; };
     const late = sections.some((x) => x.kind === "late" && x.notYet.length);
     const unk = sections.reduce((n, x) => n + x.unknown.length, 0);
-    const title = late ? "🚨 아직 도착 안 된 택배가 있어요" : sections.some((x) => x.kind !== "late") ? "🚚 배송 현황 (" + sections[0].hour + "시)" : "❔ 우체국 배송 조회가 안 됐어요";
+    const title = late ? "🚨 아직 도착 안 된 택배가 있어요" : sections.some((x) => x.kind !== "late" && x.notYet.length) ? "🚚 아직 배송중인 택배 (" + sections[0].hour + "시)" : "❔ 우체국 배송 조회가 안 됐어요";
     const body = sections.map((x) => (x.kind === "late"
       ? md(x.ship) + " 발송" + (x.notYet.length ? " 중 도착 안 됨 " + x.notYet.length + "건: " + x.notYet.slice(0, 4).map((r) => r.name).join(", ") + (x.notYet.length > 4 ? " 외" : "") : "")
-      : md(x.ship) + " 발송 " + x.total + "건 — 배송완료 " + x.delivered + " · 배송중 " + x.notYet.length + (x.notYet.length ? " (" + x.notYet.slice(0, 3).map((r) => r.name).join(", ") + (x.notYet.length > 3 ? " 외" : "") + ")" : ""))
+      : md(x.ship) + " 발송 중 아직 배송중 " + x.notYet.length + "건" + (x.notYet.length ? ": " + x.notYet.slice(0, 4).map((r) => r.name).join(", ") + (x.notYet.length > 4 ? " 외" : "") : ""))
       + (x.unknown.length ? " · 조회 안 됨 " + x.unknown.length + "건" : "")).join("\n");
     return { title, body, sections, late, unknownCount: unk, due, at: Date.now() };
   }
@@ -21105,7 +21119,18 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         askConfirm,
         secure: { meSecure: !!(authUser && isSecureUser(authUser)), note: secureNote, onCopy: (t) => { try { navigator.clipboard.writeText(t).then(() => fireToast("규칙을 복사했어요. Firebase 콘솔 → Firestore → 규칙에 붙여넣고 '게시'를 누르세요")).catch(() => fireToast("복사하지 못했어요. 글을 길게 눌러 복사해 주세요")); } catch (e) {} } }
       }
-    ), tab === "deliverytrack" && /* @__PURE__ */ React.createElement(
+    ), tab === "ship" && invoicePreview && React.createElement(InvoicePreview, { preview: invoicePreview, toggleRow: toggleInvoiceRow, onApply: applyInvoicePreview, onCancel: () => setInvoicePreview(null) }),
+    tab === "ship" && !invoicePreview && React.createElement(ShippingTab, {
+      orders,
+      epostInfo,
+      customerMap,
+      onConfirm: (ids) => { confirmDeliveries(ids); fireToast(ids.length > 1 ? `${ids.length}건 도착 확인했어요` : "도착 확인했어요"); },
+      onSelectOrder: (id) => { setTab("orders"); setSelectedOrderId(id); },
+      onInvoiceFile: handleInvoiceUpload,
+      onOpenInvoice: setInvoiceModalOrderId,
+      checking: shipChecking,
+      onRecheck: async () => { setShipChecking(true); try { await runEpostCheck(true); } catch (e) {} setShipChecking(false); }
+    }), tab === "deliverytrack" && /* @__PURE__ */ React.createElement(
       DeliveryTrackTab,
       {
         orders: allInTransit,
@@ -21671,7 +21696,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
       setTab("orders");
       setSelectedOrderId(null);
       setInvoicePreview(null);
-    }, badge: counts.pending }), /* @__PURE__ */ React.createElement(TabButton, { label: "\uB300\uD654 \uC8FC\uBB38", icon: React.createElement("span", { style: { fontSize: 20, lineHeight: "22px" } }, "\u{1F399}\uFE0F"), active: false, onClick: () => { try { window.dispatchEvent(new Event("joassam:openTalk")); } catch (e) {} } }), /* @__PURE__ */ React.createElement(TabButton, { label: "\uACE0\uAC1D\xB7\uC5C5\uCCB4", icon: /* @__PURE__ */ React.createElement(CustomersIcon, null), active: tab === "customers" || tab === "vendorhub" || tab === "vendors" || tab === "supplier", onClick: () => setTab(tab === "vendorhub" || tab === "vendors" ? tab : "customers") }), /* @__PURE__ */ React.createElement(TabButton, { label: "\uC0C1\uD488", icon: /* @__PURE__ */ React.createElement(ProductsIcon, null), active: tab === "products", onClick: () => setTab("products") }), /* @__PURE__ */ React.createElement(TabButton, { label: "\uB354\uBCF4\uAE30", icon: /* @__PURE__ */ React.createElement(SettingsIcon, null), active: sideMenuOpen || ["integrations", "subscriptions", "guide", "accounts", "couriersettings", "deliverytrack", "deliverycheck"].includes(tab), onClick: () => setSideMenuOpen(true) }))
+    }, badge: counts.pending }), React.createElement(TabButton, { label: "배송", icon: React.createElement("span", { style: { fontSize: 19, lineHeight: "22px" } }, "📦"), active: tab === "ship" || tab === "deliverytrack" || tab === "deliverycheck", onClick: () => { setTab("ship"); setSelectedOrderId(null); }, badge: shipLateCount }), /* @__PURE__ */ React.createElement(TabButton, { label: "\uB300\uD654 \uC8FC\uBB38", icon: React.createElement("span", { style: { fontSize: 20, lineHeight: "22px" } }, "\u{1F399}\uFE0F"), active: false, onClick: () => { try { window.dispatchEvent(new Event("joassam:openTalk")); } catch (e) {} } }), /* @__PURE__ */ React.createElement(TabButton, { label: "\uACE0\uAC1D\xB7\uC5C5\uCCB4", icon: /* @__PURE__ */ React.createElement(CustomersIcon, null), active: tab === "customers" || tab === "vendorhub" || tab === "vendors" || tab === "supplier", onClick: () => setTab(tab === "vendorhub" || tab === "vendors" ? tab : "customers") }), /* @__PURE__ */ React.createElement(TabButton, { label: "\uC0C1\uD488", icon: /* @__PURE__ */ React.createElement(ProductsIcon, null), active: tab === "products", onClick: () => setTab("products") }), /* @__PURE__ */ React.createElement(TabButton, { label: "\uB354\uBCF4\uAE30", icon: /* @__PURE__ */ React.createElement(SettingsIcon, null), active: sideMenuOpen || ["integrations", "subscriptions", "guide", "accounts", "couriersettings", "deliverytrack", "deliverycheck"].includes(tab), onClick: () => setSideMenuOpen(true) }))
   ));
 }
 
@@ -21696,13 +21721,13 @@ function DeliveryNoticeModal({ notice, onClose, onOpenTrack, onRecheck }) {
       React.createElement("div", { style: { fontSize: 18, fontWeight: 800, color: notice.late ? "#A32D2D" : "#1B2430", marginBottom: 10 } }, notice.title),
       notice.unknownCount ? React.createElement("div", { style: { fontSize: 12.5, color: "#5F5E5A", lineHeight: 1.6, marginBottom: 10 } }, "우체국 조회 사이트가 응답하지 않은 건은 '조회 안 됨'으로 따로 보여요. 아래 '다시 조회'를 누르거나 배송 현황에서 확인하세요.") : null,
       notice.sections.map((x, i) => React.createElement("div", { key: i, style: { marginBottom: 14, padding: 12, borderRadius: 12, background: x.kind === "late" ? "#FCEEEE" : "#F4F8F5", border: "1px solid " + (x.kind === "late" ? "#E9B9B9" : "#D7E6DC") } },
-        React.createElement("div", { style: { fontWeight: 800, fontSize: 14, marginBottom: 6 } }, x.kind === "late" ? (x.notYet.length ? `🚨 ${md(x.ship)} 발송 · 아직 도착 안 됨 ${x.notYet.length}건` : `${md(x.ship)} 발송 · 도착 확인`) : `${md(x.ship)} 발송 ${x.total}건 · ✅ 배송완료 ${x.delivered} · 🚚 배송중 ${x.notYet.length}` + (x.unknown && x.unknown.length ? ` · ❔ ${x.unknown.length}` : "")),
+        React.createElement("div", { style: { fontWeight: 800, fontSize: 14, marginBottom: 6 } }, x.kind === "late" ? (x.notYet.length ? `🚨 ${md(x.ship)} 발송 · 아직 도착 안 됨 ${x.notYet.length}건` : `${md(x.ship)} 발송 · 도착 확인`) : `🚚 ${md(x.ship)} 발송 · 아직 배송중 ${x.notYet.length}건` + (x.unknown && x.unknown.length ? ` · ❔ ${x.unknown.length}` : "")),
         x.notYet.map(row),
         x.kind === "late" && !x.notYet.length ? React.createElement("div", { style: { fontSize: 13, color: "#2F6F4E", fontWeight: 700 } }, "확인된 미도착은 없어요") : null,
         x.unknown && x.unknown.length ? React.createElement("div", { style: { marginTop: 8, padding: "8px 10px", borderRadius: 10, background: "#F4F4F0", border: "1px dashed #B9B7AE" } },
           React.createElement("div", { style: { fontSize: 13, fontWeight: 800, color: "#5F5E5A", marginBottom: 4 } }, "❔ 우체국 조회가 안 된 " + x.unknown.length + "건 (도착 여부 모름)"),
           React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A", lineHeight: 1.6 } }, x.unknown.slice(0, 8).map((r) => (r.name || "(이름 없음)") + " …" + tail(r.no)).join(", ") + (x.unknown.length > 8 ? " 외 " + (x.unknown.length - 8) + "건" : ""))) : null,
-        x.kind !== "late" && x.doneRows.length ? React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A", marginTop: 6 } }, "배송완료: " + x.doneRows.map((r) => r.name).join(", ")) : null)),
+        null)),
       perm === "default" ? React.createElement("button", { onClick: () => { try { Notification.requestPermission().then((p) => setPerm(p)); } catch (e) {} }, style: { width: "100%", padding: "10px 0", marginBottom: 8, borderRadius: 10, border: "1px solid #185FA5", background: "#E6F1FB", color: "#185FA5", fontWeight: 700, fontSize: 13, cursor: "pointer" } }, "🔔 앱이 뒤에 있을 때도 폰 알림으로 받기") : null,
       notice.unknownCount && onRecheck ? React.createElement("button", { disabled: !!notice.checking, onClick: onRecheck, style: { width: "100%", padding: "11px 0", marginBottom: 8, borderRadius: 10, border: "1px solid #2F6F4E", background: "#EAF3DE", color: "#27500A", fontWeight: 800, fontSize: 14, cursor: notice.checking ? "default" : "pointer" } }, notice.checking ? "조회 중… (최대 1분)" : "🔄 조회 안 된 " + notice.unknownCount + "건 다시 조회") : null,
       React.createElement("div", { style: { display: "flex", gap: 8 } },
@@ -21996,6 +22021,76 @@ function AccountsTab({ accounts, members, currentNickname, onAdd, onChangePasswo
       "\uBAA9\uB85D\uC5D0\uC11C \uC0AD\uC81C"
     )));
   }), ids.length === 0 && /* @__PURE__ */ React.createElement("div", { style: { padding: "30px 0", textAlign: "center", color: "#888780", fontSize: 13 } }, "\uB4F1\uB85D\uB41C \uACC4\uC815\uC774 \uC5C6\uC5B4\uC694")));
+}
+// v295: 하단 '배송' 탭 — 송장 업로드 / 배송중 / 미도착(2일째) / 배송완료 를 나눠서 관리
+function ShippingTab({ orders, epostInfo = {}, customerMap, onConfirm, onSelectOrder, onInvoiceFile, onOpenInvoice, onRecheck, checking }) {
+  const [view, setView] = useState(() => { try { return localStorage.getItem("joassam_ship_view") || "transit"; } catch (e) { return "transit"; } });
+  const go = (v) => { setView(v); try { localStorage.setItem("joassam_ship_view", v); } catch (e) {} };
+  const fileRef = useRef(null);
+  const now = new Date();
+  const today = todayStr();
+  const noOf = (o) => String((o && o.invoiceNo) || "").replace(/\D/g, "");
+  const ep = (o) => epostInfo[noOf(o)] || null;
+  const delivered = (o) => !!(o.deliveryConfirmed || (ep(o) && ep(o).state === "delivered"));
+  const ageDays = (o) => { const sd = dlvShipDate(o); if (!sd) return 99; const t = new Date(sd + "T00:00:00"); return Math.round((new Date(today + "T00:00:00") - t) / 864e5); };
+  const lateNow = (o) => { const cp = dlvCheckpoints(dlvShipDate(o)).find((c) => c.kind === "late"); return !!(cp && cp.t.getTime() <= now.getTime()); };
+  const nameOf = (o) => { const c = customerMap && customerMap[o.customerId]; return (o.recipient && o.recipient.name) || (c ? c.name : "") || "고객"; };
+  const all = (orders || []).filter((o) => o && o.id);
+  const waitInv = all.filter((o) => o.status === "ready" && !o.invoiceNo);
+  const shipped = all.filter((o) => o.status === "shipped" && o.invoiceNo && ageDays(o) <= 14);
+  const late = shipped.filter((o) => !delivered(o) && lateNow(o));
+  const transit = shipped.filter((o) => !delivered(o) && !lateNow(o));
+  const done = shipped.filter((o) => delivered(o) && ageDays(o) <= 10);
+  const unknownN = [...late, ...transit].filter((o) => ep(o) && ep(o).state === "error").length;
+  const trackingUrl = (o) => { const courier = o.courier || "우체국택배"; return /우체국/.test(courier) ? "https://service.epost.go.kr/trace.RetrieveDomRigiTraceList.comm?sid1=" + noOf(o) : "https://search.naver.com/search.naver?query=" + encodeURIComponent(courier + " " + o.invoiceNo + " 배송조회"); };
+  const md = (sd) => { const m = String(sd).match(/\d{4}-(\d{2})-(\d{2})/); return m ? +m[1] + "/" + +m[2] : sd; };
+  const tabs = [["invoice", "🧾 송장", waitInv.length], ["transit", "🚚 배송중", transit.length], ["late", "⚠️ 미도착", late.length], ["done", "✅ 배송완료", done.length]];
+  const btn = (bg, fg, bd) => ({ flex: 1, padding: "9px 0", borderRadius: 8, border: bd || "none", background: bg, color: fg, fontWeight: 800, fontSize: 13, cursor: "pointer", textAlign: "center", textDecoration: "none" });
+  const card = (o, kind) => {
+    const e = ep(o);
+    const isLate = kind === "late", isDone = kind === "done";
+    const accent = isDone ? "#185FA5" : isLate ? "#A32D2D" : "#2F6F4E";
+    const phone = (o.recipient && o.recipient.phone) || "";
+    return React.createElement("div", { key: o.id, "data-ship": kind, "data-no": noOf(o), style: { background: "#fff", border: "1px solid #E2E4DD", borderLeft: "4px solid " + accent, borderRadius: 10, padding: "11px 13px", marginBottom: 8 } },
+      React.createElement("div", { onClick: () => onSelectOrder && onSelectOrder(o.id), style: { cursor: "pointer" } },
+        React.createElement("div", { style: { display: "flex", justifyContent: "space-between", gap: 8 } },
+          React.createElement("span", { style: { fontSize: 15, fontWeight: 800 } }, nameOf(o)),
+          React.createElement("span", { style: { fontSize: 12, fontWeight: 800, color: accent, whiteSpace: "nowrap" } }, isDone ? "✅ 배송완료" : isLate ? "⏰ 아직 안 옴" : "🚚 배송중")),
+        React.createElement("div", { style: { fontSize: 12.5, color: "#5F5E5A", marginTop: 3 } }, (o.courier || "택배") + " · " + o.invoiceNo + " · 발송 " + md(dlvShipDate(o)) + (e && e.last && !isDone ? " · 우체국: " + e.last : e && e.state === "error" && !isDone ? " · 자동 조회 안 됨" : ""))),
+      isDone ? null : React.createElement("div", { style: { display: "flex", gap: 6, marginTop: 8 } },
+        React.createElement("a", { href: trackingUrl(o), target: "_blank", rel: "noreferrer", style: btn("#fff", "#185FA5", "1px solid #185FA5") }, "배송조회 열기"),
+        isLate && phone ? React.createElement("a", { href: "tel:" + String(phone).replace(/[^0-9]/g, ""), style: btn("#FFF4E5", "#8B4A00", "1px solid #F0C98A") }, "📞 전화") : null,
+        React.createElement("button", { onClick: () => onConfirm && onConfirm([o.id]), style: btn("#2F6F4E", "#fff") }, "도착 확인함")));
+  };
+  const grouped = (list, kind) => {
+    const by = {};
+    list.forEach((o) => { const sd = dlvShipDate(o); (by[sd] = by[sd] || []).push(o); });
+    return Object.keys(by).sort().reverse().map((sd) => React.createElement("div", { key: sd },
+      React.createElement("div", { style: { fontSize: 13.5, fontWeight: 800, color: "#3D3D3A", margin: "10px 2px 6px" } }, md(sd) + " 발송 · " + by[sd].length + "건"),
+      by[sd].map((o) => card(o, kind))));
+  };
+  const empty = (t) => React.createElement("div", { style: { textAlign: "center", padding: "28px 0", fontSize: 14, color: "#5F5E5A", background: "#fff", borderRadius: 12, border: "1px dashed #D3D1C7" } }, t);
+  return React.createElement("div", { style: { paddingBottom: 100 } },
+    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10 } },
+      React.createElement("div", { style: { flex: 1, fontSize: 19, fontWeight: 800 } }, "📦 배송 관리"),
+      React.createElement("button", { onClick: onRecheck, disabled: !!checking, style: { border: "1px solid #2F6F4E", background: "#EAF3DE", color: "#27500A", borderRadius: 8, padding: "8px 10px", fontSize: 13, fontWeight: 800, cursor: checking ? "default" : "pointer" } }, checking ? "조회 중…" : "🔄 우체국 다시 조회")),
+    unknownN ? React.createElement("div", { style: { fontSize: 12.5, color: "#8B4A00", background: "#FFF4E5", borderRadius: 8, padding: "7px 10px", marginBottom: 8 } }, "❔ 우체국 자동 조회가 안 된 " + unknownN + "건이 있어요. 잠시 후 '우체국 다시 조회'를 누르거나 '배송조회 열기'로 확인해 주세요.") : null,
+    React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 5, marginBottom: 12 } },
+      tabs.map(([k, label, n]) => React.createElement("button", { key: k, "data-shiptab": k, onClick: () => go(k), style: { padding: "9px 0 7px", borderRadius: 10, border: view === k ? "2px solid #2F6F4E" : "1px solid #E2E4DD", background: view === k ? "#EAF3DE" : "#fff", cursor: "pointer" } },
+        React.createElement("div", { style: { fontSize: 12.5, fontWeight: 800, color: "#1B2430" } }, label),
+        React.createElement("div", { style: { fontSize: 17, fontWeight: 800, color: k === "late" && n ? "#A32D2D" : "#2F6F4E" } }, n)))),
+    view === "invoice" ? React.createElement("div", null,
+      React.createElement("input", { ref: fileRef, type: "file", accept: ".xlsx,.xls,.csv", onChange: onInvoiceFile, style: { display: "none" } }),
+      React.createElement("button", { onClick: () => fileRef.current && fileRef.current.click(), style: { width: "100%", padding: "13px 0", borderRadius: 12, border: "none", background: "#185FA5", color: "#fff", fontWeight: 800, fontSize: 15, cursor: "pointer", marginBottom: 10 } }, "🧾 송장 파일 올리기 (우체국 송장 엑셀)"),
+      React.createElement("div", { style: { fontSize: 13, color: "#5F5E5A", marginBottom: 8 } }, "송장이 들어가면 '발송완료'가 되고 '배송중'으로 옮겨져요. 송장 기다리는 주문(발송준비):"),
+      waitInv.length ? waitInv.map((o) => React.createElement("div", { key: o.id, style: { display: "flex", alignItems: "center", gap: 8, background: "#fff", border: "1px solid #E2E4DD", borderRadius: 10, padding: "10px 12px", marginBottom: 6 } },
+        React.createElement("div", { onClick: () => onSelectOrder && onSelectOrder(o.id), style: { flex: 1, cursor: "pointer", fontSize: 14.5, fontWeight: 700 } }, nameOf(o), React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A", fontWeight: 400 } }, (o.items || []).map((it) => (it.name || "") + " " + (it.qty || 1) + "개").join(", "))),
+        React.createElement("button", { onClick: () => onOpenInvoice && onOpenInvoice(o.id), style: { border: "1px solid #185FA5", background: "#E6F1FB", color: "#185FA5", borderRadius: 8, padding: "7px 10px", fontSize: 13, fontWeight: 800, cursor: "pointer" } }, "송장 입력"))) : empty("송장 기다리는 주문이 없어요")) : null,
+    view === "transit" ? (transit.length ? grouped(transit, "transit") : empty("배송중인 택배가 없어요")) : null,
+    view === "late" ? React.createElement("div", null,
+      React.createElement("div", { style: { fontSize: 13, color: "#A32D2D", marginBottom: 6, lineHeight: 1.5 } }, "보낸 다음 배달일까지 도착이 확인 안 된 택배예요. 배송조회로 확인하고, 필요하면 고객에게 전화하거나 우체국(1588-1300)에 문의하세요."),
+      late.length ? grouped(late, "late") : empty("미도착 택배가 없어요 👍")) : null,
+    view === "done" ? (done.length ? grouped(done, "done") : empty("최근 10일 안에 배송완료된 택배가 없어요")) : null);
 }
 function DeliveryTrackTab({ orders, deliveredOrders = [], epostInfo = {}, customerMap, onConfirm, onSelectOrder, onBack, expectedArrivalDeadline }) {
   const [view, setView] = useState("transit");
@@ -23903,7 +23998,7 @@ function GuideTab({ onBack }) {
         { h: "\uBE48 \uC591\uC2DD \uB2E4\uC6B4\uB85C\uB4DC", b: '"\uC5D1\uC140 \uD30C\uC77C \uC8FC\uBB38 \uB4F1\uB85D" \uD654\uBA74\uC5D0\uC11C "\u2B07 \uBE48 \uC591\uC2DD \uB2E4\uC6B4\uB85C\uB4DC"\uB97C \uB204\uB974\uBA74 \uCEEC\uB7FC\uB9CC \uC788\uB294 \uBE48 \uD30C\uC77C\uC744 \uBC1B\uC744 \uC218 \uC788\uC5B4\uC694. \uB2E4\uB978 \uC1FC\uD551\uBAB0(\uC2A4\uB9C8\uD2B8\uC2A4\uD1A0\uC5B4, \uCFE0\uD321 \uB4F1) \uC8FC\uBB38 \uB0B4\uC6A9\uC744 \uC774 \uC591\uC2DD\uC5D0 \uC62E\uACA8 \uC801\uC740 \uB4A4, \uAC19\uC740 \uD654\uBA74\uC5D0\uC11C \uB2E4\uC2DC \uC5C5\uB85C\uB4DC\uD558\uBA74 \uB4F1\uB85D\uB3FC\uC694.' },
         { h: "\uD655\uC778\uC774 \uD544\uC694\uD574\uC694 \uC54C\uB9BC", b: '\uC0C8\uB85C \uB4F1\uB85D\uB418\uB294 \uACE0\uAC1D\xB7\uC5C5\uCCB4\uAC00 \uAE30\uC874 \uC815\uBCF4\uC640 \uC560\uB9E4\uD558\uAC8C \uACB9\uCE58\uBA74(\uC804\uD654\uBC88\uD638\uB294 \uAC19\uC740\uB370 \uC774\uB984\uC774 \uB2E4\uB974\uAC70\uB098, \uC774\uB984\uC740 \uAC19\uC740\uB370 \uC8FC\uC18C\uAC00 \uB2E4\uB978 \uACBD\uC6B0) "\u26A0 \uD655\uC778\uC774 \uD544\uC694\uD574\uC694" \uCC3D\uC774 \uB5A0\uC694. \uAC19\uC740 \uC0AC\uB78C\uC774\uBA74 "\uC0AD\uC81C\uD558\uAE30", \uB2E4\uB978 \uC0AC\uB78C\uC774\uBA74 "\uADF8\uB300\uB85C \uB450\uAE30"\uB97C \uB204\uB974\uBA74 \uB3FC\uC694.' },
         { h: "\uC0C1\uD488\uBA85\uC774 \uD655\uC2E4\uD558\uC9C0 \uC54A\uC73C\uBA74", b: '\uC5D1\uC140 \uC0C1\uD488\uBA85\uC774 \uB4F1\uB85D\uB41C \uC0C1\uD488\uACFC \uD655\uC2E4\uD558\uAC8C \uC548 \uB9DE\uC73C\uBA74, \uCD94\uCE21\uD574\uC11C \uC5C9\uB6B1\uD55C \uC0C1\uD488\uC73C\uB85C \uB4F1\uB85D\uD558\uC9C0 \uC54A\uACE0 \uC6D0\uBCF8 \uC774\uB984 \uADF8\uB300\uB85C \uB0A8\uACA8\uB450\uACE0 "\uD655\uC778 \uD544\uC694" \uD45C\uC2DC\uB97C \uD574\uC918\uC694. \uBBF8\uB9AC\uBCF4\uAE30 \uD654\uBA74\uC5D0\uC11C \uC9C1\uC811 \uD655\uC778\uD558\uACE0 \uC62C\uBC14\uB978 \uC0C1\uD488\uC744 \uACE8\uB77C\uC8FC\uC138\uC694.' },
-        { h: "배송 알림 (정해진 시간)", b: "우체국 택배를 보낸 다음 날(일요일이면 월요일) 12시·16시에 배송중/배송완료를 나눠서 알려 주고, 그다음 날 9시(일요일이어도)에 아직 도착 안 된 것만 다시 경고해요. 예) 16일 발송 → 17일 12시·16시 현황 → 18일 9시 미도착 경고. 주문관리 앱이 열려 있으면 화면에 바로 뜨고, 닫혀 있었으면 다음에 열 때 알려요(현황은 그날 안, 경고는 20시간 안). 앱을 닫아 둬도 정확한 시간에 폰 알림을 받으려면 '조아저씨쌈 플로팅' 앱을 최신으로 업데이트하고 '정확한 시간 알림 허용'을 켜 주세요. 송장번호가 들어간 '발송완료' 주문만 대상이고, 우체국이 아닌 택배는 빠져요." },
+        { h: "배송 알림 (정해진 시간)", b: "우체국 택배를 보낸 다음 날(일요일이면 월요일) 오후 3시에 아직 배송중인 것만 알려 주고(모두 배송완료면 알림 없음), 그다음 날 오전 9시(일요일이어도)에 아직 도착 안 된 것만 다시 경고해요. 예) 16일 발송 → 17일 15시 배송중 알림 → 18일 9시 미도착 경고. 아래 '배송' 탭에서 송장 업로드·배송중·배송완료·미도착을 나눠서 볼 수 있어요. 플로팅 앱을 깔아 두면 앱을 닫아 둬도 폰 알림이 와요." },
         { h: "화면 구성 (아래 메뉴)", b: "홈 · 주문 · 🎙️ 대화 주문 · 고객·업체 · 상품 · 더보기. '고객·업체'에서는 위쪽 단추로 고객과 업체를 바꿔요. 배송 추적·도착 확인·택배접수 양식·쇼핑몰 연동·정기배송·백업은 '더보기'에 있고, 점검·AI 학습 도구는 '더보기 → 고급'에 모아 두었어요." },
         { h: "⑥ 대화 주문 화면 (음성으로 주문)", b: "아래 메뉴의 '🎙️ 대화 주문'을 누르거나, 조비서(🎤)에게 '매일소풍 주문할게'처럼 말하면 대화 주문 전용 화면이 열려요. '띵' 소리 뒤에 '적상추 4박스', '로메인 2키로 하나', '아니 5박스야', '로메인은 빼', '받는 사람 배수련 씨'처럼 말하면 위쪽 주문 카드에 바로 반영돼요. 등록된 이름이 확실하지 않으면 지어내지 않고 '크리스탈 벨 말씀이세요?'나 번호로 물어봐요('응', '1번'으로 대답). 등록에 없는 이름(예: '대솔 본점')은 지점을 고른 뒤 '앞으로 이렇게 알아들을까요?'에 '응' 하면 다음부터 바로 알아들어요. 박스가 여러 개로 나뉠 수 있으면 등록할 때 '📦 묶음 배송 확인' 창이 떠요. 고른 대로 박스마다 주문이 따로 등록돼요(말로 '전부 한 박스', '적상추랑 로메인 한 박스, 케일 따로'라고 먼저 정해도 돼요). 음성 주문은 이 화면 한 곳에서만 받아요. 카드에서 직접 수량·받는 분·묶음을 고칠 수도 있어요. 마지막에 '응'(또는 '주문 확정' 버튼)이면 주문 목록에 등록돼요." },
         { h: "대화 주문이 잘 안 들릴 때", b: "조비서가 말하는 동안에는 듣지 않아요. '띵' 소리가 난 뒤에 말씀하세요(🎤 버튼을 누르면 말을 끊고 바로 들어요). 듣는 중에는 마이크 옆 막대가 움직이는데, 가운데 선을 넘어야 '말'로 들어요. 주변이 아주 시끄러워 말이 안 끝나거나 잘리면 위쪽 '⏱ 말 끝: 자동'을 눌러 '✋ 말 끝: 버튼'으로 바꾸세요. 말을 다 한 뒤 🎤 버튼을 한 번 누르면 그때 받아써요. 내 말풍선 아래 '🎧 들은 말'은 받아쓰기가 실제로 들은 문장이고, 작은 글씨로 '말 2.1초 · 목소리가 주변 소음의 15배'처럼 얼마나 잘 들렸는지 나와요(5배보다 작으면 폰을 입 가까이). 주황색 '🔇' 줄은 들렸지만 버린 말과 그 이유예요. 정밀 인식(Gemini 키)이 있으면 더 정확하고, 들은 말이 등록 이름과 안 맞으면 더 정확한 모델로 한 번 더 받아써서 맞는 쪽을 골라요." },
