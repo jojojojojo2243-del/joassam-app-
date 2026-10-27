@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 291;
+const APP_VERSION = 292;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -1701,6 +1701,76 @@ function smartSplitRecipients(text) {
   return merged;
 }
 
+// ===== v292: 주문 인식 공통 엔진 — 주문 입력·주문 등록 창·사진·엑셀·AI 분석이 모두 이것을 씀 =====
+// 상품 이름 하나 → 상품 찾기: 정확히 같은 이름 → 무게(1kg·500g)까지 맞는 것 → 포함 → 대화 주문과 같은 비슷한 말·별칭(로매인→로메인)
+const __mpuCache = { list: null, vi: null };
+function matchProductUnified(nm, products) {
+  const none = { product: null, confidence: "none", candidates: [] };
+  const list = (products || []).filter((p) => p && p.name);
+  // 단위 말을 맞춰 줌: 1키로·1킬로 → 1kg, 500그램 → 500g
+  nm = String(nm || "").replace(/(\d+(?:\.\d+)?)\s*(킬로그램|킬로그람|키로그램|키로그람|킬로|키로|kg)/gi, "$1kg").replace(/(\d+(?:\.\d+)?)\s*(그램|그람|g)(?![a-z])/gi, "$1g");
+  const q = squishStr(nm), qc = coreStr(nm);
+  if (!q || !list.length) return none;
+  const idx = list.map((p) => ({ p, sq: squishStr(p.name), co: coreStr(p.name) }));
+  const unitTok = q.match(/\d+(\.\d+)?(kg|g|ml|l)/g) || [];
+  const exact = idx.find((e) => e.sq === q);
+  if (exact) return { product: exact.p, confidence: "exact", candidates: [] };
+  let coreMatches = qc ? idx.filter((e) => e.co === qc) : [];
+  if (coreMatches.length === 1) return { product: coreMatches[0].p, confidence: "exact", candidates: [] };
+  if (coreMatches.length > 1 && unitTok.length) {
+    const withUnit = coreMatches.filter((e) => unitTok.every((u) => e.sq.includes(u)));
+    if (withUnit.length === 1) return { product: withUnit[0].p, confidence: "exact", candidates: [] };
+    if (withUnit.length > 1) coreMatches = withUnit;
+  }
+  if (coreMatches.length >= 1) return { product: coreMatches[0].p, confidence: "low", candidates: coreMatches.slice(0, 4).map((e) => e.p) };
+  let contains = idx.filter((e) => e.sq && (e.sq.includes(q) || q.includes(e.sq)));
+  if (contains.length > 1 && unitTok.length) { const u = contains.filter((e) => unitTok.every((t) => e.sq.includes(t))); if (u.length) contains = u; }
+  contains.sort((a, b) => b.sq.length - a.sq.length);
+  if (contains.length) return { product: contains[0].p, confidence: "low", candidates: contains.slice(0, 4).map((e) => e.p) };
+  if (qc) {
+    const c2 = idx.filter((e) => e.co && (e.co.includes(qc) || qc.includes(e.co))).sort((a, b) => b.co.length - a.co.length);
+    if (c2.length) return { product: c2[0].p, confidence: "low", candidates: c2.slice(0, 4).map((e) => e.p) };
+  }
+  // 대화 주문 인식기(비슷한 말·별칭·받아쓰기 실수)로 한 번 더
+  try {
+    if (typeof VO2 !== "undefined" && VO2.buildIndex && VO2.findProducts) {
+      if (__mpuCache.list !== products) { __mpuCache.list = products; __mpuCache.vi = VO2.buildIndex({ products: list, customers: [], vendors: [] }); }
+      const vi = __mpuCache.vi;
+      const f = (VO2.findProducts(String(nm), vi) || []).filter((x) => x && x.baseNS && !x.ambiguous);
+      if (f.length === 1 && vi.groups[f[0].baseNS]) {
+        const skus = vi.groups[f[0].baseNS].skus || [];
+        const qs = ((VO2.parseQuantities && VO2.parseQuantities(String(nm))) || []).filter((x) => x && x.grams);
+        const pick = skus.length === 1 ? skus[0] : qs.length ? skus.find((k) => k.grams === qs[0].grams) : null;
+        const cands = skus.map((k) => k.raw);
+        if (pick) return { product: pick.raw, confidence: f[0].score >= 0.97 ? "exact" : "low", candidates: f[0].score >= 0.97 ? [] : cands.slice(0, 4) };
+        if (cands.length) return { product: cands[0], confidence: "low", candidates: cands.slice(0, 4) };
+      }
+    }
+  } catch (e) {}
+  return none;
+}
+// 글 전체 → 받는분 목록 + 보내는분 + 상품 (한 사람이든 여러 사람이든 같은 방법)
+function parseOrderText(text, products) {
+  const src = String(text || "");
+  let sp = null;
+  try { sp = splitLabeledSender(src); } catch (e) {}
+  const core = parseOrderMessage(src, products);
+  let recips = [];
+  try { recips = (parseMultipleRecipients(src, products) || []).filter((r) => r && (r.phone || r.name || r.address)); } catch (e) {}
+  if (recips.length <= 1) {
+    const r0 = recips[0] || {};
+    const one = {
+      name: r0.name || core.recipName || "",
+      phone: String(r0.phone || core.recipPhone || "").replace(/[^0-9]/g, ""),
+      address: r0.address || core.address || "",
+      items: (core.items && core.items.length ? core.items : r0.items) || [],
+      deliveryMessage: core.deliveryMessage || r0.deliveryMessage || ""
+    };
+    recips = one.name || one.phone || one.address ? [one] : [];
+  }
+  const sender = sp ? sp.sender : recips.length === 1 ? { name: recips[0].name, phone: recips[0].phone } : { name: core.senderName || "", phone: core.senderPhone || "" };
+  return { sender, labeledSender: !!sp, recipients: recips, items: core.items || [], reserveDate: core.reserveDate || "", deliveryMessage: core.deliveryMessage || "", core };
+}
 function parseMultipleRecipients(text, products) {
   try { const sp0 = splitLabeledSender(text); if (sp0) text = sp0.rest; } catch (e) {}
   // v242: 먼저 새 인식기(이름·전화·주소 순서가 제각각인 문자 대응), 못 읽는 항목만 옛 방식으로 보충
@@ -1902,6 +1972,30 @@ function parseOrderMessageCore(text, products) {
     result.items.push({ productId: p.id, qty });
     matchedRanges.push({ start: realIdx, end: realIdx + p.name.length });
   });
+  // v292: 상품 이름이 그대로 안 적혀도(로매인, 모듬쌈 두개 등) 대화 주문과 같은 인식기로 한 줄씩 찾기
+  if (!result.items.length && (products || []).length && typeof VO2 !== "undefined") {
+    try {
+      if (__mpuCache.list !== products) { __mpuCache.list = products; __mpuCache.vi = VO2.buildIndex({ products: (products || []).filter((p) => p && p.name), customers: [], vendors: [] }); }
+      const vi = __mpuCache.vi;
+      const KO = { 한: 1, 두: 2, 세: 3, 네: 4, 다섯: 5, 여섯: 6, 일곱: 7, 여덟: 8, 아홉: 9, 열: 10 };
+      normText.split("\n").forEach((line) => {
+        const ln = line.replace(/01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/g, " ");
+        if (!ln.trim() || __isAddrLine(ln) && !/\d+\s*(개|박스|봉|팩|키로|kg)/i.test(ln)) return;
+        const f = (VO2.findProducts(ln, vi) || []).filter((x) => x && x.baseNS && !x.ambiguous && x.score >= 0.9);
+        if (f.length !== 1 || !vi.groups[f[0].baseNS]) return;
+        const skus = vi.groups[f[0].baseNS].skus || [];
+        const qs = (VO2.parseQuantities && VO2.parseQuantities(ln)) || [];
+        const w = qs.find((x) => x && x.grams);
+        const cnt = qs.find((x) => x && x.kind === "count");
+        const pick = skus.length === 1 ? skus[0] : w ? skus.find((k) => k.grams === w.grams) : null;
+        if (!pick) return;
+        let qty = cnt ? Number(cnt.value) || 1 : 1;
+        const kw = ln.match(/(한|두|세|네|다섯|여섯|일곱|여덟|아홉|열)\s*(개|박스|봉|팩|세트)/);
+        if (!cnt && kw) qty = KO[kw[1]] || 1;
+        result.items.push({ productId: pick.raw.id, qty });
+      });
+    } catch (e) {}
+  }
   return result;
 }
 const DEFAULT_GEMINI_KEYS = [];
@@ -18751,12 +18845,12 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
   const draftItems = draft.deliveries.flatMap((d) => Object.entries(d.cart || {}).map(([productId, qty]) => ({ productId, qty })));
   const draftTotal = draft.deliveries.reduce((sum, d) => sum + deliveryTotal(d), 0);
   function applyParsedMessage(text) {
-    const parsed = parseOrderMessage(text, products);
-    // 여러 명 감지: 전화번호가 2개 이상이면 다중 파싱 시도
-    const phoneMatches = (text || "").match(/01[016789][-\s.]?\d{3,4}[-\s.]?\d{4}/g) || [];
-    const uniquePhones = [...new Set(phoneMatches.map((p) => p.replace(/[-\s.]/g, "")))];
-    if (uniquePhones.length >= 2) {
-      const recipients = parseMultipleRecipients(text, products);
+    // v292: 한 사람·여러 사람 모두 공통 엔진(parseOrderText)으로 — 주문 등록 창과 같은 결과
+    const P = parseOrderText(text, products);
+    const r0 = P.recipients[0] || { name: "", phone: "", address: "" };
+    const parsed = __spreadProps(__spreadValues({}, P.core), { senderName: P.sender.name || "", senderPhone: P.sender.phone || "", recipName: r0.name || "", recipPhone: r0.phone || "", address: r0.address || "", items: P.items || [] });
+    {
+      const recipients = P.recipients;
       if (recipients.length >= 2) {
         // 다중 배송지 등록
         const deliveries = recipients.map((r) => {
@@ -18777,12 +18871,12 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
         // 보내는분: FabOrderButton에서 이미 설정된 경우 유지, 없으면 빈칸
         setDraft((prev) => __spreadProps(__spreadValues({}, prev), {
           message: text,
-          sender: (prev.sender && prev.sender.name) ? prev.sender : { name: "", phone: "" },
+          sender: P.labeledSender ? P.sender : (prev.sender && prev.sender.name) ? prev.sender : { name: "", phone: "" },
           deliveries
         }));
         // 어레인지식 주문등록 팝업 열기
         setMultiRegModal({
-          sender: (draft && draft.sender && draft.sender.name) ? draft.sender : { name: "", phone: "" },
+          sender: P.labeledSender ? P.sender : (draft && draft.sender && draft.sender.name) ? draft.sender : { name: "", phone: "" },
           deliveries,
           courier: couriers && couriers[0] || "\uC6B0\uCCB4\uAD6D\uD0DD\uBC30",
           rawText: text || ""
@@ -19625,35 +19719,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     const unmatched = [];
     const squish = squishStr;
     const core = coreStr;
-    const matchProduct = (nm) => {
-      const q = squish(nm), qc = core(nm);
-      if (!q) return { product: null, confidence: "none", candidates: [] };
-      const unitTok = squish(nm).match(/\d+(\.\d+)?(kg|g|ml|l)/g) || [];
-      const exact = productIndex.find((e) => e.sq === q);
-      if (exact) return { product: exact.p, confidence: "exact", candidates: [] };
-      let coreMatches = qc ? productIndex.filter((e) => e.co === qc) : [];
-      if (coreMatches.length === 1) return { product: coreMatches[0].p, confidence: "exact", candidates: [] };
-      if (coreMatches.length > 1 && unitTok.length) {
-        const withUnit = coreMatches.filter((e) => unitTok.every((u) => e.sq.includes(u)));
-        if (withUnit.length === 1) return { product: withUnit[0].p, confidence: "exact", candidates: [] };
-        if (withUnit.length > 1) coreMatches = withUnit;
-      }
-      if (coreMatches.length >= 1) {
-        return { product: coreMatches[0].p, confidence: "low", candidates: coreMatches.slice(0, 4).map((e) => e.p) };
-      }
-      let contains = productIndex.filter((e) => e.sq && (e.sq.includes(q) || q.includes(e.sq)));
-      if (contains.length > 1 && unitTok.length) {
-        const u = contains.filter((e) => unitTok.every((t) => e.sq.includes(t)));
-        if (u.length) contains = u;
-      }
-      contains.sort((a, b) => b.sq.length - a.sq.length);
-      if (contains.length) return { product: contains[0].p, confidence: "low", candidates: contains.slice(0, 4).map((e) => e.p) };
-      if (qc) {
-        const c2 = productIndex.filter((e) => e.co && (e.co.includes(qc) || qc.includes(e.co))).sort((a, b) => b.co.length - a.co.length);
-        if (c2.length) return { product: c2[0].p, confidence: "low", candidates: c2.slice(0, 4).map((e) => e.p) };
-      }
-      return { product: null, confidence: "none", candidates: [] };
-    };
+    const matchProduct = (nm) => matchProductUnified(nm, products); // v292: 모든 경로 공통 상품 찾기
     if (productText) {
       const parts = productText.split(/[,/]|·/).map((s) => s.trim()).filter(Boolean);
       const multi = parts.length > 1 || /[xX×*]\s*\d/.test(productText) || /\(\s*\d+\s*(개|박스|봉|팩|병|세트)\s*\)/.test(productText);
@@ -21341,7 +21407,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         const text = senderPredictModal.sharedText;
         const lab = extractLabeledSender(text);
         const sPh = String((senderObj && senderObj.phone) || "").replace(/[^0-9]/g, "");
-        const recipients = (typeof parseMultipleRecipients === "function" ? parseMultipleRecipients(text, products) : [])
+        const recipients = (typeof parseOrderText === "function" ? parseOrderText(text, products).recipients : [])
           .filter((r) => !(lab && lab.phone && r.phone === lab.phone && sPh === lab.phone)); // v237: '보내는분' 정보는 받는분에서 빼기
         // v236: 받는분이 1명이거나 못 찾아도 항상 '주문등록' 화면(배송지·원본메시지 수정·상품선택)으로
         const deliveries = recipients.map(r => {
@@ -21808,8 +21874,15 @@ function SecureLockCard({ accounts, secure }) {
   return React.createElement("div", { style: box },
     React.createElement("div", { style: { fontSize: 15, fontWeight: 800, marginBottom: 6 } }, "🔒 보안 잠금 준비 " + (ready ? "완료" : "중") + " (" + done.length + "/" + ids.length + " 계정)"),
     secure && secure.note ? React.createElement("div", { style: { fontSize: 13, color: "#A32D2D", fontWeight: 700, marginBottom: 6 } }, "⚠️ " + secure.note) : null,
+    React.createElement("div", { style: { fontSize: 12.5, color: "#5F5E5A", marginBottom: 6 } }, "이 기기: " + (secure && secure.meSecure ? "새 로그인 ✓" : "예전 방식 ✗ (로그아웃 후 다시 로그인)") + " · 앱 버전 " + APP_VERSION),
+    // v292: 계정마다 무엇이 남았는지
+    React.createElement("div", { style: { display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 } },
+      ids.map((id) => {
+        const a = accounts[id] || {};
+        const st = a.uid && !a.allowMissing ? ["✅ 완료", "#2F6F4E"] : a.uid ? ["⚠️ 로그인은 됐는데 허용 목록 저장 안 됨 — 그 기기에서 1분 뒤 자동 재시도(안 되면 로그아웃 후 다시 로그인)", "#B86800"] : ["⏳ 아직 새 로그인 안 함 — 그 기기에서 로그아웃 후 다시 로그인", "#A32D2D"];
+        return React.createElement("div", { key: id, style: { fontSize: 13, lineHeight: 1.5 } }, React.createElement("b", null, id + (a.displayName ? " (" + a.displayName + ")" : "") + ": "), React.createElement("span", { style: { color: st[1] } }, st[0]));
+      })),
     React.createElement("div", { style: { fontSize: 13, color: "#3D3D3A", lineHeight: 1.6 } },
-      secure && !secure.meSecure ? "이 기기는 아직 예전 방식이에요. 로그아웃 후 다시 로그인하면 옮겨져요. " : "",
       left.length ? "아직 새 로그인을 안 한 계정: " + left.join(", ") + " — 그 사람이 앱(과 플로팅 앱)에서 한 번 다시 로그인하면 돼요." : "모든 계정이 새 로그인으로 옮겨졌어요. 아래 '잠금 규칙'을 Firebase에 붙여넣으면 잠금이 켜져요."),
     React.createElement("button", { onClick: () => setOpen(!open), style: { marginTop: 8, border: "1px solid #D3D1C7", background: "#fff", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer" } }, open ? "접기 ▲" : "잠금 방법·규칙 보기 ▼"),
     open ? React.createElement("div", { style: { marginTop: 10, fontSize: 13, lineHeight: 1.65, color: "#3D3D3A" } },
@@ -22693,7 +22766,7 @@ function MultiRegModal({ modal, customers, products, couriers, vendors, onClose,
     const text = rawDraft;
     setRawMsg(text); setEditRaw(false);
     if (!reparse) return;
-    const rs = typeof parseMultipleRecipients === "function" ? (parseMultipleRecipients(text, products) || []) : [];
+    const rs = typeof parseOrderText === "function" ? (parseOrderText(text, products).recipients || []) : [];
     if (!rs.length) { setRawHint("받는분을 자동으로 찾지 못했어요. 글자를 눌러 고른 뒤 이름으로/주소로 버튼을 누르세요"); return; }
     setDeliveries((prev) => rs.map((r, i) => ({
       id: (prev[i] && prev[i].id) || ("new_" + Date.now() + "_" + i),
@@ -25528,15 +25601,17 @@ function NewOrderTab({ fireToast, customers, orders, products, vendors, draft, s
     }
   }
   function handleAiApply(parsed) {
+    // v292: 다른 주문 경로와 같은 상품 찾기 — 애매하면 아무거나 넣지 않고 알려 줌
     const cart = {};
+    const unsure = [];
     (parsed.items || []).forEach((it) => {
       const name = (it.name || "").trim();
-      const matched = products.find(
-        (p) => p.name === name || name.includes(p.name) || p.name.includes(name)
-      );
-      const pid = matched ? matched.id : "__ai__" + name;
-      cart[pid] = (cart[pid] || 0) + (it.qty || 1);
+      if (!name) return;
+      const r = matchProductUnified(name, products);
+      if (r.product && (r.confidence === "exact" || (r.candidates || []).length <= 1)) cart[r.product.id] = (cart[r.product.id] || 0) + (Number(it.qty) || 1);
+      else unsure.push(name + ((r.candidates || []).length ? " (후보: " + r.candidates.slice(0, 3).map((p) => p.name).join(", ") + ")" : ""));
     });
+    if (unsure.length) { try { fireToast("상품을 정확히 못 찾았어요: " + unsure.join(" / ") + " — 아래에서 직접 골라 주세요"); } catch (e) {} }
     setDraft((d) => {
       var _a, _b;
       return __spreadProps(__spreadValues({}, d), {
