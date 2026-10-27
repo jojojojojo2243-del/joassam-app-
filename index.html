@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 293;
+const APP_VERSION = 294;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -20842,14 +20842,6 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         setSearchQuery,
         counts,
         orders: filteredOrders,
-        allOrders: orders,
-        onBoardSetStatus: (ids, st) => {
-          try { recordUndo("상태 변경 " + ids.length + "건"); } catch (e) {}
-          const set = new Set(ids);
-          setOrders((prev) => prev.map((o) => set.has(o.id) ? __spreadProps(__spreadValues({}, o), { status: st }) : o));
-          fireToast(`주문 ${ids.length}건을 ${(STATUS[st] || STATUS.pending).label}(으)로 옮겼어요`);
-        },
-        onBoardConfirm: (ids) => { confirmDeliveries(ids); fireToast(`주문 ${ids.length}건을 도착 확인했어요`); },
         searchHiddenCount,
         onExportFiltered: exportFilteredOrders,
         customers,
@@ -21085,7 +21077,6 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         orders: overdueDeliveries,
         recentlyConfirmed: recentlyConfirmedDeliveries,
         customerMap,
-        epostInfo,
         onConfirm: (id) => confirmDeliveries([id]),
         onConfirmMany: confirmDeliveries,
         onSelectOrder: (id) => {
@@ -22007,10 +21998,6 @@ function AccountsTab({ accounts, members, currentNickname, onAdd, onChangePasswo
   }), ids.length === 0 && /* @__PURE__ */ React.createElement("div", { style: { padding: "30px 0", textAlign: "center", color: "#888780", fontSize: 13 } }, "\uB4F1\uB85D\uB41C \uACC4\uC815\uC774 \uC5C6\uC5B4\uC694")));
 }
 function DeliveryTrackTab({ orders, deliveredOrders = [], epostInfo = {}, customerMap, onConfirm, onSelectOrder, onBack, expectedArrivalDeadline }) {
-  // v293: 우체국에서 배달완료로 확인된 건은 '배송조회 열기' 대신 '배송완료' 표시 — 안 온 것만 조회 버튼
-  const epOf = (o) => epostInfo[String((o && o.invoiceNo) || "").replace(/\D/g, "")] || null;
-  const isDlv = (o) => !!(o && (o.deliveryConfirmed || (epOf(o) && epOf(o).state === "delivered")));
-  const dlvBadge = (o) => React.createElement("div", { style: { flex: 1, textAlign: "center", padding: "9px 0", borderRadius: 8, border: "1px solid #CFE0F2", background: "#E6F1FB", color: "#185FA5", fontWeight: 800, fontSize: 13 } }, "✅ 배송완료");
   const [view, setView] = useState("transit");
   function trackingUrl(o) {
     if (!o.invoiceNo) return null;
@@ -22031,14 +22018,10 @@ function DeliveryTrackTab({ orders, deliveredOrders = [], epostInfo = {}, custom
     const dl = !done && expectedArrivalDeadline(o.shippedAt || o.orderDate);
     const isLate = dl && /* @__PURE__ */ new Date() > dl;
     const accent = done ? "#185FA5" : isLate ? "#A32D2D" : "#2F6F4E";
-    return /* @__PURE__ */ React.createElement("div", { key: o.id, style: { background: "#fff", border: `1px solid ${done ? "#CFE0F2" : isLate ? "#E9B9B9" : "#D7E6DC"}`, borderLeft: `4px solid ${accent}`, borderRadius: 10, padding: "12px 14px" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 } }, /* @__PURE__ */ React.createElement("div", { onClick: () => onSelectOrder(o.id), style: { cursor: "pointer", flex: 1, minWidth: 0 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#1B2430" } }, name, " ", /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 400, color: "#888780", fontSize: 11 } }, ((_b = o.recipient) == null ? void 0 : _b.phone) || "")), ((_c = o.recipient) == null ? void 0 : _c.address) && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#888780", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, o.recipient.address)), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10, fontWeight: 700, color: done ? "#185FA5" : isLate ? "#A32D2D" : "#27500A", background: done ? "#E6F1FB" : isLate ? "#FCEEEE" : "#EAF3DE", padding: "3px 8px", borderRadius: 10, whiteSpace: "nowrap", marginLeft: 8 } }, done ? "\u2705 \uBC30\uC1A1\uC644\uB8CC" : isLate ? "\u23F0 \uD655\uC778 \uD544\uC694" : "\u{1F69A} \uBC30\uC1A1\uC911")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#5F5E5A", marginBottom: 8 } }, o.courier || "\uD0DD\uBC30", " \xB7 ", o.invoiceNo, " \xB7 \uBC1C\uC1A1\uC77C ", o.shippedAt || o.orderDate, done && o.deliveryConfirmedAt ? ` \xB7 \uB3C4\uCC29\uD655\uC778 ${String(o.deliveryConfirmedAt).slice(0, 10)}${o.deliveryAuto ? " (\uC790\uB3D9)" : ""}` : "", !done && epostInfo[String(o.invoiceNo || "").replace(/\D/g, "")] && epostInfo[String(o.invoiceNo || "").replace(/\D/g, "")].last ? ` \xB7 \uC6B0\uCCB4\uAD6D: ${epostInfo[String(o.invoiceNo || "").replace(/\D/g, "")].last}` : ""), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6 } }, isDlv(o) ? dlvBadge(o) : url && /* @__PURE__ */ React.createElement("a", { href: url, target: "_blank", rel: "noreferrer", style: { flex: 1, textAlign: "center", padding: "9px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12, textDecoration: "none" } }, "\uBC30\uC1A1\uC870\uD68C \uC5F4\uAE30" + (epOf(o) && epOf(o).last ? " (" + epOf(o).last + ")" : epOf(o) && epOf(o).state === "error" ? " (자동 조회 안 됨)" : "")), !done && /* @__PURE__ */ React.createElement("button", { onClick: () => onConfirm(o.id), style: { flex: 1, padding: "9px 0", borderRadius: 8, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" } }, "\uB3C4\uCC29 \uD655\uC778\uD568")));
+    return /* @__PURE__ */ React.createElement("div", { key: o.id, style: { background: "#fff", border: `1px solid ${done ? "#CFE0F2" : isLate ? "#E9B9B9" : "#D7E6DC"}`, borderLeft: `4px solid ${accent}`, borderRadius: 10, padding: "12px 14px" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 } }, /* @__PURE__ */ React.createElement("div", { onClick: () => onSelectOrder(o.id), style: { cursor: "pointer", flex: 1, minWidth: 0 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#1B2430" } }, name, " ", /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 400, color: "#888780", fontSize: 11 } }, ((_b = o.recipient) == null ? void 0 : _b.phone) || "")), ((_c = o.recipient) == null ? void 0 : _c.address) && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#888780", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, o.recipient.address)), /* @__PURE__ */ React.createElement("span", { style: { fontSize: 10, fontWeight: 700, color: done ? "#185FA5" : isLate ? "#A32D2D" : "#27500A", background: done ? "#E6F1FB" : isLate ? "#FCEEEE" : "#EAF3DE", padding: "3px 8px", borderRadius: 10, whiteSpace: "nowrap", marginLeft: 8 } }, done ? "\u2705 \uBC30\uC1A1\uC644\uB8CC" : isLate ? "\u23F0 \uD655\uC778 \uD544\uC694" : "\u{1F69A} \uBC30\uC1A1\uC911")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#5F5E5A", marginBottom: 8 } }, o.courier || "\uD0DD\uBC30", " \xB7 ", o.invoiceNo, " \xB7 \uBC1C\uC1A1\uC77C ", o.shippedAt || o.orderDate, done && o.deliveryConfirmedAt ? ` \xB7 \uB3C4\uCC29\uD655\uC778 ${String(o.deliveryConfirmedAt).slice(0, 10)}${o.deliveryAuto ? " (\uC790\uB3D9)" : ""}` : "", !done && epostInfo[String(o.invoiceNo || "").replace(/\D/g, "")] && epostInfo[String(o.invoiceNo || "").replace(/\D/g, "")].last ? ` \xB7 \uC6B0\uCCB4\uAD6D: ${epostInfo[String(o.invoiceNo || "").replace(/\D/g, "")].last}` : ""), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6 } }, url && /* @__PURE__ */ React.createElement("a", { href: url, target: "_blank", rel: "noreferrer", style: { flex: 1, textAlign: "center", padding: "9px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12, textDecoration: "none" } }, "\uBC30\uC1A1\uC870\uD68C \uC5F4\uAE30"), !done && /* @__PURE__ */ React.createElement("button", { onClick: () => onConfirm(o.id), style: { flex: 1, padding: "9px 0", borderRadius: 8, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" } }, "\uB3C4\uCC29 \uD655\uC778\uD568")));
   })));
 }
-function DeliveryCheckTab({ orders, recentlyConfirmed, customerMap, onConfirm, onConfirmMany, onSelectOrder, onBack, epostInfo = {} }) {
-  // v293: 우체국에서 배달완료로 확인된 건은 '배송완료' 표시 — 안 온 것만 조회 버튼
-  const epOf = (o) => epostInfo[String((o && o.invoiceNo) || "").replace(/\D/g, "")] || null;
-  const isDlv = (o) => !!(o && (o.deliveryConfirmed || (epOf(o) && epOf(o).state === "delivered")));
-  const dlvBadge = () => React.createElement("div", { style: { flex: 1, textAlign: "center", padding: "9px 0", borderRadius: 8, border: "1px solid #CFE0F2", background: "#E6F1FB", color: "#185FA5", fontWeight: 800, fontSize: 13 } }, "✅ 배송완료");
+function DeliveryCheckTab({ orders, recentlyConfirmed, customerMap, onConfirm, onConfirmMany, onSelectOrder, onBack }) {
   const [checkedIds, setCheckedIds] = useState(/* @__PURE__ */ new Set());
   const todayS = todayStr();
   function trackingUrl(o) {
@@ -22085,7 +22068,7 @@ function DeliveryCheckTab({ orders, recentlyConfirmed, customerMap, onConfirm, o
       const c = customerMap[o.customerId];
       const name = ((_a = o.recipient) == null ? void 0 : _a.name) || (c ? c.name : "") || "\uACE0\uAC1D";
       const url = trackingUrl(o);
-      return /* @__PURE__ */ React.createElement("div", { key: o.id, style: { background: "#fff", border: "1px solid #E9B9B9", borderLeft: "4px solid #A32D2D", borderRadius: 10, padding: "12px 14px" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: checkedIds.has(o.id), onChange: () => toggleChecked(o.id), style: { marginTop: 3, flexShrink: 0 } }), /* @__PURE__ */ React.createElement("div", { onClick: () => onSelectOrder(o.id), style: { cursor: "pointer", flex: 1, minWidth: 0 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#1B2430" } }, name, " ", /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 400, color: "#888780", fontSize: 11 } }, ((_b = o.recipient) == null ? void 0 : _b.phone) || "")), ((_c = o.recipient) == null ? void 0 : _c.address) && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#888780", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, o.recipient.address), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#5F5E5A", marginTop: 4 } }, o.courier || "\uD0DD\uBC30", " \xB7 ", o.invoiceNo, " \xB7 \uBC1C\uC1A1\uC77C ", o.shippedAt || o.orderDate))), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6 } }, isDlv(o) ? dlvBadge(o) : url && /* @__PURE__ */ React.createElement("a", { href: url, target: "_blank", rel: "noreferrer", style: { flex: 1, textAlign: "center", padding: "9px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12, textDecoration: "none" } }, "\uBC30\uC1A1\uC870\uD68C \uC5F4\uAE30" + (epOf(o) && epOf(o).last ? " (" + epOf(o).last + ")" : epOf(o) && epOf(o).state === "error" ? " (자동 조회 안 됨)" : "")), !isDlv(o) && /* @__PURE__ */ React.createElement("button", { onClick: () => onConfirm(o.id), style: { flex: 1, padding: "9px 0", borderRadius: 8, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" } }, "\uB3C4\uCC29 \uD655\uC778\uD568")));
+      return /* @__PURE__ */ React.createElement("div", { key: o.id, style: { background: "#fff", border: "1px solid #E9B9B9", borderLeft: "4px solid #A32D2D", borderRadius: 10, padding: "12px 14px" } }, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 8 } }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: checkedIds.has(o.id), onChange: () => toggleChecked(o.id), style: { marginTop: 3, flexShrink: 0 } }), /* @__PURE__ */ React.createElement("div", { onClick: () => onSelectOrder(o.id), style: { cursor: "pointer", flex: 1, minWidth: 0 } }, /* @__PURE__ */ React.createElement("div", { style: { fontSize: 13, fontWeight: 700, color: "#1B2430" } }, name, " ", /* @__PURE__ */ React.createElement("span", { style: { fontWeight: 400, color: "#888780", fontSize: 11 } }, ((_b = o.recipient) == null ? void 0 : _b.phone) || "")), ((_c = o.recipient) == null ? void 0 : _c.address) && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#888780", marginTop: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } }, o.recipient.address), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 11, color: "#5F5E5A", marginTop: 4 } }, o.courier || "\uD0DD\uBC30", " \xB7 ", o.invoiceNo, " \xB7 \uBC1C\uC1A1\uC77C ", o.shippedAt || o.orderDate))), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6 } }, url && /* @__PURE__ */ React.createElement("a", { href: url, target: "_blank", rel: "noreferrer", style: { flex: 1, textAlign: "center", padding: "9px 0", borderRadius: 8, border: "1px solid #185FA5", background: "#fff", color: "#185FA5", fontWeight: 700, fontSize: 12, textDecoration: "none" } }, "\uBC30\uC1A1\uC870\uD68C \uC5F4\uAE30"), /* @__PURE__ */ React.createElement("button", { onClick: () => onConfirm(o.id), style: { flex: 1, padding: "9px 0", borderRadius: 8, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 700, fontSize: 12, cursor: "pointer" } }, "\uB3C4\uCC29 \uD655\uC778\uD568")));
     })));
   }
   return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 4 } }, /* @__PURE__ */ React.createElement("button", { onClick: onBack, style: { border: "none", background: "none", fontSize: 18, cursor: "pointer", padding: 0 } }, "\u2039"), /* @__PURE__ */ React.createElement("h1", { style: { fontSize: 19, fontWeight: 700, margin: 0, letterSpacing: "-0.02em" } }, "\uBC30\uC1A1 \uD655\uC778")), /* @__PURE__ */ React.createElement("p", { style: { fontSize: 11.5, color: "#888780", margin: "6px 0 14px", lineHeight: 1.6 } }, '\uBC1C\uC1A1(\uC1A1\uC7A5\uBC88\uD638 \uC785\uB825) \uD6C4 \uC815\uC0C1\uC801\uC73C\uB85C \uB3C4\uCC29\uD588\uC5B4\uC57C \uD560 \uB0A0\uC9DC\uAC00 \uC9C0\uB0AC\uB294\uB370 \uC544\uC9C1 "\uD655\uC778\uD568"\uC744 \uB204\uB974\uC9C0 \uC54A\uC740 \uC8FC\uBB38\uC774\uC5D0\uC694. \uAE08\uC694\uC77C \uBC1C\uC1A1 \uAC74\uC740 \uD1A0\uC694\uC77C\uAE4C\uC9C0 \uD655\uC778\uC774 \uC548 \uB418\uBA74 \uBC14\uB85C \uB098\uD0C0\uB098\uC694. \uC624\uB798 \uBC29\uCE58\uB41C \uAC74(\uBCF4\uD1B5 2\uC77C, \uAE08\uC694\uC77C \uBC1C\uC1A1\uAC74\uC740 \uC6D4\uC694\uC77C \uC624\uD6C4 5\uC2DC)\uC740 \uD654\uBA74\uC774 \uBCF5\uC7A1\uD574\uC9C0\uC9C0 \uC54A\uAC8C \uC790\uB3D9\uC73C\uB85C \uBAA9\uB85D\uC5D0\uC11C \uBE60\uC838\uC694.'), checkedIds.size > 0 && /* @__PURE__ */ React.createElement(
@@ -24057,73 +24040,7 @@ function GuideTab({ onBack }) {
   })));
 }
 
-// v293: 주문 '오늘 할 일' — 단계별로 묶어서 체크 → 한 번에 다음 단계로
-function TodayBoard({ orders, orderTotal, onSelect, onSetStatus, onConfirm, onUploadInvoice, onOpenInvoice, onShowAll }) {
-  const today = todayStr();
-  const [sel, setSel] = useState({});
-  const [open, setOpen] = useState({ reserve: true, waiting: true, pending: true, ready: true, late: true, future: false });
-  const [more, setMore] = useState({});
-  const day0 = (d) => { const t = new Date(String(d || "").slice(0, 10) + "T00:00:00"); return isNaN(t.getTime()) ? null : t; };
-  const daysAgo = (d) => { const t = day0(d); if (!t) return 0; return Math.round((day0(today) - t) / 864e5); };
-  const rd = (o) => String(o.reserveDate || "").slice(0, 10);
-  const live = (orders || []).filter((o) => o && o.id);
-  const S = [
-    { key: "reserve", icon: "⏰", title: "예약일이 된 주문", sub: "오늘(또는 지난) 예약 발송일이에요", list: live.filter((o) => o.status === "pending" && rd(o) && rd(o) <= today), act: ["ready", "발송준비로 옮기기"], date: (o) => "예약 " + rd(o) },
-    { key: "waiting", icon: "💰", title: "입금 확인할 주문", sub: "입금이 확인되면 체크 → 결제완료로", list: live.filter((o) => o.status === "waiting"), act: ["pending", "입금 확인 → 결제완료로"], date: (o) => (o.orderDate || "") + (rd(o) ? " · 예약 " + rd(o) : "") },
-    { key: "pending", icon: "📦", title: "발송 준비할 주문", sub: "포장할 주문이에요 → 발송준비로", list: live.filter((o) => o.status === "pending" && !rd(o)), act: ["ready", "발송준비로 옮기기"], date: (o) => o.orderDate || "" },
-    { key: "ready", icon: "🧾", title: "송장 넣을 주문", sub: "송장번호를 넣으면 발송완료가 돼요", list: live.filter((o) => o.status === "ready"), act: ["__invoice", "송장 파일 올리기"], date: (o) => o.orderDate || "" },
-    { key: "late", icon: "🚚", title: "도착 확인 필요", sub: "보낸 지 2일이 넘었는데 도착 확인이 안 된 주문", list: live.filter((o) => { if (o.status !== "shipped" || o.deliveryConfirmed) return false; const n = daysAgo(o.shippedAt || o.orderDate); return n >= 2 && n <= 14; }), act: ["__confirm", "도착 확인 처리"], date: (o) => "발송 " + (o.shippedAt || o.orderDate || "") },
-    { key: "future", icon: "🗓️", title: "나중에 보낼 예약 주문", sub: "예약일이 되면 위 '예약일이 된 주문'으로 올라와요", list: live.filter((o) => o.status === "pending" && rd(o) && rd(o) > today).sort((a, b) => rd(a).localeCompare(rd(b))), act: null, date: (o) => "예약 " + rd(o) }
-  ];
-  const total = S.slice(0, 5).reduce((n, x) => n + x.list.length, 0);
-  const selOf = (k) => sel[k] || [];
-  const toggle = (k, id) => setSel((p) => { const cur = new Set(p[k] || []); cur.has(id) ? cur.delete(id) : cur.add(id); return Object.assign({}, p, { [k]: [...cur] }); });
-  const toggleAll = (k, list) => setSel((p) => { const all = list.length && list.every((o) => (p[k] || []).includes(o.id)); return Object.assign({}, p, { [k]: all ? [] : list.map((o) => o.id) }); });
-  const doAct = (sec) => {
-    const ids = selOf(sec.key).filter((id) => sec.list.some((o) => o.id === id));
-    if (sec.act[0] === "__invoice") { onUploadInvoice && onUploadInvoice(); return; }
-    if (!ids.length) return;
-    if (sec.act[0] === "__confirm") onConfirm && onConfirm(ids);
-    else onSetStatus && onSetStatus(ids, sec.act[0]);
-    setSel((p) => Object.assign({}, p, { [sec.key]: [] }));
-  };
-  const itemsText = (o) => { const it = o.items || []; if (!it.length) return ""; const f = it[0]; return (f.name || "상품") + " " + (f.qty || 1) + "개" + (it.length > 1 ? " 외 " + (it.length - 1) : ""); };
-  const won = (n) => (Number(n) || 0).toLocaleString() + "원";
-  const card = { background: "#fff", border: "1px solid #E2E4DD", borderRadius: 12, marginBottom: 10, overflow: "hidden" };
-  return React.createElement("div", null,
-    React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, margin: "4px 0 10px" } },
-      React.createElement("div", { style: { flex: 1, fontSize: 18, fontWeight: 800 } }, "📋 오늘 할 일 ", React.createElement("span", { style: { fontSize: 14, color: total ? "#A32D2D" : "#2F6F4E" } }, total ? total + "건" : "모두 끝!")),
-      React.createElement("button", { onClick: onShowAll, style: { border: "1px solid #D3D1C7", background: "#fff", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer" } }, "전체 목록 보기")),
-    S.map((sec) => {
-      const n = sec.list.length;
-      const isOpen = open[sec.key];
-      const chosen = selOf(sec.key);
-      const shown = more[sec.key] ? sec.list : sec.list.slice(0, 40);
-      const allOn = n > 0 && sec.list.every((o) => chosen.includes(o.id));
-      return React.createElement("div", { key: sec.key, "data-sec": sec.key, style: Object.assign({}, card, n === 0 ? { opacity: 0.6 } : {}) },
-        React.createElement("div", { onClick: () => setOpen((p) => Object.assign({}, p, { [sec.key]: !p[sec.key] })), style: { display: "flex", alignItems: "center", gap: 8, padding: "12px 14px", cursor: "pointer", background: n ? "#F7F8F4" : "#fff" } },
-          React.createElement("div", { style: { flex: 1 } },
-            React.createElement("div", { style: { fontSize: 15, fontWeight: 800 } }, sec.icon + " " + sec.title + " ", React.createElement("span", { style: { color: n ? "#A32D2D" : "#888780" } }, n + "건")),
-            React.createElement("div", { style: { fontSize: 12, color: "#5F5E5A", marginTop: 2 } }, sec.sub)),
-          React.createElement("span", { style: { fontSize: 13, color: "#5F5E5A" } }, isOpen ? "▲" : "▼")),
-        isOpen && n > 0 ? React.createElement("div", { style: { padding: "4px 14px 12px" } },
-          sec.act ? React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, margin: "4px 0 8px", flexWrap: "wrap" } },
-            sec.act[0] !== "__invoice" ? React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 6, fontSize: 13, fontWeight: 700, cursor: "pointer" } }, React.createElement("input", { type: "checkbox", checked: allOn, onChange: () => toggleAll(sec.key, sec.list), style: { width: 18, height: 18 } }), "모두 선택") : null,
-            React.createElement("button", { "data-act": sec.key, disabled: sec.act[0] !== "__invoice" && !chosen.length, onClick: () => doAct(sec), style: { marginLeft: "auto", border: "none", borderRadius: 8, padding: "9px 12px", fontSize: 13.5, fontWeight: 800, cursor: "pointer", background: sec.act[0] === "__invoice" || chosen.length ? "#2F6F4E" : "#C9CCC2", color: "#fff" } }, sec.act[1] + (sec.act[0] !== "__invoice" && chosen.length ? " (" + chosen.length + ")" : ""))) : null,
-          shown.map((o) => React.createElement("div", { key: o.id, style: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderTop: "1px solid #F1F2EC" } },
-            sec.act && sec.act[0] !== "__invoice" ? React.createElement("input", { type: "checkbox", "data-oid": o.id, checked: chosen.includes(o.id), onChange: () => toggle(sec.key, o.id), style: { width: 20, height: 20, flexShrink: 0 } }) : null,
-            React.createElement("div", { onClick: () => onSelect && onSelect(o.id), style: { flex: 1, minWidth: 0, cursor: "pointer" } },
-              React.createElement("div", { style: { fontSize: 14.5, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, (orderRecipientName(o) || "(이름 없음)") + (o.isBusiness ? " 🏢" : "")),
-              React.createElement("div", { style: { fontSize: 12.5, color: "#5F5E5A", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" } }, itemsText(o) + " · " + won(orderTotal ? orderTotal(o) : 0) + " · " + sec.date(o))),
-            sec.key === "ready" ? React.createElement("button", { onClick: () => onOpenInvoice && onOpenInvoice(o.id), style: { border: "1px solid #185FA5", background: "#E6F1FB", color: "#185FA5", borderRadius: 8, padding: "7px 10px", fontSize: 12.5, fontWeight: 800, cursor: "pointer", flexShrink: 0 } }, "송장") : null)),
-          n > shown.length ? React.createElement("button", { onClick: () => setMore((p) => Object.assign({}, p, { [sec.key]: true })), style: { width: "100%", marginTop: 6, border: "1px dashed #C9CCC2", background: "#fff", borderRadius: 8, padding: "8px 0", fontSize: 13, cursor: "pointer" } }, (n - shown.length) + "건 더 보기") : null) : null);
-    }),
-    React.createElement("div", { style: { height: 110 } }));
-}
 function OrdersTab({
-  allOrders,
-  onBoardSetStatus,
-  onBoardConfirm,
   searchHiddenCount,
   statusFilter,
   setStatusFilter,
@@ -24165,8 +24082,6 @@ function OrdersTab({
   checkFirestoreQuota
 }) {
   const allChecked = orders.length > 0 && orders.every((o) => checkedIds.has(o.id));
-  const [ordersView, setOrdersView] = useState(() => { try { return localStorage.getItem("joassam_orders_view") || "today"; } catch (e) { return "today"; } });
-  const setView = (v) => { setOrdersView(v); try { localStorage.setItem("joassam_orders_view", v); } catch (e) {} };
   const _dlFilterLabel = statusFilter && STATUS[statusFilter] ? STATUS[statusFilter].label : "\uC804\uCCB4";
   const contactMatches = (() => {
     const q = (searchQuery || "").trim().toLowerCase();
@@ -24201,13 +24116,7 @@ function OrdersTab({
     const ex = sorted.filter((x) => !x._similar), si = sorted.filter((x) => x._similar);
     return ex.slice(0, 12).concat(si.slice(0, ex.length ? 3 : 6));
   })();
-  if (ordersView === "today" && !String(searchQuery || "").trim() && allOrders) {
-    return React.createElement("div", null,
-      React.createElement("button", { onClick: onNewOrder, style: { width: "100%", padding: "13px 0", borderRadius: 12, border: "none", background: "#2F6F4E", color: "#fff", fontWeight: 800, fontSize: 15, cursor: "pointer", marginBottom: 10 } }, "+ 새 주문 입력"),
-      React.createElement("input", { placeholder: "이름·전화·주소로 찾기", value: searchQuery || "", onChange: (e) => setSearchQuery(e.target.value), style: { width: "100%", boxSizing: "border-box", padding: "11px 12px", borderRadius: 10, border: "1px solid #D3D1C7", fontSize: 14, marginBottom: 10 } }),
-      React.createElement(TodayBoard, { orders: allOrders, orderTotal, onSelect, onSetStatus: onBoardSetStatus, onConfirm: onBoardConfirm, onUploadInvoice: () => { try { invoiceInputRef && invoiceInputRef.current && invoiceInputRef.current.click(); } catch (e) {} }, onOpenInvoice, onShowAll: () => setView("all") }));
-  }
-  return /* @__PURE__ */ React.createElement("div", null, allOrders ? React.createElement("button", { onClick: () => setView("today"), style: { width: "100%", padding: "11px 0", borderRadius: 10, border: "1px solid #2F6F4E", background: "#EAF3DE", color: "#27500A", fontWeight: 800, fontSize: 14, cursor: "pointer", marginBottom: 8 } }, "📋 오늘 할 일 보기") : null, /* @__PURE__ */ React.createElement(
+  return /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: onNewOrder,
