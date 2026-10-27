@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 290;
+const APP_VERSION = 291;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -15163,21 +15163,37 @@ function App() {
   async function afterSecureLogin(id, user, existing, created, prevUid) {
     const uid = user && user.uid;
     if (!uid) return;
-    const allowRef = fbDb.collection("allow").doc(uid);
-    let member = null;
-    try { const snap = await allowRef.get(); if (snap.exists) member = snap.data() || {}; } catch (e) {}
-    const isFirst = !existing && Object.keys(accounts).length === 0;
-    const role = existing ? (isAccountAdmin(existing) ? "admin" : "staff") : (isFirst ? "admin" : "staff");
-    if (!member && (isFirst || (existing && !existing.pending && !existing.blocked))) {
-      try { await allowRef.set({ id, role, at: Date.now() }); member = { id, role }; } catch (e) {}
+    // v291: 이 기기에 계정 목록이 아직 없으면 서버에서 한 번 더 읽어 확인 (사장님을 새 사람으로 착각하지 않게)
+    let list = accounts;
+    if (!existing || !Object.keys(accounts || {}).length) {
+      try { const sn = await fbDb.collection("stores").doc("_accounts").get(); const l = sn.exists && (sn.data() || {}).list; if (l && typeof l === "object") { list = l; existing = l[id] || existing; } } catch (e) {}
     }
-    if (!member) { try { await fbDb.collection("joinreq").doc(uid).set({ id, at: Date.now() }); } catch (e) {} }
-    const entry = Object.assign({}, existing || {}, { uid, password: "", secureAt: new Date().toISOString(), lastLoginAt: new Date().toISOString(), pending: !member });
+    // v291: 예전 계정인데 '승인 대기'로 잘못 바뀐 경우(관리자이거나, 전에 정상으로 쓰던 계정) 바로잡기
+    if (existing && existing.pending && (isAccountAdmin(existing) || existing.wasMember)) existing = Object.assign({}, existing, { pending: false });
+    const allowRef = fbDb.collection("allow").doc(uid);
+    let member = null, allowWriteFailed = false;
+    try { const snap = await allowRef.get(); if (snap.exists) member = snap.data() || {}; } catch (e) {}
+    const isFirst = !existing && Object.keys(list || {}).length === 0;
+    const role = existing ? (isAccountAdmin(existing) ? "admin" : "staff") : (isFirst ? "admin" : "staff");
+    const knownGood = isFirst || (existing && !existing.pending && !existing.blocked);
+    if (!member && knownGood) {
+      try { await allowRef.set({ id, role, at: Date.now() }); member = { id, role }; } catch (e) { allowWriteFailed = true; }
+    }
+    if (!member && !knownGood) { try { await fbDb.collection("joinreq").doc(uid).set({ id, at: Date.now() }); } catch (e) {} }
+    if (allowWriteFailed) {
+      // 서버 규칙이 '허용 목록' 쓰기를 막고 있음 — 잠금 전이므로 기존 계정은 그대로 들어가고, 관리자 화면에 규칙 안내
+      setSecureNote("Firebase 규칙이 '허용 목록'(allow) 저장을 막고 있어요. 계정 관리 → 보안 잠금 → '준비 규칙 복사'를 Firestore 규칙에 붙여넣고 게시한 뒤 다시 로그인해 주세요");
+      try { localStorage.setItem("joassam_allow_fail", String(Date.now())); } catch (e) {}
+    } else { try { localStorage.removeItem("joassam_allow_fail"); } catch (e) {} }
+    const isPending = !member && !knownGood;
+    const entry = Object.assign({}, existing || {}, { uid, password: "", secureAt: new Date().toISOString(), lastLoginAt: new Date().toISOString(), pending: isPending });
+    if (member || knownGood) entry.wasMember = true;
+    if (allowWriteFailed) entry.allowMissing = true; else delete entry.allowMissing;
     if (!existing && !isFirst) entry.role = "staff";
     if (member && member.role === "admin") { if (entry.role === "staff") delete entry.role; }
     else if (member) entry.role = "staff";
     try { localStorage.removeItem("joassam_secure_off"); } catch (e) {}
-    try { saveAccounts(__spreadProps(__spreadValues({}, accounts), { [id]: entry })); } catch (e) {}
+    try { saveAccounts(__spreadProps(__spreadValues({}, list || accounts), { [id]: entry })); } catch (e) {}
     addMemberLater(id);
     startSession(id);
     try { logDiag("secure_login", { created: !!created, member: !!member }); } catch (e) {}
@@ -15275,6 +15291,16 @@ function App() {
     const iv = setInterval(pull, 30000);
     return () => { stop = true; clearInterval(iv); };
   }, [amAdminSecure]);
+  // v291: 새 로그인인데 허용 목록에 아직 없으면(규칙을 고친 뒤 등) 자동으로 다시 넣기 — 잠금 전에만 성공함
+  const needAllowHeal = loggedIn && authUser && isSecureUser(authUser) && accounts[nickname] && !accounts[nickname].pending && !accounts[nickname].blocked && accounts[nickname].allowMissing;
+  useEffect(() => {
+    if (!needAllowHeal || !firebaseReady) return;
+    const uid = authUser.uid, me = nickname, acc = accounts[nickname];
+    const heal = () => { try { fbDb.collection("allow").doc(uid).set({ id: me, role: isAccountAdmin(acc) ? "admin" : "staff", at: Date.now() }).then(() => { setSecureNote(""); try { localStorage.removeItem("joassam_allow_fail"); } catch (e) {} saveAccounts(__spreadProps(__spreadValues({}, accounts), { [me]: __spreadProps(__spreadValues({}, accounts[me]), { allowMissing: false, wasMember: true }) })); }).catch(() => {}); } catch (e) {} };
+    heal();
+    const iv = setInterval(heal, 60000);
+    return () => clearInterval(iv);
+  }, [needAllowHeal]);
   const amPendingSecure = loggedIn && authUser && isSecureUser(authUser) && accounts[nickname] && accounts[nickname].pending;
   useEffect(() => {
     if (!amPendingSecure || !firebaseReady) return;
@@ -20632,7 +20658,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
       }
     );
   }
-  if (accounts[nickname] && accounts[nickname].pending) {
+  if (accounts[nickname] && accounts[nickname].pending && !(isAccountAdmin(accounts[nickname]) && accounts[nickname].wasMember !== false && Object.values(accounts).filter((a) => a && !a.pending && isAccountAdmin(a)).length === 0)) {
     return /* @__PURE__ */ React.createElement(PendingApprovalScreen, { nickname, onLogout: () => handleLogout(), appName });
   }
   const mobileTabTitle = { home: "HOME", orders: "\uC8FC\uBB38", products: "\uC0C1\uD488", integrations: "\uC1FC\uD551\uBAB0 \uC5F0\uB3D9", new: "\uC8FC\uBB38 \uC785\uB825" }[tab];
@@ -21773,8 +21799,8 @@ function batchBtnStyle(bg, color) {
 function SecureLockCard({ accounts, secure }) {
   const [open, setOpen] = useState(false);
   const ids = Object.keys(accounts || {}).filter((id) => accounts[id] && !accounts[id].blocked && !accounts[id].pending);
-  const done = ids.filter((id) => accounts[id].uid);
-  const left = ids.filter((id) => !accounts[id].uid);
+  const done = ids.filter((id) => accounts[id].uid && !accounts[id].allowMissing);
+  const left = ids.filter((id) => !accounts[id].uid || accounts[id].allowMissing);
   const ready = left.length === 0 && done.length > 0;
   const box = { background: ready ? "#EAF3DE" : "#FFF8EC", border: "1px solid " + (ready ? "#C0DD97" : "#F0C98A"), borderRadius: 12, padding: "12px 14px", marginBottom: 14 };
   const pre = { whiteSpace: "pre-wrap", wordBreak: "break-all", fontSize: 11, background: "#1B2430", color: "#E2E4DD", borderRadius: 8, padding: 10, maxHeight: 180, overflowY: "auto", fontFamily: "monospace" };
@@ -21788,13 +21814,14 @@ function SecureLockCard({ accounts, secure }) {
     React.createElement("button", { onClick: () => setOpen(!open), style: { marginTop: 8, border: "1px solid #D3D1C7", background: "#fff", borderRadius: 8, padding: "8px 12px", fontSize: 13, fontWeight: 700, cursor: "pointer" } }, open ? "접기 ▲" : "잠금 방법·규칙 보기 ▼"),
     open ? React.createElement("div", { style: { marginTop: 10, fontSize: 13, lineHeight: 1.65, color: "#3D3D3A" } },
       React.createElement("div", null, "① Firebase 콘솔 → Authentication → 로그인 방법 → '이메일/비밀번호' 사용 설정 (처음 한 번)"),
+      React.createElement("div", null, "①-2 Firestore Database → 규칙을 아래 '준비 규칙'으로 바꾸고 '게시' (허용 목록을 저장할 수 있게 — 잠금 전 상태와 같음)"),
       React.createElement("div", null, "② 모든 기기에서 한 번씩 다시 로그인 (위 숫자가 모두 채워질 때까지)"),
       React.createElement("div", null, "③ Firestore Database → 규칙 → 아래 '잠금 규칙'으로 바꾸고 '게시'"),
       React.createElement("div", { style: { margin: "6px 0 4px", fontWeight: 800 } }, "잠금 규칙"),
       React.createElement("div", { style: pre }, SECURE_RULES_LOCK),
       React.createElement("div", { style: { display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" } },
         React.createElement("button", { onClick: () => secure && secure.onCopy && secure.onCopy(SECURE_RULES_LOCK), style: btn("#2F6F4E") }, "잠금 규칙 복사"),
-        React.createElement("button", { onClick: () => secure && secure.onCopy && secure.onCopy(SECURE_RULES_OPEN), style: btn("#5F5E5A") }, "되돌리기 규칙 복사")),
+        React.createElement("button", { onClick: () => secure && secure.onCopy && secure.onCopy(SECURE_RULES_OPEN), style: btn("#5F5E5A") }, "준비 규칙 / 되돌리기 규칙 복사")),
       React.createElement("div", { style: { marginTop: 6, fontSize: 12, color: "#5F5E5A" } }, "문제가 생기면 '되돌리기 규칙'을 붙여넣고 게시하면 예전처럼 돌아가요.")) : null);
 }
 function AccountsTab({ accounts, members, currentNickname, onAdd, onChangePassword, onRename, onDelete, onBlock, onUnblock, onApprove, onReject, onSetRole, onSetDisplayName, onBack, askConfirm, secure }) {
