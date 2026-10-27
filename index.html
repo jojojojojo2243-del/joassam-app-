@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 295;
+const APP_VERSION = 296;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -17367,6 +17367,7 @@ function App() {
   const [epostChecked, setEpostChecked] = useState(false);
   const [shipChecking, setShipChecking] = useState(false);
   const [epostInfo, setEpostInfo] = useState({});
+  const [epostDiag, setEpostDiag] = useState(() => { try { return JSON.parse(localStorage.getItem("joassam_epost_diag") || "null"); } catch (e) { return null; } });
   const shipLateCount = useMemo(() => {
     const now = new Date();
     return orders.filter((o) => {
@@ -17408,15 +17409,18 @@ function App() {
       const doneIds = [];
       const info = {};
       // v288: 한 번에 20개씩 보내면 서버(우체국 조회)가 시간 초과로 통째로 실패할 수 있어 → 4개씩 나눠 4개 동시에, 실패한 번호는 한 번 더
+      const dg = { http: 0, net: "", calls: 0, okCalls: 0 };
       const fetchPart = async (part) => {
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), 20e3);
+        dg.calls++;
         try {
           const r = await fetch("/api/epost?no=" + part.join(","), { signal: ctrl.signal, cache: "no-store" });
-          if (!r.ok) return null;
+          if (!r.ok) { dg.http = r.status; return null; }
           const j = await r.json();
+          dg.okCalls++;
           return j.results || [];
-        } catch (e) { return null; } finally { clearTimeout(timer); }
+        } catch (e) { dg.net = e && e.name === "AbortError" ? "timeout" : String((e && e.message) || e).slice(0, 60); return null; } finally { clearTimeout(timer); }
       };
       const runPool = async (parts, conc) => {
         let k = 0;
@@ -17426,7 +17430,7 @@ function App() {
             (res || []).forEach((x) => {
               if (!x || !byNo[x.no]) return;
               if (x.state === "error" && info[x.no] && info[x.no].state !== "error") return;
-              info[x.no] = { state: x.state, last: x.last || "" };
+              info[x.no] = { state: x.state, last: String(x.last || "").split(/\s*(?:<!--|-->)/)[0].replace(/\s+/g, " ").trim() };
             });
           }
         };
@@ -17437,6 +17441,14 @@ function App() {
       const miss = nos.filter((n) => !info[n] || info[n].state === "error");
       if (miss.length) { await new Promise((r) => setTimeout(r, 1500)); await runPool(chunk(miss, 2), 4); }
       Object.keys(info).forEach((n) => { if (info[n].state === "delivered") byNo[n].forEach((id) => doneIds.push(id)); });
+      // v296: 조회가 됐는지·안 됐으면 왜인지 기록 (배송 탭에 표시)
+      try {
+        const vals = Object.values(info);
+        const errV = vals.filter((x) => x.state === "error");
+        const d = { at: Date.now(), total: nos.length, ok: vals.length - errV.length, err: errV.length, miss: nos.length - vals.length, http: dg.http, net: dg.net, calls: dg.calls, okCalls: dg.okCalls, sample: errV[0] ? errV[0].last : "" };
+        if (nos.length) { setEpostDiag(d); try { localStorage.setItem("joassam_epost_diag", JSON.stringify(d)); } catch (e) {} }
+        if (nos.length && (d.ok === 0 || d.http)) { try { logDiag("epost_check_failed", d); } catch (e) {} }
+      } catch (e) {}
       if (Object.keys(info).length) { setEpostInfo((prev) => Object.assign({}, prev, info)); epostInfoRef.current = Object.assign({}, epostInfoRef.current, info); }
       if (doneIds.length) {
         const _now = /* @__PURE__ */ new Date();
@@ -21123,6 +21135,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
     tab === "ship" && !invoicePreview && React.createElement(ShippingTab, {
       orders,
       epostInfo,
+      epostDiag,
       customerMap,
       onConfirm: (ids) => { confirmDeliveries(ids); fireToast(ids.length > 1 ? `${ids.length}건 도착 확인했어요` : "도착 확인했어요"); },
       onSelectOrder: (id) => { setTab("orders"); setSelectedOrderId(id); },
@@ -21355,7 +21368,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
           restored_unsynced_orders: "♻️ 저장 못 한 주문 복원", restored_recent_orders: "♻️ 빠진 최근 주문 복원", dropped_tombstoned_orders: "🗑️ 지운 주문 다시 안 나오게 거름",
           removed_remote_deleted: "🗑️ 다른 기기에서 지운 주문 반영", removed_remote_deleted_customers: "🗑️ 다른 기기에서 지운 고객 반영",
           merged_remote_before_save: "🔀 저장 전 다른 기기 내용 합침", merged_remote_edits: "🔀 다른 기기 수정 합침", merged_remote_orders: "🔀 다른 기기 주문 합침", merged_remote_customers: "🔀 다른 기기 고객 합침", merged_remote_vendors: "🔀 다른 기기 업체 합침", merged_remote_products: "🔀 다른 기기 상품 합침",
-          kept_local_customers: "📌 이 기기 고객 수정 유지", kept_local_deletes: "📌 이 기기 삭제 유지", list_fix_applied: "🛠️ 목록 자동 정리", biz_flag_fixed: "🛠️ 업체 표시 자동 수정", dlv_notice: "📦 배송 알림 표시", dlv_lookup_retry: "🔁 우체국 조회 실패 → 5분 뒤 다시"
+          kept_local_customers: "📌 이 기기 고객 수정 유지", kept_local_deletes: "📌 이 기기 삭제 유지", list_fix_applied: "🛠️ 목록 자동 정리", biz_flag_fixed: "🛠️ 업체 표시 자동 수정", dlv_notice: "📦 배송 알림 표시", dlv_lookup_retry: "🔁 우체국 조회 실패 → 5분 뒤 다시", epost_check_failed: "❌ 우체국 자동 조회 실패"
         };
         return m[evt] || evt;
       };
@@ -22023,7 +22036,7 @@ function AccountsTab({ accounts, members, currentNickname, onAdd, onChangePasswo
   }), ids.length === 0 && /* @__PURE__ */ React.createElement("div", { style: { padding: "30px 0", textAlign: "center", color: "#888780", fontSize: 13 } }, "\uB4F1\uB85D\uB41C \uACC4\uC815\uC774 \uC5C6\uC5B4\uC694")));
 }
 // v295: 하단 '배송' 탭 — 송장 업로드 / 배송중 / 미도착(2일째) / 배송완료 를 나눠서 관리
-function ShippingTab({ orders, epostInfo = {}, customerMap, onConfirm, onSelectOrder, onInvoiceFile, onOpenInvoice, onRecheck, checking }) {
+function ShippingTab({ orders, epostInfo = {}, epostDiag = null, customerMap, onConfirm, onSelectOrder, onInvoiceFile, onOpenInvoice, onRecheck, checking }) {
   const [view, setView] = useState(() => { try { return localStorage.getItem("joassam_ship_view") || "transit"; } catch (e) { return "transit"; } });
   const go = (v) => { setView(v); try { localStorage.setItem("joassam_ship_view", v); } catch (e) {} };
   const fileRef = useRef(null);
@@ -22074,6 +22087,22 @@ function ShippingTab({ orders, epostInfo = {}, customerMap, onConfirm, onSelectO
     React.createElement("div", { style: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10 } },
       React.createElement("div", { style: { flex: 1, fontSize: 19, fontWeight: 800 } }, "📦 배송 관리"),
       React.createElement("button", { onClick: onRecheck, disabled: !!checking, style: { border: "1px solid #2F6F4E", background: "#EAF3DE", color: "#27500A", borderRadius: 8, padding: "8px 10px", fontSize: 13, fontWeight: 800, cursor: checking ? "default" : "pointer" } }, checking ? "조회 중…" : "🔄 우체국 다시 조회")),
+    // v296: 우체국 자동 조회 상태 — 안 되면 이유를 보여 줌
+    (() => {
+      const d = epostDiag;
+      const tm = d ? new Date(d.at) : null;
+      const hhmm = tm ? (tm.getMonth() + 1) + "/" + tm.getDate() + " " + String(tm.getHours()).padStart(2, "0") + ":" + String(tm.getMinutes()).padStart(2, "0") : "";
+      let tone = "warn", msg;
+      if (!d) msg = "우체국 자동 조회 기록이 아직 없어요. 위 '우체국 다시 조회'를 눌러 보세요.";
+      else if (d.ok > 0 && !d.err && !d.miss) { tone = "ok"; msg = "✅ 우체국 자동 조회 정상 — " + d.ok + "건 확인 (" + hhmm + ")"; }
+      else if (d.http === 404) { tone = "bad"; msg = "❌ 우체국 조회 서버 파일(api/epost.js)이 없어요 (응답 404). 앱을 올릴 때 'api' 폴더(epost.js)도 함께 올려야 해요. 지금은 배송완료를 자동으로 알 수 없어요."; }
+      else if (d.http) { tone = "bad"; msg = "❌ 우체국 조회 서버 오류 (응답 " + d.http + (d.http === 504 ? " 시간 초과" : "") + ") — " + hhmm; }
+      else if (d.net) { tone = "bad"; msg = "❌ 조회 서버에 연결하지 못했어요 (" + (d.net === "timeout" ? "시간 초과" : d.net) + ") — " + hhmm; }
+      else if (d.ok === 0) { tone = "bad"; msg = "❌ 우체국 사이트가 응답하지 않아요" + (d.sample ? " (" + d.sample + ")" : "") + " — " + hhmm; }
+      else msg = "⚠️ 일부만 조회됨: " + d.ok + "건 확인, " + (d.err + d.miss) + "건 실패" + (d.sample ? " (" + d.sample + ")" : "") + " — " + hhmm;
+      const C = { ok: ["#EAF3DE", "#27500A"], warn: ["#FFF4E5", "#8B4A00"], bad: ["#FCEEEE", "#A32D2D"] }[tone];
+      return React.createElement("div", { "data-epost-diag": tone, style: { fontSize: 13, fontWeight: 700, lineHeight: 1.5, color: C[1], background: C[0], borderRadius: 8, padding: "8px 10px", marginBottom: 8 } }, msg);
+    })(),
     unknownN ? React.createElement("div", { style: { fontSize: 12.5, color: "#8B4A00", background: "#FFF4E5", borderRadius: 8, padding: "7px 10px", marginBottom: 8 } }, "❔ 우체국 자동 조회가 안 된 " + unknownN + "건이 있어요. 잠시 후 '우체국 다시 조회'를 누르거나 '배송조회 열기'로 확인해 주세요.") : null,
     React.createElement("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 5, marginBottom: 12 } },
       tabs.map(([k, label, n]) => React.createElement("button", { key: k, "data-shiptab": k, onClick: () => go(k), style: { padding: "9px 0 7px", borderRadius: 10, border: view === k ? "2px solid #2F6F4E" : "1px solid #E2E4DD", background: view === k ? "#EAF3DE" : "#fff", cursor: "pointer" } },
@@ -24294,10 +24323,7 @@ function OrdersTab({
       return shippedDateStr && shippedDateStr < cutoff;
     }).length;
     return hiddenShippedCount > 0 ? /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#888780", marginBottom: 8 } }, "(\uBC1C\uC1A1\uC644\uB8CC \uD6C4 3\uC77C \uC9C0\uB09C ", hiddenShippedCount, "\uAC74\uC740 \uD654\uBA74\uC5D0\uC11C \uC228\uACA8\uC838 \uC788\uC5B4\uC694. \uACE0\uAC1D \uC774\uB984\xB7\uC5F0\uB77D\uCC98\uB85C \uAC80\uC0C9\uD558\uBA74 \uCC3E\uC744 \uC218 \uC788\uC5B4\uC694)") : null;
-  })(), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: () => {
-    var _a;
-    return (_a = invoiceInputRef.current) == null ? void 0 : _a.click();
-  }, style: toolBtnStyle("#185FA5") }, "\uC1A1\uC7A5\uBC88\uD638 \uC5C5\uB85C\uB4DC"), /* @__PURE__ */ React.createElement("button", { onClick: onBulkOrder, style: toolBtnStyle("#1B2430") }, "\u{1F4CB} \uC5D1\uC140 \uD30C\uC77C \uC8FC\uBB38 \uB4F1\uB85D"), /* @__PURE__ */ React.createElement("button", { onClick: onPostal, style: toolBtnStyle("#5B3A8A") }, "\uD83D\uDCEE \uC6B0\uCCB4\uAD6D \uD30C\uC77C \uB4F1\uB85D"), /* @__PURE__ */ React.createElement("input", { ref: invoiceInputRef, type: "file", accept: ".xlsx,.xls,.csv", onChange: handleInvoiceUpload, style: { display: "none" } })), checkedIds.size > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: onExportVendorChecked, style: toolBtnStyle("#2F6F4E") }, "\u{1F3E2} \uC120\uD0DD \uC911 \uC5C5\uCCB4\uC8FC\uBB38 \uAC70\uB798\uBA85\uC138\uC11C")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#5F5E5A", background: "#F0F1EC", borderRadius: 8, padding: "7px 10px", marginBottom: 8, lineHeight: 1.5 } }, "\uC5C5\uCCB4\xB7\uC77C\uBC18 \uC8FC\uBB38\uC774 \uD568\uAED8 \uBCF4\uC785\uB2C8\uB2E4. \uCE74\uB4DC\uC758 \uBC30\uC9C0\uB85C \uAD6C\uBD84\uB418\uBA70, \uC804\uCCB4\uC120\uD0DD\xB7\uB2E4\uC6B4\uB85C\uB4DC \uC2DC \uC5B4\uB290 \uCABD\uB3C4 \uB204\uB77D\uB418\uC9C0 \uC54A\uC544\uC694."), statusFilter === "shipped" && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#27500A", background: "#EAF3DE", borderRadius: 8, padding: "7px 10px", marginBottom: 8, lineHeight: 1.5 } }, '\uBC1C\uC1A1\uC644\uB8CC \uC8FC\uBB38\uB9CC \uBCF4\uACE0 \uC788\uC5B4\uC694. "\uC774 \uBAA9\uB85D \uC804\uCCB4 \uB2E4\uC6B4\uB85C\uB4DC"\uB85C \uB2E4\uC2DC \uBC1B\uC544\uB3C4 \uC0C1\uD0DC\uB294 \uBC1C\uC1A1\uC644\uB8CC \uADF8\uB300\uB85C \uC720\uC9C0\uB3FC\uC694(\uC7AC\uBC1C\uC1A1 \uAC00\uB2A5).'), orders.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 } }, /* @__PURE__ */ React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#5F5E5A", cursor: "pointer" } }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: allChecked, onChange: toggleCheckAll }), "\uC804\uCCB4\uC120\uD0DD (", orders.length, "\uAC74)"), /* @__PURE__ */ React.createElement(
+  })(), /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 8 } }, /* v296: 송장 업로드는 배송 탭으로 일원화 */ /* @__PURE__ */ React.createElement("button", { onClick: onBulkOrder, style: toolBtnStyle("#1B2430") }, "\u{1F4CB} \uC5D1\uC140 \uD30C\uC77C \uC8FC\uBB38 \uB4F1\uB85D"), /* @__PURE__ */ React.createElement("button", { onClick: onPostal, style: toolBtnStyle("#5B3A8A") }, "\uD83D\uDCEE \uC6B0\uCCB4\uAD6D \uD30C\uC77C \uB4F1\uB85D"), /* @__PURE__ */ React.createElement("input", { ref: invoiceInputRef, type: "file", accept: ".xlsx,.xls,.csv", onChange: handleInvoiceUpload, style: { display: "none" } })), checkedIds.size > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", gap: 6, marginBottom: 8 } }, /* @__PURE__ */ React.createElement("button", { onClick: onExportVendorChecked, style: toolBtnStyle("#2F6F4E") }, "\u{1F3E2} \uC120\uD0DD \uC911 \uC5C5\uCCB4\uC8FC\uBB38 \uAC70\uB798\uBA85\uC138\uC11C")), /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#5F5E5A", background: "#F0F1EC", borderRadius: 8, padding: "7px 10px", marginBottom: 8, lineHeight: 1.5 } }, "\uC5C5\uCCB4\xB7\uC77C\uBC18 \uC8FC\uBB38\uC774 \uD568\uAED8 \uBCF4\uC785\uB2C8\uB2E4. \uCE74\uB4DC\uC758 \uBC30\uC9C0\uB85C \uAD6C\uBD84\uB418\uBA70, \uC804\uCCB4\uC120\uD0DD\xB7\uB2E4\uC6B4\uB85C\uB4DC \uC2DC \uC5B4\uB290 \uCABD\uB3C4 \uB204\uB77D\uB418\uC9C0 \uC54A\uC544\uC694."), statusFilter === "shipped" && /* @__PURE__ */ React.createElement("div", { style: { fontSize: 10.5, color: "#27500A", background: "#EAF3DE", borderRadius: 8, padding: "7px 10px", marginBottom: 8, lineHeight: 1.5 } }, '\uBC1C\uC1A1\uC644\uB8CC \uC8FC\uBB38\uB9CC \uBCF4\uACE0 \uC788\uC5B4\uC694. "\uC774 \uBAA9\uB85D \uC804\uCCB4 \uB2E4\uC6B4\uB85C\uB4DC"\uB85C \uB2E4\uC2DC \uBC1B\uC544\uB3C4 \uC0C1\uD0DC\uB294 \uBC1C\uC1A1\uC644\uB8CC \uADF8\uB300\uB85C \uC720\uC9C0\uB3FC\uC694(\uC7AC\uBC1C\uC1A1 \uAC00\uB2A5).'), orders.length > 0 && /* @__PURE__ */ React.createElement("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 } }, /* @__PURE__ */ React.createElement("label", { style: { display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#5F5E5A", cursor: "pointer" } }, /* @__PURE__ */ React.createElement("input", { type: "checkbox", checked: allChecked, onChange: toggleCheckAll }), "\uC804\uCCB4\uC120\uD0DD (", orders.length, "\uAC74)"), /* @__PURE__ */ React.createElement(
     "button",
     {
       onClick: () => onExportFiltered(orders),
