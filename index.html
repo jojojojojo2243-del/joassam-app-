@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 296;
+const APP_VERSION = 297;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -432,6 +432,34 @@ function syncCustomerAddressNotes(ordersToScan, existingCustomers) {
       if (curMemo.includes(addr)) return;
       patches[cust.id] = `${curMemo ? curMemo + "\n" : ""}\uCD94\uAC00\uBC30\uC1A1\uC9C0: ${addr}`;
     });
+  });
+  return patches;
+}
+// v297: 고객이 새 주소로 주문하면 고객 정보의 '기본 주소'도 새 주소로 바꿈 (예전 주소는 메모에 '이전주소'로 남김)
+//  - 받는분이 바로 그 고객일 때만 (이름 + 전화번호 또는 고객번호가 같을 때) — 선물 보낸 주소로 바뀌지 않게
+//  - 업체 주문은 건드리지 않음 / 더 예전 날짜 주문이 나중에 들어와도 최신 주소를 덮지 않음
+function latestAddressPatches(ordersToScan, existingCustomers, opts) {
+  const force = !!(opts && opts.force);
+  const np = (p) => String(p || "").replace(/[^0-9]/g, "");
+  const nn = (x) => String(x || "").replace(/\s/g, "");
+  const na = (x) => String(x || "").replace(/\s+/g, " ").trim();
+  const patches = {};
+  const list = (ordersToScan || []).filter((o) => o && !o.isBusiness && !o.vendorId && o.recipient && na(o.recipient.address))
+    .slice().sort((a, b) => String(a.orderDate || "").localeCompare(String(b.orderDate || "")));
+  list.forEach((o) => {
+    const r = o.recipient;
+    const nm = nn(r.name), ph = np(r.phone), addr = na(r.address);
+    if (!nm) return;
+    const cust = (existingCustomers || []).find((c) => c && nn(c.name) === nm && ((ph.length >= 8 && np(c.phone) === ph) || (o.customerId && c.id === o.customerId)));
+    if (!cust) return;
+    const cur = patches[cust.id] ? Object.assign({}, cust, patches[cust.id]) : cust;
+    const curAddr = na(cur.address);
+    if (curAddr.replace(/\s/g, "") === addr.replace(/\s/g, "")) return;
+    if (!force && cur.addrAt && String(o.orderDate || "") && String(o.orderDate) < String(cur.addrAt).slice(0, 10)) return;
+    let memo = String(cur.memo || "");
+    memo = memo.split("\n").filter((ln) => !(/^추가배송지:/.test(ln.trim()) && ln.replace(/^\s*추가배송지:\s*/, "").replace(/\s/g, "") === addr.replace(/\s/g, ""))).join("\n");
+    if (curAddr && !memo.replace(/\s/g, "").includes(curAddr.replace(/\s/g, ""))) memo = (memo ? memo + "\n" : "") + "이전주소: " + curAddr;
+    patches[cust.id] = { address: addr, postalCode: r.postalCode || estimatePostalCode(addr), memo, addrAt: new Date().toISOString() };
   });
   return patches;
 }
@@ -17781,6 +17809,12 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       }
       return next;
     }));
+    try {
+      const o0 = (orders || []).find((o) => o && o.id === orderId);
+      if (o0 && o0.status !== "shipped" && updates.recipient && String(updates.recipient.address || "").replace(/\s/g, "") !== String((o0.recipient && o0.recipient.address) || "").replace(/\s/g, "")) {
+        updateCustomerAddressesFromOrders([__spreadValues(__spreadValues({}, o0), updates)], true);
+      }
+    } catch (e) {}
     fireToast("\uC8FC\uBB38\uC774 \uC218\uC815\uB418\uC5C8\uC2B5\uB2C8\uB2E4");
   }
   function deleteOrder(orderId) {
@@ -18980,11 +19014,21 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
   function registerNewCustomersFromOrders(ordersToScan) {
     setCustomers((prevCustomers) => {
       const toAdd = findMissingCustomersFromOrders(ordersToScan, prevCustomers);
-      const merged = toAdd.length > 0 ? [...prevCustomers, ...toAdd] : prevCustomers;
+      let merged = toAdd.length > 0 ? [...prevCustomers, ...toAdd] : prevCustomers;
+      try { const ap = latestAddressPatches(ordersToScan, merged); if (Object.keys(ap).length) merged = merged.map((c) => c && ap[c.id] ? __spreadValues(__spreadValues({}, c), ap[c.id]) : c); } catch (e) {}
       const patches = syncCustomerAddressNotes(ordersToScan, merged);
       if (Object.keys(patches).length === 0) return merged;
       return merged.map((c) => patches[c.id] !== void 0 ? __spreadProps(__spreadValues({}, c), { memo: patches[c.id] }) : c);
     });
+  }
+  function updateCustomerAddressesFromOrders(list, force) {
+    try {
+      setCustomers((prev) => {
+        const ap = latestAddressPatches(list, prev, { force });
+        if (!Object.keys(ap).length) return prev;
+        return prev.map((c) => c && ap[c.id] ? __spreadValues(__spreadValues({}, c), ap[c.id]) : c);
+      });
+    } catch (e) {}
   }
   function backfillMissingCustomers() {
     const toAdd = findMissingCustomersFromOrders(orders, customers);
@@ -19476,6 +19520,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       if (bizNew.length) regenGroupInvoices(bizNew);
     } catch (e) {
     }
+    updateCustomerAddressesFromOrders(newOrders);
     // 대화 주문 등록 후 메시지 입력창 초기화
     setDraft((prev) => prev.message ? __spreadProps(__spreadValues({}, prev), { message: "" }) : prev);
     // 신규 상품 자동 등록 (DB에 없는 상품명 → 유사 상품 단가 복사 후 등록)
