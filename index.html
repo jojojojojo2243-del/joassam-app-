@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 298;
+const APP_VERSION = 299;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -407,7 +407,8 @@ function resolveOrderField(label, o) {
       const isBizByAddr = !isPersonName && /(정육점|쌈밥집|고깃집|삼겹살전문|베이커리카페)/.test(addr);
       const isBizByProduct = /채소\s*2\s*kg|채소2kg|업체용/i.test(product);
       const isBizByVolume = vol >= 5;
-      return (isBizByName || isBizByAddr || isBizByProduct || isBizByVolume) ? "\uC5C5\uCCB4" : "\uC77C\uBC18";
+      // v299: 박스 부피(5)만으로는 업체로 보지 않음 (일반 고객 1kg×2 = 부피 5)
+      return (isBizByName || isBizByAddr || isBizByProduct) ? "\uC5C5\uCCB4" : "\uC77C\uBC18";
     })()
   };
   return map[label] !== void 0 ? map[label] : "";
@@ -615,6 +616,35 @@ function findMatchingParty(name, phone, address, list) {
     return false;
   });
 }
+// v299: 주문이 '업체' 주문인지 판별할 때 쓰는 엄격한 업체 찾기
+//  - 전화번호(010·일반번호)가 업체 번호와 같으면 업체
+//  - 이름만 같을 때는: 전화번호가 서로 다르거나, 주소 지역(시·군·구)이 다르면 업체가 아님
+//    (업체 목록에 '이은주'·'박혜정' 같은 사람 이름이 있어도 같은 이름의 일반 고객이 업체로 바뀌지 않게)
+function __areaTokens(a) {
+  const out = new Set();
+  String(a || "").replace(/[(),]/g, " ").split(/\s+/).forEach((w) => { if (/^[가-힣]{1,6}(시|군|구)$/.test(w) && !/(특별|광역|자치)/.test(w)) out.add(w); });
+  return out;
+}
+function findVendorStrict(name, phone, address, vendors) {
+  const dg = (p) => String(p || "").replace(/\D/g, "");
+  const real = (p) => p.length >= 8 && !/^050/.test(p);
+  const ph = dg(phone), nm = String(name || "").replace(/\s/g, "");
+  const list = (vendors || []).filter((v) => v && v.name);
+  if (real(ph)) { const byPh = list.find((v) => dg(v.phone) === ph); if (byPh) return byPh; }
+  if (!nm) return null;
+  const at = __areaTokens(address);
+  return list.find((v) => {
+    if (String(v.name).replace(/\s/g, "") !== nm) return false;
+    const vp = dg(v.phone);
+    if (real(ph) && real(vp) && vp !== ph) return false;
+    const vt = __areaTokens(v.address);
+    const sameArea = at.size && vt.size && [...at].some((t) => vt.has(t));
+    if (at.size && vt.size && !sameArea) return false;
+    // 주문 쪽엔 진짜 번호가 있는데 업체엔 진짜 번호가 없으면(빈칸·안심번호) 이름만으로는 부족 → 주소 지역까지 같아야 업체
+    if (real(ph) && !real(vp) && !sameArea) return false;
+    return true;
+  }) || null;
+}
 function findAmbiguousConflict(name, phone, address, list) {
   const normPhone = (p) => String(p || "").replace(/[^0-9]/g, "");
   const ph = normPhone(phone);
@@ -711,7 +741,7 @@ function nextFilename(title) {
   } catch (e) {
   }
   const suffix = count > 1 ? `-${count - 1}` : "";
-  return `${title} ${dateStr}${suffix}.xlsx`;
+  return `${title} ${dateStr}${suffix}.xls`; // v299: Excel 97-2003 통합 문서(.xls)
 }
 const STORAGE_KEY = "gagyejangbu_data_v2";
 const FIREBASE_CONFIG = {
@@ -14423,7 +14453,7 @@ function JarvisButton({ orders, customers, products, tab, setTab, geminiKey, set
         @keyframes jbRing { 0%{opacity:0.9;transform:scale(1)} 70%{opacity:0;transform:scale(1.65)} 100%{opacity:0;transform:scale(1.65)} }
       `));
 }
-function downloadWorkbook(rows, sheetName, filename, columnOrder, rowFillFn) {
+function downloadWorkbook(rows, sheetName, filename, columnOrder, rowFillFn, opts) {
   var _a;
   const sheet = XLSX.utils.json_to_sheet(rows, columnOrder ? { header: columnOrder } : void 0);
   const range = XLSX.utils.decode_range(sheet["!ref"] || "A1");
@@ -14474,7 +14504,9 @@ function downloadWorkbook(rows, sheetName, filename, columnOrder, rowFillFn) {
   sheet["!cols"] = colW;
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, sheet, sheetName);
-  XLSX.writeFile(wb, filename);
+  // v299: 엑셀 파일은 Excel 97-2003 통합 문서(.xls)로 저장 — 단, 주문목록은 업체 색 구분을 위해 .xlsx 유지 (opts.xlsx)
+  if (opts && opts.xlsx) XLSX.writeFile(wb, String(filename).replace(/\.xls$/i, ".xlsx"));
+  else XLSX.writeFile(wb, String(filename).replace(/\.xlsx$/i, ".xls"), { bookType: "biff8" });
 }
 function readWorkbookFile(file, onRows, onError) {
   const reader = new FileReader();
@@ -18560,7 +18592,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     ws["!ref"] = "A1:" + A(SUM, NCOLS - 1);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "\uC815\uC0B0\uC11C");
-    XLSX.writeFile(wb, `\uAC70\uB798\uBA85\uC138\uC11C_${vName}_\uC815\uC0B0(${startDate}~${endDate}).xlsx`);
+    XLSX.writeFile(wb, `\uAC70\uB798\uBA85\uC138\uC11C_${vName}_\uC815\uC0B0(${startDate}~${endDate}).xlsx`); // 거래명세서는 표 테두리 때문에 .xlsx 유지
     fireToast(`${vName} \uC815\uC0B0\uC11C (\uAC70\uB798 ${list.length}\uAC74, \uD569\uACC4 ${grandTotal.toLocaleString()}\uC6D0)\uB97C \uB2E4\uC6B4\uB85C\uB4DC\uD588\uC5B4\uC694`);
   }
   function addInvoice(inv) {
@@ -18899,7 +18931,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     });
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, Number(mm) + "." + Number(dd));
-    XLSX.writeFile(wb, `\uAC70\uB798\uBA85\uC138\uC11C_${vName}_${dateStr.replace(/-/g, "")}.xlsx`);
+    XLSX.writeFile(wb, `\uAC70\uB798\uBA85\uC138\uC11C_${vName}_${dateStr.replace(/-/g, "")}.xlsx`); // 거래명세서는 표 테두리 때문에 .xlsx 유지
     fireToast(`${vName} \uAC70\uB798\uBA85\uC138\uC11C\uB97C \uC0DD\uC131\uD588\uC2B5\uB2C8\uB2E4`);
   }
   function changeCartQty(deliveryId, productId, delta) {
@@ -18933,9 +18965,7 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
   function deliveryTotal(d) {
     const ph = (d.phone || draft.sender.phone || "").replace(/-/g, "");
     const nm = (d.name || draft.sender.name || "").trim();
-    const biz = vendors.some(
-      (v) => ph && (v.phone || "").replace(/-/g, "") === ph || nm && v.name === nm
-    );
+    const biz = !!findVendorStrict(nm, ph, d.address || "", vendors);
     return Object.entries(d.cart || {}).reduce((sum, [productId, qty]) => {
       const p = productMap[productId];
       const price = p ? biz || p.channel === "business" ? p.wholesalePrice || p.price : p.price : 0;
@@ -19572,8 +19602,8 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     }
     const total = boxList.length;
     const batchId = total > 1 ? uid("batch") : "";
-    const voVendorId = vo.vendorId || ((vendors && vendors.find((v) => v.name && recipient && recipient.name && v.name === recipient.name)) || {}).id || "";
-    const voBiz = !!(vo.vendorId || (vendors && vendors.some((v) => v.name && recipient.name && v.name === recipient.name)));
+    const voVendorId = vo.vendorId || (findVendorStrict(recipient.name, recipient.phone, recipient.address, vendors) || {}).id || "";
+    const voBiz = !!voVendorId;
     // v280: 손 주문과 똑같이 주문할 때의 단가를 저장 (업체 개별 단가 → 도매가 → 소비자가 순)
     const priceOf = (it) => { const p = productMap[it.productId]; return p ? effectiveItemPrice({}, p, voBiz, voVendorId) : 0; };
     const newOrders = boxList.map((box, i) => applyFridayNoteIfNeeded({
@@ -19687,18 +19717,11 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     justSubmittedRef.current = true;
     const c = draft.customerId ? customerMap[draft.customerId] : null;
     const batchId = uid("batch");
-    const findVendorFor = (name, phone) => {
-      const ph = (phone || "").replace(/-/g, "");
-      const nm = (name || "").trim();
-      if (!ph && !nm) return null;
-      return vendors.find(
-        (v) => ph && (v.phone || "").replace(/-/g, "") === ph || nm && v.name && v.name === nm
-      ) || null;
-    };
+    const findVendorFor = (name, phone, address) => findVendorStrict(name, phone, address, vendors);
     const newOrders = activeDeliveries.flatMap((d, idx) => {
       const recipName = (c && draft.deliveries.length === 1 ? c.name : d.name) || draft.sender.name || "";
       const recipPhone = (c && draft.deliveries.length === 1 ? c.phone : d.phone) || draft.sender.phone || "";
-      const vendor = findVendorFor(recipName, recipPhone) || findVendorFor(draft.sender.name, draft.sender.phone);
+      const vendor = findVendorFor(recipName, recipPhone, d.address) || findVendorFor(draft.sender.name, draft.sender.phone, "");
       const biz = !!vendor || !!draft.isBusiness || !!draft.vendorId;
       const recipient = vendor ? {
         // 받는분 이름을 직접 입력하셨으면 그 이름을 그대로 쓰고(전화번호 우연 일치로 엉뚱한
@@ -19903,14 +19926,14 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
     const rowPrice = priceRaw ? Number(priceRaw) : 0;
     // 업체 판별
     const isBizByGubun = /업체/.test(gubunRaw);
-    const isBizByVendor = !!(recipName && findMatchingParty(recipName, "", "", vendors));
+    const isBizByVendor = !!(recipName && findVendorStrict(recipName, recipPhone, address, vendors));
     const isBizByProduct = /채소\s*2\s*kg|채소2kg|업체용/i.test(productText);
     // 이름이 일반 한글 이름이면 주소로 업체 판단 안 함
     const isPersonName2 = /^[가-힣]{2,5}$/.test((recipName||"").trim()) && typeof KO_SURNAMES !== "undefined" && KO_SURNAMES.has((recipName||"").trim()[0]);
     const isBizByName2 = !isPersonName2 && /(정육|식당|음식점|쌈밥|카페|마트|농장|베이커리|분식|고깃집|삼겹살|본점|지점|오송점|동남점|중앙점|매일소풍|대솔|하레하레|쌈채우리|우렁)/.test(recipName||"");
     const isBizByAddress = !isPersonName2 && /(정육점|쌈밥집|고깃집|삼겹살전문|베이커리카페)/.test(address);
-    const isBizByVolume = boxVolumeNum >= 5;
-    const isBiz = isBizByGubun || isBizByVendor || isBizByProduct || isBizByName2 || isBizByAddress || isBizByVolume;
+    // v299: 박스 부피(5)만으로는 업체로 보지 않음 — 일반 고객이 1kg 2개를 시키면 부피 5가 되어 업체로 잘못 분류됐음
+    const isBiz = isBizByGubun || isBizByVendor || isBizByProduct || isBizByName2 || isBizByAddress;
     const items = [];
     const unmatched = [];
     const squish = squishStr;
@@ -20292,12 +20315,15 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       if (!isPersonN && /(정육|식당|음식점|쌈밥|카페|마트|농장|베이커리|고깃집|삼겹살|본점|지점|오송점|동남점|중앙점|매일소풍|대솔|하레하레)/.test(rname)) return true;
       if (!isPersonN && /(정육점|쌈밥집|고깃집|삼겹살전문|베이커리카페)/.test(addr)) return true;
       if (/채소\s*2\s*kg|채소2kg|업체용/i.test(product)) return true;
-      if (vol >= 5) return true;
       return false;
     };
-    downloadWorkbook(rows, "Orders", nextFilename("\uC8FC\uBB38\uBAA9\uB85D"), orderTemplate, (row, i) => {
+    // v299: 맨 끝에 '구분 (일반 /업체)' 칸 추가 + 주문목록은 색 구분 위해 .xlsx 유지
+    const GB = "\uAD6C\uBD84 (\uC77C\uBC18 /\uC5C5\uCCB4)";
+    const cols1 = (orderTemplate || []).includes(GB) ? orderTemplate : [...(orderTemplate || []), GB];
+    rows.forEach((r, i) => { r[GB] = isBizFn(expanded[i]) ? "\uC5C5\uCCB4" : "\uC77C\uBC18"; });
+    downloadWorkbook(rows, "Orders", nextFilename("\uC8FC\uBB38\uBAA9\uB85D"), cols1, (row, i) => {
       return isBizFn(expanded[i]) ? "FAEEDA" : "FFFFFF";
-    });
+    }, { xlsx: true });
     const boxCount = expanded.length;
     const idsToAdvance = targets.filter((o) => o.status === "pending").map((o) => o.id);
     if (idsToAdvance.length > 0) {
@@ -20332,12 +20358,14 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       if (!isPersonN2 && /(정육|식당|음식점|쌈밥|카페|마트|농장|베이커리|고깃집|삼겹살|본점|지점|오송점|동남점|중앙점|매일소풍|대솔|하레하레)/.test(rname)) return true;
       if (!isPersonN2 && /(정육점|쌈밥집|고깃집|삼겹살전문|베이커리카페)/.test(addr)) return true;
       if (/채소\s*2\s*kg|채소2kg|업체용/i.test(product)) return true;
-      if (vol >= 5) return true;
       return false;
     };
-    downloadWorkbook(rows, "Orders", nextFilename("\uC8FC\uBB38\uBAA9\uB85D"), orderTemplate, (row, i) => {
+    const GB2 = "\uAD6C\uBD84 (\uC77C\uBC18 /\uC5C5\uCCB4)";
+    const cols2 = (orderTemplate || []).includes(GB2) ? orderTemplate : [...(orderTemplate || []), GB2];
+    rows.forEach((r, i) => { r[GB2] = isBizFn2(expanded[i]) ? "\uC5C5\uCCB4" : "\uC77C\uBC18"; });
+    downloadWorkbook(rows, "Orders", nextFilename("\uC8FC\uBB38\uBAA9\uB85D"), cols2, (row, i) => {
       return isBizFn2(expanded[i]) ? "FAEEDA" : "FFFFFF";
-    });
+    }, { xlsx: true });
     const boxCount = expanded.length;
     const idsToAdvance = list.filter((o) => o.status === "pending").map((o) => o.id);
     if (idsToAdvance.length > 0) {
@@ -20373,7 +20401,6 @@ ${FRIDAY_NOTE}` : FRIDAY_NOTE;
       if (!isPersonN3 && /(정육|식당|음식점|쌈밥|카페|마트|농장|베이커리|고깃집|삼겹살|본점|지점|오송점|동남점|중앙점|매일소풍|대솔|하레하레)/.test(rname)) return "FAEEDA";
       if (!isPersonN3 && /(정육점|쌈밥집|고깃집|삼겹살전문|베이커리카페)/.test(addr)) return "FAEEDA";
       if (/채소\s*2\s*kg|채소2kg|업체용/i.test(orderItemsText(o) || "")) return "FAEEDA";
-      if (Number(o.boxVolume) >= 5) return "FAEEDA";
       return "FFFFFF";
     });
     fireToast(`\uBC1C\uC1A1\uC900\uBE44 ${targets.length}\uAC74\uC744 \uBC15\uC2A4 ${expanded.length}\uAC1C(\uC1A1\uC7A5 ${expanded.length}\uAC1C)\uB85C \uB2E4\uC6B4\uB85C\uB4DC\uD588\uC2B5\uB2C8\uB2E4`);
