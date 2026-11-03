@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 300;
+const APP_VERSION = 301;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -188,6 +188,7 @@ const KO_ALERT_MAP = [
   [/outdated_client/g, "옛 버전이라 저장하지 않고 업데이트함"],
   [/Missing or insufficient permissions\.?|permission-denied/gi, "서버 접근 권한이 없어요"],
   [/Quota exceeded\.?|resource-exhausted/gi, "서버 사용 한도를 넘었어요 (잠시 후 다시 시도)"],
+  [/chunk_timeout/g, "서버 응답이 너무 늦어요 (25초)"],
   [/Failed to get document because the client is offline\.?|client is offline|unavailable/gi, "인터넷 연결이 끊겼어요"],
   [/deadline-exceeded/gi, "서버 응답 시간이 초과됐어요"],
   [/Transaction failed[^.]*\.?|failed-precondition|aborted/gi, "동시 저장 충돌"],
@@ -15605,6 +15606,11 @@ function App() {
     })();
   }, []);
   const loadedDataSigRef = useRef(null);
+  const loadStartRef = useRef(0); // v301: 자료 묶음 받기 시작한 시각 (멈춤 감시용)
+  const loadFailedRef = useRef(false); // v301: 마지막 불러오기가 실패했는지
+  const manifestRef = useRef({ o: 0, c: 0 }); // v301: 서버에 적힌 묶음 수 (불러온 뒤 비어 있는지 확인용)
+  const liveCountRef = useRef({ o: 0, c: 0 });
+  liveCountRef.current = { o: orders.length, c: customers.length };
   const snapSeqRef = useRef(0); // v241: 늦게 도착한 옛 데이터가 새 데이터를 덮지 않게
   // v244: 다른 기기 데이터를 받은 직후(화면이 아직 새로 그려지기 전)에 옛 목록으로 저장이 시작되면 방금 받은 주문을 "내가 지운 것"으로 오해해 지워버리는 문제 방지
   const applySeqRef = useRef(0);
@@ -15618,7 +15624,9 @@ function App() {
     if (!n) return Promise.resolve(null);
     const gets = [];
     // v233: 묶음 하나라도 못 받으면 일부만 반영되어 주문이 사라지므로, 3번까지 다시 받고 그래도 실패면 전체를 실패로 처리
-    const getOne = (i, tries) => fbDb.collection("stores").doc(idFn(i)).get().then((s) => {
+    // v301: 폰이 잠들었다 깨는 등 인터넷이 끊기면 받기가 끝없이 멈출 수 있어 25초가 지나면 실패로 보고 다시 받음
+    const withTimeout = (pr) => new Promise((res, rej) => { const t = setTimeout(() => rej(new Error("chunk_timeout")), 25000); pr.then((v) => { clearTimeout(t); res(v); }, (e) => { clearTimeout(t); rej(e); }); });
+    const getOne = (i, tries) => withTimeout(fbDb.collection("stores").doc(idFn(i)).get()).then((s) => {
       if (s.exists && s.data() && Array.isArray(s.data()[key])) return { arr: s.data()[key], sig: s.data().sig || null };
       throw new Error("chunk_missing_" + key + "_" + i);
     }).catch((e) => {
@@ -15793,12 +15801,14 @@ function App() {
             if (Array.isArray(data.subscriptions) && !listBusy) setSubscriptions(data.subscriptions);
             const hasManifest = typeof data.ordersChunkCount === "number" || typeof data.customersChunkCount === "number";
             if (hasManifest) {
+              try { manifestRef.current = { o: data.ordersChunkCount || 0, c: data.customersChunkCount || 0 }; } catch (e) {}
               const sig = String(data.dataSig || "");
               if (sig !== loadedDataSigRef.current) {
                 loadedDataSigRef.current = sig;
                 const archiveCount = typeof data.archiveChunkCount === "number" ? data.archiveChunkCount : 0;
                 const mySnapSeq = ++snapSeqRef.current;
                 // v244: 다른 기기가 저장하는 중이면 묶음(chunk)과 메인 서명이 잠시 어긋날 수 있음 → 아직 확정되지 않은 데이터를 "서버 데이터"로 믿지 않도록 잠시 뒤 다시 읽음
+                loadStartRef.current = Date.now(); loadFailedRef.current = false;
                 const fetchAllParts = () => Promise.all([
                   fetchRecordChunks(ordChunkDocId, data.ordersChunkCount || 0, "orders"),
                   fetchRecordChunks(cusChunkDocId, data.customersChunkCount || 0, "customers"),
@@ -15889,6 +15899,7 @@ function App() {
                   fbFirstLoadRef.current = true;
                 }).catch((err) => {
                   loadedDataSigRef.current = null;
+                  loadFailedRef.current = true;
                   // v233: 처음 불러오기가 실패했으면 저장을 열지 않음 (빈/일부 데이터로 서버를 덮는 것 방지)
                   try { logDiag("load_failed", { msg: String(err && err.message || err).slice(0, 80) }); } catch (e) {}
                   try { if (/permission|insufficient/i.test(String((err && (err.code + " " + err.message)) || err)) && onPermDenied()) return; } catch (e) {}
@@ -16035,6 +16046,45 @@ function App() {
     window.addEventListener("fab-shared", onFabShared);
     return () => { window.removeEventListener("fab-shared", onFabShared); try { delete window.__joassamShared; } catch (e) {} };
   }, [dataLoaded]);
+  // v301: 불러오기 감시 — 첫 불러오기가 실패했거나 30초 넘게 멈춰 있으면, 화면 복귀·인터넷 연결·15초마다 다시 불러옴
+  //  (폰이 잠든 사이 불러오기가 실패하면 앱을 다시 열어도 주문·고객이 0으로 멈춰 있던 문제)
+  useEffect(() => {
+    if (!firebaseReady) return;
+    let last = 0, emptySince = 0, emptyKicks = 0;
+    const kick = (why) => {
+      try {
+        const now = Date.now();
+        if (fbFirstLoadRef.current) {
+          // v301: 불러오기는 끝났다고 표시됐는데 서버엔 자료가 있는데 화면이 0건이면 (묶음이 안 맞거나 결과가 버려진 경우) 다시 불러옴
+          const m = manifestRef.current || {}, lc = liveCountRef.current || {};
+          const empty = (m.o > 0 && !lc.o) || (m.c > 0 && !lc.c);
+          if (!empty) { emptySince = 0; return; }
+          if (!emptySince) { emptySince = now; return; }
+          if (now - emptySince < 8000 || now - last < 30000 || emptyKicks >= 10) return;
+          last = now; emptyKicks++; emptySince = now;
+          try { logDiag("load_empty_retry", { why, o: m.o, c: m.c }); } catch (e) {}
+          loadStartRef.current = 0; loadFailedRef.current = false; loadedDataSigRef.current = null;
+          setReloadTick((t) => t + 1);
+          return;
+        }
+        const stuck = loadFailedRef.current || (loadStartRef.current && now - loadStartRef.current > 30000) || (!loadStartRef.current && now - pageStartMs > 20000);
+        if (!stuck || now - last < 8000) return;
+        last = now;
+        try { logDiag("load_watchdog_retry", { why }); } catch (e) {}
+        loadStartRef.current = 0; loadFailedRef.current = false; loadedDataSigRef.current = null;
+        setReloadTick((t) => t + 1);
+      } catch (e) {}
+    };
+    const pageStartMs = Date.now();
+    const onVis = () => { if (document.visibilityState === "visible") kick("visible"); };
+    const onOn = () => kick("online");
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("online", onOn);
+    window.addEventListener("focus", onVis);
+    const iv = setInterval(() => { if (document.visibilityState !== "hidden") kick("timer"); }, 15000);
+    window.__joassamResume = () => kick("app_resume");
+    return () => { document.removeEventListener("visibilitychange", onVis); window.removeEventListener("online", onOn); window.removeEventListener("focus", onVis); clearInterval(iv); try { delete window.__joassamResume; } catch (e) {} };
+  }, []);
   const saveTimerRef = useRef(null);
   const saveGenRef = useRef(0); // v221: 가장 최신 저장만 서버에 쓰기
   const resurrectRef = useRef(new Set()); // v241: 되돌리기로 되살린 주문 번호 (서버의 '삭제됨' 표시를 지우기 위해)
@@ -16088,7 +16138,15 @@ function App() {
       const raw = localStorage.getItem("joassam_last_counts_" + DATA_DOC);
       if (raw) storedFloor = JSON.parse(raw);
     } catch (e) {}
-    const guard = evaluateSaveGuard({ current: { customers: data.customers, orders: data.orders, products: data.products, vendors: data.vendors }, prev: lastGoodDataRef.current, storedFloor, allow: allowDropRef.current });
+    let guard = evaluateSaveGuard({ current: { customers: data.customers, orders: data.orders, products: data.products, vendors: data.vendors }, prev: lastGoodDataRef.current, storedFloor, allow: allowDropRef.current });
+    // v301: 새 앱·새 기기는 예전 개수 기록이 없어 위 검사가 못 막음 → 서버에 고객·주문 묶음이 있는데 내 화면이 0이면 저장 막음 (서버 자료를 0으로 덮는 것 방지)
+    try {
+      if (!guard.blocked) {
+        const m = manifestRef.current || {};
+        if (m.c > 0 && !(data.customers || []).length) guard = { blocked: true, reason: "customers_dropped_to_empty" };
+        else if (m.o > 0 && !(data.orders || []).length) guard = { blocked: true, reason: "orders_dropped_to_empty" };
+      }
+    } catch (e) {}
     if (guard.blocked) {
       fireToast("⚠ 데이터 소실 위험 감지 — 저장을 막았어요. 알림창을 확인해주세요");
       const cur = { 고객: (data.customers||[]).length, 주문: (data.orders||[]).length, 상품: (data.products||[]).length, 업체: (data.vendors||[]).length };
@@ -21591,7 +21649,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
           blocked_customers_dropped_by_half: "🚨 고객 절반 이상 감소 차단", blocked_orders_dropped_by_half: "🚨 주문 절반 이상 감소 차단", blocked_products_dropped_by_half: "🚨 상품 절반 이상 감소 차단", blocked_vendors_dropped_by_half: "🚨 업체 절반 이상 감소 차단",
           stale_version_detected: "⚠️ 옛 버전 화면 감지 (저장 차단)", outdated_client_blocked: "⚠️ 옛 버전이라 저장 막음",
           save_failed: "❌ 저장 실패", save_alert_error: "❌ 저장 최종 실패 알림", stale_save_dropped: "↩️ 오래된 저장 취소 (더 새 저장으로 대체)",
-          load_failed: "⚠️ 불러오기 실패 (자동 재시도)", empty_load_rejected: "⚠️ 비어 보이는 데이터 거부 (다시 불러옴)", preflight_failed: "⚠️ 저장 전 서버 확인 실패",
+          load_failed: "⚠️ 불러오기 실패 (자동 재시도)", load_watchdog_retry: "🔄 멈춘 불러오기 다시 시작", load_empty_retry: "🔄 불러왔는데 비어 있어 다시 불러옴", empty_load_rejected: "⚠️ 비어 보이는 데이터 거부 (다시 불러옴)", preflight_failed: "⚠️ 저장 전 서버 확인 실패",
           quota_exceeded_wait: "⏳ 서버 하루 한도 초과 (대기)", save_conflict_retry: "🔁 다른 기기와 동시 저장 → 다시 맞춤",
           chunks_settled_after_retry: "✅ 묶음 맞춰짐 (다시 읽은 뒤)", chunks_mismatch_gave_up: "⚠️ 묶음이 계속 안 맞음",
           restored_unsynced_orders: "♻️ 저장 못 한 주문 복원", restored_recent_orders: "♻️ 빠진 최근 주문 복원", dropped_tombstoned_orders: "🗑️ 지운 주문 다시 안 나오게 거름",
