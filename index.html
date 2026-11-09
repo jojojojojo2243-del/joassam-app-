@@ -54,7 +54,7 @@ var __spreadValues = (a, b) => {
 var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 const { useState, useMemo, useRef, useEffect } = React;
 const IS_TEST = typeof window !== "undefined" && /test/i.test(window.location.hostname + window.location.pathname);
-const APP_VERSION = 301;
+const APP_VERSION = 302;
 const SAFE_MIN_VERSION = 149;
 const DATA_DOC = IS_TEST ? "test_main" : "main";
 const RECORD_CHUNK_SIZE = 400;
@@ -761,6 +761,8 @@ if (firebaseReady) {
     firebase.initializeApp(FIREBASE_CONFIG);
     fbAuth = firebase.auth();
     fbDb = firebase.firestore();
+    // v302: 통신사·와이파이에 따라 실시간 연결(스트리밍)이 막히는 경우 자동으로 다른 방식(롱폴링)으로 연결
+    try { fbDb.settings({ experimentalAutoDetectLongPolling: true }); } catch (e) {}
   } catch (e) {
     fbAuth = firebase.auth();
     fbDb = firebase.firestore();
@@ -15608,6 +15610,11 @@ function App() {
   const loadedDataSigRef = useRef(null);
   const loadStartRef = useRef(0); // v301: 자료 묶음 받기 시작한 시각 (멈춤 감시용)
   const loadFailedRef = useRef(false); // v301: 마지막 불러오기가 실패했는지
+  const loadProgressRef = useRef(0); // v302: 자료 묶음이 마지막으로 하나라도 도착한 시각 (느린 인터넷은 '멈춤'이 아님)
+  const chunkCacheRef = useRef({ sig: null, map: {} }); // v302: 이미 받은 묶음 보관 → 다시 시작해도 처음부터 받지 않음
+  const mainHandlerRef = useRef(null); // v302: 실시간 연결이 막혔을 때 직접 받아 온 메인 자료를 같은 방식으로 처리
+  const srvSnapRef = useRef(0); // v302: 실시간 연결로 서버 자료를 받은 횟수
+  const [loadInfo, setLoadInfo] = useState({ active: false, done: 0, total: 0 }); // v302: 불러오는 중 표시
   const manifestRef = useRef({ o: 0, c: 0 }); // v301: 서버에 적힌 묶음 수 (불러온 뒤 비어 있는지 확인용)
   const liveCountRef = useRef({ o: 0, c: 0 });
   liveCountRef.current = { o: orders.length, c: customers.length };
@@ -15618,18 +15625,31 @@ function App() {
   const latestSeqRef = useRef(0);
   const staleDeferRef = useRef(0);
   const renderApplySeq = applySeqRef.current;
-  function fetchRecordChunks(idFn, count, key) {
+  function fetchRecordChunks(idFn, count, key, cacheSig) {
     const n = count || 0;
     // count가 0이면 null 반환 (빈 배열로 덮어쓰는 것 방지)
     if (!n) return Promise.resolve(null);
     const gets = [];
     // v233: 묶음 하나라도 못 받으면 일부만 반영되어 주문이 사라지므로, 3번까지 다시 받고 그래도 실패면 전체를 실패로 처리
     // v301: 폰이 잠들었다 깨는 등 인터넷이 끊기면 받기가 끝없이 멈출 수 있어 25초가 지나면 실패로 보고 다시 받음
-    const withTimeout = (pr) => new Promise((res, rej) => { const t = setTimeout(() => rej(new Error("chunk_timeout")), 25000); pr.then((v) => { clearTimeout(t); res(v); }, (e) => { clearTimeout(t); rej(e); }); });
-    const getOne = (i, tries) => withTimeout(fbDb.collection("stores").doc(idFn(i)).get()).then((s) => {
-      if (s.exists && s.data() && Array.isArray(s.data()[key])) return { arr: s.data()[key], sig: s.data().sig || null };
+    // v302: 느린 인터넷에서 큰 묶음은 25초 넘게 걸릴 수 있음 → '1분 넘게 어떤 묶음도 안 옴'일 때만 실패로 봄 (예전엔 25초에 끊고 처음부터 다시 받아 끝없이 0건)
+    const withTimeout = (pr) => new Promise((res, rej) => {
+      const st = Date.now();
+      const iv = setInterval(() => { const now = Date.now(); if (now - st > 60000 && now - (loadProgressRef.current || 0) > 60000) { clearInterval(iv); rej(new Error("chunk_timeout")); } }, 5000);
+      pr.then((v) => { clearInterval(iv); res(v); }, (e) => { clearInterval(iv); rej(e); });
+    });
+    const cache = cacheSig ? chunkCacheRef.current : null;
+    if (cache && cache.sig !== cacheSig) { cache.sig = cacheSig; cache.map = {}; }
+    const getOne = (i, tries) => (cache && cache.map[idFn(i)] ? Promise.resolve(cache.map[idFn(i)]) : withTimeout(fbDb.collection("stores").doc(idFn(i)).get()).then((s) => {
+      if (s.exists && s.data() && Array.isArray(s.data()[key])) {
+        const got = { arr: s.data()[key], sig: s.data().sig || null };
+        loadProgressRef.current = Date.now();
+        if (cache && cache.sig === cacheSig) cache.map[idFn(i)] = got;
+        if (cacheSig) { try { setLoadInfo((p) => (p.active ? { active: true, done: p.done + 1, total: p.total } : p)); } catch (e) {} }
+        return got;
+      }
       throw new Error("chunk_missing_" + key + "_" + i);
-    }).catch((e) => {
+    })).catch((e) => {
       if (tries < 3) return new Promise((r) => setTimeout(r, 700 * (tries + 1))).then(() => getOne(i, tries + 1));
       throw e;
     });
@@ -15780,11 +15800,11 @@ function App() {
       if (attached) return;
       attached = true;
       const docRef = fbDb.collection("stores").doc(DATA_DOC);
-      unsubData = docRef.onSnapshot(
-        (snap) => {
+      const onMainSnap = (snap, viaGet) => {
           if (snap.metadata && snap.metadata.fromCache) {
             return;
           }
+          if (!viaGet) srvSnapRef.current++;
           if (snap.exists) {
             const data = snap.data();
             if (data.fullSig) syncedSigRef.current = data.fullSig;
@@ -15808,10 +15828,12 @@ function App() {
                 const archiveCount = typeof data.archiveChunkCount === "number" ? data.archiveChunkCount : 0;
                 const mySnapSeq = ++snapSeqRef.current;
                 // v244: 다른 기기가 저장하는 중이면 묶음(chunk)과 메인 서명이 잠시 어긋날 수 있음 → 아직 확정되지 않은 데이터를 "서버 데이터"로 믿지 않도록 잠시 뒤 다시 읽음
-                loadStartRef.current = Date.now(); loadFailedRef.current = false;
+                loadStartRef.current = Date.now(); loadFailedRef.current = false; loadProgressRef.current = Date.now();
+                try { setLoadInfo({ active: true, done: 0, total: (data.ordersChunkCount || 0) + (data.customersChunkCount || 0) }); } catch (e) {}
+                let useCache = true; // v302: 처음엔 받아 둔 묶음을 다시 씀, 묶음이 안 맞아 다시 받을 때는 새로 받음
                 const fetchAllParts = () => Promise.all([
-                  fetchRecordChunks(ordChunkDocId, data.ordersChunkCount || 0, "orders"),
-                  fetchRecordChunks(cusChunkDocId, data.customersChunkCount || 0, "customers"),
+                  fetchRecordChunks(ordChunkDocId, data.ordersChunkCount || 0, "orders", useCache ? sig : null),
+                  fetchRecordChunks(cusChunkDocId, data.customersChunkCount || 0, "customers", useCache ? sig : null),
                   archiveCount > 0 ? loadArchiveChunks(archiveCount) : Promise.resolve([])
                 ]);
                 const partsConsistent = (res) => {
@@ -15829,6 +15851,7 @@ function App() {
                     return res;
                   }
                   // 기다리는 동안 내가 이미 더 새 데이터를 저장했거나 더 새 서버 데이터를 받았다면, 이 옛 데이터는 버림 (늦게 적용되어 내 최신 수정을 되돌리는 것 방지)
+                  useCache = false; try { chunkCacheRef.current = { sig: null, map: {} }; } catch (e) {}
                   return new Promise((r) => setTimeout(r, 600 + attempt * 300)).then(() => (mySnapSeq !== snapSeqRef.current ? res : (loadedDataSigRef.current !== sig ? null : fetchConsistent(attempt + 1))));
                 });
                 fetchConsistent(0).then((res) => {
@@ -15897,9 +15920,11 @@ function App() {
                   try { lastOrdSigsRef.current = (res[0] && res[0].__sigs) || []; lastCusSigsRef.current = (res[1] && res[1].__sigs) || []; } catch (e) {}
                   appliedDataSigRef.current = sig;
                   fbFirstLoadRef.current = true;
+                  try { setLoadInfo({ active: false, done: 0, total: 0 }); chunkCacheRef.current = { sig: null, map: {} }; } catch (e) {}
                 }).catch((err) => {
                   loadedDataSigRef.current = null;
                   loadFailedRef.current = true;
+                  try { setLoadInfo({ active: false, done: 0, total: 0 }); } catch (e) {}
                   // v233: 처음 불러오기가 실패했으면 저장을 열지 않음 (빈/일부 데이터로 서버를 덮는 것 방지)
                   try { logDiag("load_failed", { msg: String(err && err.message || err).slice(0, 80) }); } catch (e) {}
                   try { if (/permission|insufficient/i.test(String((err && (err.code + " " + err.message)) || err)) && onPermDenied()) return; } catch (e) {}
@@ -15908,7 +15933,8 @@ function App() {
                 });
               } else {
                 // 이미 로드된 sig → 바로 설정
-                fbFirstLoadRef.current = true;
+                // v302: 같은 자료를 아직 받는 중이면(화면에 적용 전) '불러오기 끝'으로 표시하지 않음 → 0건인 채로 저장이 열리는 것 방지
+                if (appliedDataSigRef.current === sig || !loadStartRef.current || loadFailedRef.current) fbFirstLoadRef.current = true;
               }
             } else {
               if (data.orders && data.orders.length > 0) applyOrdersArray(data.orders);
@@ -15955,7 +15981,10 @@ function App() {
             }
           }
           setDataLoaded(true);
-        },
+        };
+      mainHandlerRef.current = onMainSnap;
+      unsubData = docRef.onSnapshot(
+        (snap) => onMainSnap(snap, false),
         (err) => {
           setDataLoaded(true);
           try { if (/permission|insufficient/i.test(String((err && (err.code + " " + err.message)) || err)) && onPermDenied()) return; } catch (e) {}
@@ -16046,16 +16075,25 @@ function App() {
     window.addEventListener("fab-shared", onFabShared);
     return () => { window.removeEventListener("fab-shared", onFabShared); try { delete window.__joassamShared; } catch (e) {} };
   }, [dataLoaded]);
-  // v301: 불러오기 감시 — 첫 불러오기가 실패했거나 30초 넘게 멈춰 있으면, 화면 복귀·인터넷 연결·15초마다 다시 불러옴
-  //  (폰이 잠든 사이 불러오기가 실패하면 앱을 다시 열어도 주문·고객이 0으로 멈춰 있던 문제)
+  // v301/v302: 불러오기 감시 — 첫 불러오기가 실패했거나 오래 아무 진행이 없으면, 화면 복귀·인터넷 연결·15초마다 다시 불러옴
+  //  v302: 인터넷이 느려 오래 걸리는 것은 '멈춤'이 아님 → 묶음이 계속 도착하는 동안은 끊지 않음 (11/9 밤 끝없이 다시 시작하며 0건이던 문제)
+  //  v302: 실시간 연결이 막혀 서버 자료가 안 오면 메인 자료를 직접 받아 와서 불러옴
   useEffect(() => {
     if (!firebaseReady) return;
-    let last = 0, emptySince = 0, emptyKicks = 0;
+    let last = 0, emptySince = 0, emptyKicks = 0, lastPoll = Date.now();
+    const directGet = (why) => {
+      try {
+        fbDb.collection("stores").doc(DATA_DOC).get().then((s) => { try { if (mainHandlerRef.current && s) mainHandlerRef.current(s, true); } catch (e) {} })
+          .catch((err) => { try { logDiag("load_direct_failed", { why, msg: String(err && err.message || err).slice(0, 80) }); } catch (e) {} });
+      } catch (e) {}
+    };
     const kick = (why) => {
       try {
         const now = Date.now();
         if (fbFirstLoadRef.current) {
-          // v301: 불러오기는 끝났다고 표시됐는데 서버엔 자료가 있는데 화면이 0건이면 (묶음이 안 맞거나 결과가 버려진 경우) 다시 불러옴
+          // v302: 실시간 연결로 서버 자료가 한 번도 안 왔으면(직접 받아서 불러온 경우) 1분마다 직접 확인 → 다른 기기 변경도 반영
+          if (!srvSnapRef.current && now - lastPoll > 60000) { lastPoll = now; directGet("poll"); }
+          // v301: 불러오기는 끝났다고 표시됐는데 서버엔 자료가 있는데 화면이 0건이면 다시 불러옴
           const m = manifestRef.current || {}, lc = liveCountRef.current || {};
           const empty = (m.o > 0 && !lc.o) || (m.c > 0 && !lc.c);
           if (!empty) { emptySince = 0; return; }
@@ -16067,10 +16105,21 @@ function App() {
           setReloadTick((t) => t + 1);
           return;
         }
-        const stuck = loadFailedRef.current || (loadStartRef.current && now - loadStartRef.current > 30000) || (!loadStartRef.current && now - pageStartMs > 20000);
-        if (!stuck || now - last < 8000) return;
+        const inProgress = !!loadStartRef.current && !loadFailedRef.current;
+        // 받는 중: 마지막 묶음이 도착한 지 2분 30초가 넘어야 멈춘 것으로 봄
+        if (inProgress && now - Math.max(loadStartRef.current, loadProgressRef.current || 0) < 150000) return;
+        const noData = !loadStartRef.current;
+        const stuck = loadFailedRef.current || inProgress || (noData && now - pageStartMs > 20000);
+        if (!stuck || now - last < 12000) return;
         last = now;
-        try { logDiag("load_watchdog_retry", { why }); } catch (e) {}
+        const stage = noData ? (srvSnapRef.current ? "no_manifest" : "no_server_data") : (loadFailedRef.current ? "failed" : "stalled");
+        try { logDiag("load_watchdog_retry", { why, stage, srv: srvSnapRef.current, online: typeof navigator !== "undefined" ? navigator.onLine : null, authed: !!(fbAuth && fbAuth.currentUser) }); } catch (e) {}
+        if (noData) {
+          // 실시간 연결로 아무것도 안 옴 → 직접 받아 오기 + 다시 연결
+          directGet(why);
+          setReloadTick((t) => t + 1);
+          return;
+        }
         loadStartRef.current = 0; loadFailedRef.current = false; loadedDataSigRef.current = null;
         setReloadTick((t) => t + 1);
       } catch (e) {}
@@ -21649,7 +21698,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
           blocked_customers_dropped_by_half: "🚨 고객 절반 이상 감소 차단", blocked_orders_dropped_by_half: "🚨 주문 절반 이상 감소 차단", blocked_products_dropped_by_half: "🚨 상품 절반 이상 감소 차단", blocked_vendors_dropped_by_half: "🚨 업체 절반 이상 감소 차단",
           stale_version_detected: "⚠️ 옛 버전 화면 감지 (저장 차단)", outdated_client_blocked: "⚠️ 옛 버전이라 저장 막음",
           save_failed: "❌ 저장 실패", save_alert_error: "❌ 저장 최종 실패 알림", stale_save_dropped: "↩️ 오래된 저장 취소 (더 새 저장으로 대체)",
-          load_failed: "⚠️ 불러오기 실패 (자동 재시도)", load_watchdog_retry: "🔄 멈춘 불러오기 다시 시작", load_empty_retry: "🔄 불러왔는데 비어 있어 다시 불러옴", empty_load_rejected: "⚠️ 비어 보이는 데이터 거부 (다시 불러옴)", preflight_failed: "⚠️ 저장 전 서버 확인 실패",
+          load_failed: "⚠️ 불러오기 실패 (자동 재시도)", load_watchdog_retry: "🔄 멈춘 불러오기 다시 시작", load_direct_failed: "⚠️ 서버에서 직접 받기 실패", load_empty_retry: "🔄 불러왔는데 비어 있어 다시 불러옴", empty_load_rejected: "⚠️ 비어 보이는 데이터 거부 (다시 불러옴)", preflight_failed: "⚠️ 저장 전 서버 확인 실패",
           quota_exceeded_wait: "⏳ 서버 하루 한도 초과 (대기)", save_conflict_retry: "🔁 다른 기기와 동시 저장 → 다시 맞춤",
           chunks_settled_after_retry: "✅ 묶음 맞춰짐 (다시 읽은 뒤)", chunks_mismatch_gave_up: "⚠️ 묶음이 계속 안 맞음",
           restored_unsynced_orders: "♻️ 저장 못 한 주문 복원", restored_recent_orders: "♻️ 빠진 최근 주문 복원", dropped_tombstoned_orders: "🗑️ 지운 주문 다시 안 나오게 거름",
@@ -21855,6 +21904,7 @@ ${r.message}`).join("\n\n\u2015\u2015\u2015\n\n");
         }
       }
     ),
+    loadInfo.active && /* @__PURE__ */ React.createElement("div", { style: { position: "fixed", top: "calc(env(safe-area-inset-top, 0px) + 74px)", left: "50%", transform: "translateX(-50%)", zIndex: 9000, background: "#1f5132", color: "#fff", padding: "8px 14px", borderRadius: 18, fontSize: 13, fontWeight: 700, boxShadow: "0 2px 10px rgba(0,0,0,.25)", maxWidth: "92vw", whiteSpace: "nowrap", textAlign: "center", lineHeight: 1.4, pointerEvents: "none" } }, "📥 불러오는 중" + (loadInfo.total ? ` ${Math.min(loadInfo.done, loadInfo.total)}/${loadInfo.total}` : "") + " · 자료는 그대로 있어요"),
     sideMenuOpen && /* @__PURE__ */ React.createElement(
       SideMenuDrawer,
       {
